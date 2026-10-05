@@ -223,6 +223,25 @@ func TestLstatExistsSkipsMtimeDatabase(t *testing.T) {
 	if _, err := LstatExists(wrapped, "missing"); !IsNotExist(err) {
 		t.Fatalf("LstatExists missing file: %v", err)
 	}
+
+	// The live home folder stacks case conflict detection outside mtimeFS.
+	// Skipping mtime lookups must not also skip that wrapper.
+	stacked := NewFilesystem(FilesystemTypeBasic, dir, &OptionDetectCaseConflicts{}, NewMtimeOption(db, ""))
+	getsBefore = db.gets
+	if _, err := LstatExists(stacked, "file"); err != nil {
+		t.Fatal(err)
+	}
+	if db.gets != getsBefore {
+		t.Fatalf("LstatExists through casefs should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+	}
+	if build.IsDarwin || build.IsWindows {
+		if _, err := LstatExists(stacked, "FILE"); !IsErrCaseConflict(err) {
+			t.Fatalf("LstatExists should still report case conflicts, got %v", err)
+		}
+		if db.gets != getsBefore {
+			t.Fatalf("case-conflict LstatExists should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+		}
+	}
 }
 
 func TestMtimeFSInsensitive(t *testing.T) {
