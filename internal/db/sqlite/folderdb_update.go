@@ -7,8 +7,11 @@
 package sqlite
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -134,6 +137,14 @@ func (s *folderDB) Update(device protocol.DeviceID, fs []protocol.FileInfo, opti
 			return wrap(err, "insert version")
 		}
 
+		var newHash []byte
+		if blockshash != nil {
+			newHash = *blockshash
+		}
+		if err := retireReplacedBlocklist(txp, deviceIdx, nameIdx, newHash); err != nil {
+			return wrap(err)
+		}
+
 		var localSeq int64
 		if err := insertFileStmt.Get(&localSeq, deviceIdx, remoteSeq, f.Type, f.ModTime().UnixNano(), f.Size, f.IsDeleted(), f.LocalFlags, blockshash, nameIdx, versionIdx); err != nil {
 			return wrap(err, "insert file")
@@ -184,6 +195,72 @@ func (s *folderDB) Update(device protocol.DeviceID, fs []protocol.FileInfo, opti
 	return nil
 }
 
+func enqueueRetiredBlocklist(txp *txPreparedStmts, hash []byte) error {
+	if len(hash) == 0 {
+		return nil
+	}
+	stmt, err := txp.Preparex(`
+		INSERT OR IGNORE INTO gc_retired_blocklists (blocklist_hash)
+		VALUES (?)
+	`)
+	if err != nil {
+		return wrap(err, "prepare retire blocklist")
+	}
+	_, err = stmt.Exec(hash)
+	return wrap(err, "retire blocklist")
+}
+
+func retireReplacedBlocklist(txp *txPreparedStmts, deviceIdx, nameIdx int64, newHash []byte) error {
+	stmt, err := txp.Preparex(`
+		SELECT blocklist_hash FROM files
+		WHERE device_idx = ? AND name_idx = ?
+	`)
+	if err != nil {
+		return wrap(err, "prepare select old blocklist")
+	}
+	var old []byte
+	if err := stmt.Get(&old, deviceIdx, nameIdx); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return wrap(err, "select old blocklist")
+	}
+	if len(old) == 0 || bytes.Equal(old, newHash) {
+		return nil
+	}
+	return enqueueRetiredBlocklist(txp, old)
+}
+
+func retireBlocklistsForDevice(txp *txPreparedStmts, deviceIdx int64) error {
+	stmt, err := txp.Preparex(`
+		INSERT OR IGNORE INTO gc_retired_blocklists (blocklist_hash)
+		SELECT DISTINCT blocklist_hash FROM files
+		WHERE device_idx = ? AND blocklist_hash IS NOT NULL
+	`)
+	if err != nil {
+		return wrap(err, "prepare retire device blocklists")
+	}
+	_, err = stmt.Exec(deviceIdx)
+	return wrap(err, "retire device blocklists")
+}
+
+func retireBlocklistsForNamedFiles(txp *txPreparedStmts, deviceIdx int64, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	query, args, err := sqlx.In(`
+		INSERT OR IGNORE INTO gc_retired_blocklists (blocklist_hash)
+		SELECT DISTINCT f.blocklist_hash FROM files f
+		INNER JOIN file_names n ON n.idx = f.name_idx
+		WHERE f.device_idx = ? AND n.name IN (?) AND f.blocklist_hash IS NOT NULL
+	`, deviceIdx, names)
+	if err != nil {
+		return wrap(err, "prepare retire named blocklists")
+	}
+	_, err = txp.Exec(query, args...)
+	return wrap(err, "retire named blocklists")
+}
+
 func (s *folderDB) DropDevice(device protocol.DeviceID) error {
 	if device == protocol.LocalDeviceID {
 		panic("bug: cannot drop local device")
@@ -198,6 +275,17 @@ func (s *folderDB) DropDevice(device protocol.DeviceID) error {
 	}
 	defer tx.Rollback() //nolint:errcheck
 	txp := &txPreparedStmts{Tx: tx}
+
+	var deviceIdx int64
+	if err := tx.Get(&deviceIdx, `SELECT idx FROM devices WHERE device_id = ?`, device.String()); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return wrap(tx.Commit())
+		}
+		return wrap(err)
+	}
+	if err := retireBlocklistsForDevice(txp, deviceIdx); err != nil {
+		return wrap(err)
+	}
 
 	// Drop the device, which cascades to delete all files etc for it
 	if _, err := tx.Exec(`DELETE FROM devices WHERE device_id = ?`, device.String()); err != nil {
@@ -235,6 +323,10 @@ func (s *folderDB) DropAllFiles(device protocol.DeviceID) error {
 		UPDATE indexids SET sequence = 0
 		WHERE device_idx = ?
 	`, deviceIdx); err != nil {
+		return wrap(err)
+	}
+
+	if err := retireBlocklistsForDevice(txp, deviceIdx); err != nil {
 		return wrap(err)
 	}
 
@@ -280,6 +372,10 @@ func (s *folderDB) DropFilesNamed(device protocol.DeviceID, names []string) erro
 	}
 	defer tx.Rollback() //nolint:errcheck
 	txp := &txPreparedStmts{Tx: tx}
+
+	if err := retireBlocklistsForNamedFiles(txp, deviceIdx, names); err != nil {
+		return wrap(err)
+	}
 
 	// Drop the named files
 
