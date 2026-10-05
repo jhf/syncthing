@@ -180,6 +180,51 @@ func TestMtimeFSOpen(t *testing.T) {
 	}
 }
 
+func TestLstatExistsSkipsMtimeDatabase(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db := &countingStore{mapStore: make(mapStore)}
+	mtimefs := newMtimeFS(dir, db)
+	mtimefs.chtimes = failChtimes
+
+	newTime := time.Now().Add(-2 * time.Hour)
+	if err := mtimefs.Chtimes("file", newTime, newTime); err != nil {
+		t.Fatal(err)
+	}
+
+	getsBefore := db.gets
+	info, err := mtimefs.Lstat("file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(newTime) {
+		t.Fatalf("Lstat should use virtual mtime, got %v want %v", info.ModTime(), newTime)
+	}
+	if db.gets <= getsBefore {
+		t.Fatalf("Lstat should consult the mtime database, gets=%d", db.gets)
+	}
+
+	wrapped := NewFilesystem(FilesystemTypeBasic, dir, NewMtimeOption(db, ""))
+	getsBefore = db.gets
+	exists, err := LstatExists(wrapped, "file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists.ModTime().Equal(newTime) {
+		t.Fatal("LstatExists should not apply the virtual mtime")
+	}
+	if db.gets != getsBefore {
+		t.Fatalf("LstatExists should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+	}
+
+	if _, err := LstatExists(wrapped, "missing"); !IsNotExist(err) {
+		t.Fatalf("LstatExists missing file: %v", err)
+	}
+}
+
 func TestMtimeFSInsensitive(t *testing.T) {
 	if build.IsDarwin || build.IsWindows {
 		// blatantly assume file systems here are case insensitive. Might be
@@ -225,6 +270,16 @@ func TestMtimeFSInsensitive(t *testing.T) {
 }
 
 // The mapStore is a simple database
+
+type countingStore struct {
+	mapStore
+	gets int
+}
+
+func (s *countingStore) GetMtime(folder, name string) (real, virtual time.Time) {
+	s.gets++
+	return s.mapStore.GetMtime(folder, name)
+}
 
 type mapStore map[string][2]time.Time
 
