@@ -47,7 +47,7 @@ func TraversesSymlink(filesystem fs.Filesystem, name string) error {
 	var path string
 	for _, part := range fs.PathComponents(name) {
 		path = filepath.Join(path, part)
-		info, err := filesystem.Lstat(path)
+		info, err := fs.LstatExists(filesystem, path)
 		if err != nil {
 			if fs.IsNotExist(err) {
 				return nil
