@@ -8,6 +8,7 @@ package fs
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -227,6 +228,28 @@ func TestLstatExistsSkipsMtimeDatabase(t *testing.T) {
 	// The live home folder stacks case conflict detection outside mtimeFS.
 	// Skipping mtime lookups must not also skip that wrapper.
 	stacked := NewFilesystem(FilesystemTypeBasic, dir, &OptionDetectCaseConflicts{}, NewMtimeOption(db, ""))
+	var stack []string
+	for fs := stacked; fs != nil; {
+		stack = append(stack, fmt.Sprintf("%T", fs))
+		w, ok := fs.(wrappingFilesystem)
+		if !ok {
+			break
+		}
+		next, ok := w.underlying()
+		if !ok {
+			break
+		}
+		fs = next
+	}
+	wantPrefix := []string{"*fs.caseFilesystem", "*fs.walkFilesystem", "*fs.metricsFS", "*fs.mtimeFS"}
+	if len(stack) < len(wantPrefix) {
+		t.Fatalf("wrapper stack too short: %v", stack)
+	}
+	for i, want := range wantPrefix {
+		if stack[i] != want {
+			t.Fatalf("wrapper stack %v, want prefix %v", stack, wantPrefix)
+		}
+	}
 	getsBefore = db.gets
 	if _, err := LstatExists(stacked, "file"); err != nil {
 		t.Fatal(err)
@@ -234,6 +257,21 @@ func TestLstatExistsSkipsMtimeDatabase(t *testing.T) {
 	if db.gets != getsBefore {
 		t.Fatalf("LstatExists through casefs should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
 	}
+
+	if err := os.Mkdir(filepath.Join(dir, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "dir", "nested"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	getsBefore = db.gets
+	if _, err := LstatExists(stacked, filepath.Join("dir", "nested")); err != nil {
+		t.Fatal(err)
+	}
+	if db.gets != getsBefore {
+		t.Fatalf("nested LstatExists through casefs should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+	}
+
 	if build.IsDarwin || build.IsWindows {
 		if _, err := LstatExists(stacked, "FILE"); !IsErrCaseConflict(err) {
 			t.Fatalf("LstatExists should still report case conflicts, got %v", err)
