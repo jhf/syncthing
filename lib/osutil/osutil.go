@@ -132,7 +132,7 @@ func copyFileContents(method fs.CopyRangeMethod, srcFs, dstFs fs.Filesystem, src
 }
 
 func IsDeleted(ffs fs.Filesystem, name string) bool {
-	if _, err := ffs.Lstat(name); err != nil {
+	if _, err := fs.LstatExists(ffs, name); err != nil {
 		if fs.IsNotExist(err) || fs.IsErrCaseConflict(err) {
 			return true
 		}

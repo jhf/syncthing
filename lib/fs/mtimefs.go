@@ -116,6 +116,34 @@ func (f *mtimeFS) Lstat(name string) (FileInfo, error) {
 	return info, nil
 }
 
+func (f *mtimeFS) underlying() (Filesystem, bool) {
+	return f.Filesystem, true
+}
+
+// LstatExists returns an Lstat result without consulting the virtual mtime
+// database. Existence, type, and symlink checks do not need the virtual mtime,
+// and loading it for every path is expensive on large folders. Other wrappers
+// (case conflict detection, metrics) stay in the call path.
+func LstatExists(filesystem Filesystem, name string) (FileInfo, error) {
+	switch fs := filesystem.(type) {
+	case *mtimeFS:
+		return fs.Filesystem.Lstat(name)
+	case *caseFilesystem:
+		return fs.lstatExists(name)
+	case *metricsFS:
+		defer fs.account(metricOpLstat)(-1)
+		return LstatExists(fs.next, name)
+	case wrappingFilesystem:
+		next, ok := fs.underlying()
+		if !ok {
+			return filesystem.Lstat(name)
+		}
+		return LstatExists(next, name)
+	default:
+		return filesystem.Lstat(name)
+	}
+}
+
 func (f *mtimeFS) Create(name string) (File, error) {
 	fd, err := f.Filesystem.Create(name)
 	if err != nil {
@@ -138,10 +166,6 @@ func (f *mtimeFS) OpenFile(name string, flags int, mode FileMode) (File, error) 
 		return nil, err
 	}
 	return mtimeFile{fd, f}, nil
-}
-
-func (f *mtimeFS) underlying() (Filesystem, bool) {
-	return f.Filesystem, true
 }
 
 func (f *mtimeFS) save(name string, ondisk, virtual time.Time) {

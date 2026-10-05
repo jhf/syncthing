@@ -8,6 +8,7 @@ package fs
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -180,6 +181,162 @@ func TestMtimeFSOpen(t *testing.T) {
 	}
 }
 
+func TestLstatExistsSkipsMtimeDatabase(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db := &countingStore{mapStore: make(mapStore)}
+	mtimefs := newMtimeFS(dir, db)
+	mtimefs.chtimes = failChtimes
+
+	newTime := time.Now().Add(-2 * time.Hour)
+	if err := mtimefs.Chtimes("file", newTime, newTime); err != nil {
+		t.Fatal(err)
+	}
+
+	getsBefore := db.gets
+	info, err := mtimefs.Lstat("file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(newTime) {
+		t.Fatalf("Lstat should use virtual mtime, got %v want %v", info.ModTime(), newTime)
+	}
+	if db.gets <= getsBefore {
+		t.Fatalf("Lstat should consult the mtime database, gets=%d", db.gets)
+	}
+
+	wrapped := NewFilesystem(FilesystemTypeBasic, dir, NewMtimeOption(db, ""))
+	getsBefore = db.gets
+	exists, err := LstatExists(wrapped, "file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists.ModTime().Equal(newTime) {
+		t.Fatal("LstatExists should not apply the virtual mtime")
+	}
+	if db.gets != getsBefore {
+		t.Fatalf("LstatExists should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+	}
+
+	if _, err := LstatExists(wrapped, "missing"); !IsNotExist(err) {
+		t.Fatalf("LstatExists missing file: %v", err)
+	}
+
+	// The live home folder stacks case conflict detection outside mtimeFS.
+	// Skipping mtime lookups must not also skip that wrapper.
+	stacked := NewFilesystem(FilesystemTypeBasic, dir, &OptionDetectCaseConflicts{}, NewMtimeOption(db, ""))
+	var stack []string
+	for fs := stacked; fs != nil; {
+		stack = append(stack, fmt.Sprintf("%T", fs))
+		w, ok := fs.(wrappingFilesystem)
+		if !ok {
+			break
+		}
+		next, ok := w.underlying()
+		if !ok {
+			break
+		}
+		fs = next
+	}
+	wantPrefix := []string{"*fs.caseFilesystem", "*fs.walkFilesystem", "*fs.metricsFS", "*fs.mtimeFS"}
+	if len(stack) < len(wantPrefix) {
+		t.Fatalf("wrapper stack too short: %v", stack)
+	}
+	for i, want := range wantPrefix {
+		if stack[i] != want {
+			t.Fatalf("wrapper stack %v, want prefix %v", stack, wantPrefix)
+		}
+	}
+	getsBefore = db.gets
+	if _, err := LstatExists(stacked, "file"); err != nil {
+		t.Fatal(err)
+	}
+	if db.gets != getsBefore {
+		t.Fatalf("LstatExists through casefs should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+	}
+
+	if err := os.Mkdir(filepath.Join(dir, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "dir", "nested"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	getsBefore = db.gets
+	if _, err := LstatExists(stacked, filepath.Join("dir", "nested")); err != nil {
+		t.Fatal(err)
+	}
+	if db.gets != getsBefore {
+		t.Fatalf("nested LstatExists through casefs should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+	}
+
+	if build.IsDarwin || build.IsWindows {
+		if _, err := LstatExists(stacked, "FILE"); !IsErrCaseConflict(err) {
+			t.Fatalf("LstatExists should still report case conflicts, got %v", err)
+		}
+		if db.gets != getsBefore {
+			t.Fatalf("case-conflict LstatExists should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+		}
+	}
+
+	logged := newLogFilesystem(stacked, 0)
+	getsBefore = db.gets
+	if _, err := LstatExists(logged, "file"); err != nil {
+		t.Fatal(err)
+	}
+	if db.gets != getsBefore {
+		t.Fatalf("LstatExists through logFilesystem should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+	}
+	if build.IsDarwin || build.IsWindows {
+		if _, err := LstatExists(logged, "FILE"); !IsErrCaseConflict(err) {
+			t.Fatalf("logFilesystem LstatExists should still report case conflicts, got %v", err)
+		}
+		if db.gets != getsBefore {
+			t.Fatalf("logFilesystem case-conflict LstatExists should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+		}
+	}
+
+	// STTRACE=fs wraps logfs outside walkfs, then casefs outside that.
+	traceFS := newLogFilesystem(NewWalkFilesystem(stacked.(*caseFilesystem).Filesystem), 1)
+	caseTrace := globalCaseFilesystemRegistry.get(traceFS)
+	getsBefore = db.gets
+	if _, err := LstatExists(caseTrace, "file"); err != nil {
+		t.Fatal(err)
+	}
+	if db.gets != getsBefore {
+		t.Fatalf("LstatExists through STTRACE=fs stack should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+	}
+	if build.IsDarwin || build.IsWindows {
+		if _, err := LstatExists(caseTrace, "FILE"); !IsErrCaseConflict(err) {
+			t.Fatalf("STTRACE=fs LstatExists should still report case conflicts, got %v", err)
+		}
+		if db.gets != getsBefore {
+			t.Fatalf("STTRACE=fs case-conflict LstatExists should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+		}
+	}
+
+	// STTRACE=walkfs wraps walkfs around logfs, then casefs outside that.
+	walkTrace := NewWalkFilesystem(newLogFilesystem(stacked.(*caseFilesystem).Filesystem, 1))
+	caseWalkTrace := globalCaseFilesystemRegistry.get(walkTrace)
+	getsBefore = db.gets
+	if _, err := LstatExists(caseWalkTrace, "file"); err != nil {
+		t.Fatal(err)
+	}
+	if db.gets != getsBefore {
+		t.Fatalf("LstatExists through STTRACE=walkfs stack should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+	}
+	if build.IsDarwin || build.IsWindows {
+		if _, err := LstatExists(caseWalkTrace, "FILE"); !IsErrCaseConflict(err) {
+			t.Fatalf("STTRACE=walkfs LstatExists should still report case conflicts, got %v", err)
+		}
+		if db.gets != getsBefore {
+			t.Fatalf("STTRACE=walkfs case-conflict LstatExists should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+		}
+	}
+}
+
 func TestMtimeFSInsensitive(t *testing.T) {
 	if build.IsDarwin || build.IsWindows {
 		// blatantly assume file systems here are case insensitive. Might be
@@ -225,6 +382,16 @@ func TestMtimeFSInsensitive(t *testing.T) {
 }
 
 // The mapStore is a simple database
+
+type countingStore struct {
+	mapStore
+	gets int
+}
+
+func (s *countingStore) GetMtime(folder, name string) (real, virtual time.Time) {
+	s.gets++
+	return s.mapStore.GetMtime(folder, name)
+}
 
 type mapStore map[string][2]time.Time
 

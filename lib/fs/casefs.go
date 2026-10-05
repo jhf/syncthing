@@ -155,6 +155,10 @@ type caseFilesystem struct {
 	realCaser
 }
 
+func (f *caseFilesystem) underlying() (Filesystem, bool) {
+	return f.Filesystem, true
+}
+
 func (f *caseFilesystem) Chmod(name string, mode FileMode) error {
 	if _, err := f.checkCase(name); err != nil {
 		return err
@@ -205,6 +209,21 @@ func (f *caseFilesystem) Lstat(name string) (FileInfo, error) {
 		return nil, err
 	}
 	stat, err := f.Filesystem.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = f.checkCaseExisting(name); err != nil {
+		return nil, err
+	}
+	return stat, nil
+}
+
+func (f *caseFilesystem) lstatExists(name string) (FileInfo, error) {
+	var err error
+	if name, err = Canonicalize(name); err != nil {
+		return nil, err
+	}
+	stat, err := LstatExists(f.Filesystem, name)
 	if err != nil {
 		return nil, err
 	}
@@ -361,10 +380,6 @@ func (f *caseFilesystem) Unhide(name string) error {
 		return err
 	}
 	return f.Filesystem.Unhide(name)
-}
-
-func (f *caseFilesystem) underlying() (Filesystem, bool) {
-	return f.Filesystem, true
 }
 
 func (f *caseFilesystem) checkCase(name string) (string, error) {

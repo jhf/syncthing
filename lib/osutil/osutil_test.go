@@ -8,10 +8,13 @@ package osutil_test
 
 import (
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/rand"
@@ -60,6 +63,84 @@ func TestIsDeleted(t *testing.T) {
 	for _, c := range cases {
 		if osutil.IsDeleted(testFs, c.path) != c.isDel {
 			t.Errorf("IsDeleted(%v) != %v", c.path, c.isDel)
+		}
+	}
+}
+
+type countingMtimeStore struct {
+	gets int
+}
+
+func (s *countingMtimeStore) GetMtime(_, _ string) (ondisk, virtual time.Time) {
+	s.gets++
+	return time.Time{}, time.Time{}
+}
+
+func (s *countingMtimeStore) PutMtime(_, _ string, _, _ time.Time) error { return nil }
+
+func (s *countingMtimeStore) DeleteMtime(_, _ string) error { return nil }
+
+func TestIsDeletedSkipsMtimeDatabase(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db := &countingMtimeStore{}
+	ffs := fs.NewFilesystem(fs.FilesystemTypeBasic, dir, new(fs.OptionDetectCaseConflicts), fs.NewMtimeOption(db, "test"))
+	if osutil.IsDeleted(ffs, "file") {
+		t.Fatal("existing file should not be deleted")
+	}
+	if db.gets != 0 {
+		t.Fatalf("IsDeleted should skip the mtime database, got %d lookups", db.gets)
+	}
+	if !osutil.IsDeleted(ffs, "missing") {
+		t.Fatal("missing file should be deleted")
+	}
+	if db.gets != 0 {
+		t.Fatalf("IsDeleted missing path should skip the mtime database, got %d lookups", db.gets)
+	}
+
+	if err := os.MkdirAll(filepath.Join(dir, "a", "b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a", "b", "c"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("b", filepath.Join(dir, "a", "l")); err != nil {
+		t.Fatal(err)
+	}
+	if osutil.IsDeleted(ffs, filepath.Join("a", "b", "c")) {
+		t.Fatal("nested existing file should not be deleted")
+	}
+	if db.gets != 0 {
+		t.Fatalf("nested IsDeleted should skip the mtime database, got %d lookups", db.gets)
+	}
+	if err := osutil.TraversesSymlink(ffs, filepath.Join("a", "b")); err != nil {
+		t.Fatalf("TraversesSymlink on real dirs: %v", err)
+	}
+	if db.gets != 0 {
+		t.Fatalf("TraversesSymlink should skip the mtime database, got %d lookups", db.gets)
+	}
+	if err := osutil.TraversesSymlink(ffs, filepath.Join("a", "l", "c")); err == nil {
+		t.Fatal("expected symlink traversal error")
+	}
+	if db.gets != 0 {
+		t.Fatalf("symlink TraversesSymlink should skip the mtime database, got %d lookups", db.gets)
+	}
+	if !osutil.IsDeleted(ffs, filepath.Join("a", "l", "c")) {
+		t.Fatal("path behind a symlink should count as deleted")
+	}
+	if db.gets != 0 {
+		t.Fatalf("IsDeleted behind symlink should skip the mtime database, got %d lookups", db.gets)
+	}
+
+	if build.IsDarwin || build.IsWindows {
+		if !osutil.IsDeleted(ffs, "FILE") {
+			t.Fatal("wrong-case existing file should count as deleted on a case-conflict wrapping")
+		}
+		if db.gets != 0 {
+			t.Fatalf("case-conflict IsDeleted should skip the mtime database, got %d lookups", db.gets)
 		}
 	}
 }
