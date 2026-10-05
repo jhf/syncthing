@@ -8,9 +8,11 @@ package osutil_test
 
 import (
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/osutil"
@@ -61,6 +63,41 @@ func TestIsDeleted(t *testing.T) {
 		if osutil.IsDeleted(testFs, c.path) != c.isDel {
 			t.Errorf("IsDeleted(%v) != %v", c.path, c.isDel)
 		}
+	}
+}
+
+type countingMtimeStore struct {
+	gets int
+}
+
+func (s *countingMtimeStore) GetMtime(_, _ string) (ondisk, virtual time.Time) {
+	s.gets++
+	return time.Time{}, time.Time{}
+}
+
+func (s *countingMtimeStore) PutMtime(_, _ string, _, _ time.Time) error { return nil }
+
+func (s *countingMtimeStore) DeleteMtime(_, _ string) error { return nil }
+
+func TestIsDeletedSkipsMtimeDatabase(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db := &countingMtimeStore{}
+	ffs := fs.NewFilesystem(fs.FilesystemTypeBasic, dir, fs.NewMtimeOption(db, "test"))
+	if osutil.IsDeleted(ffs, "file") {
+		t.Fatal("existing file should not be deleted")
+	}
+	if db.gets != 0 {
+		t.Fatalf("IsDeleted should skip the mtime database, got %d lookups", db.gets)
+	}
+	if !osutil.IsDeleted(ffs, "missing") {
+		t.Fatal("missing file should be deleted")
+	}
+	if db.gets != 0 {
+		t.Fatalf("IsDeleted missing path should skip the mtime database, got %d lookups", db.gets)
 	}
 }
 
