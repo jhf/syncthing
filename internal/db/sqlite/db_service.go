@@ -25,11 +25,15 @@ const (
 	internalMetaPrefix     = "dbsvc"
 	lastMaintKey           = "lastMaint"
 	lastSuccessfulGCSeqKey = "lastSuccessfulGCSeq"
+	gcNeedsFullScanKey     = "gcNeedsFullScan"
 
-	gcMinChunks  = 5
-	gcChunkSize  = 100_000         // approximate number of rows to process in a single gc query
-	gcMaxRuntime = 5 * time.Minute // max time to spend on gc, per table, per run
+	gcMinChunks = 5
+	gcChunkSize = 100_000 // approximate number of rows to process in a single gc query
 )
+
+// gcMaxRuntime is the max time to spend on gc, per table, per run. It is a var
+// rather than a const so tests can force the interrupted path.
+var gcMaxRuntime = 5 * time.Minute
 
 func (s *DB) Service(maintenanceInterval time.Duration) db.DBService {
 	return newService(s, maintenanceInterval)
@@ -140,8 +144,14 @@ func (s *Service) periodic(ctx context.Context) error {
 		if prev, _, err := meta.Int64(lastSuccessfulGCSeqKey); err != nil {
 			return wrap(err)
 		} else if seq == prev {
-			slog.DebugContext(ctx, "Skipping unnecessary GC", "folder", fdb.folderID, "fdb", fdb.baseName)
-			return nil
+			var pending int
+			if err := fdb.sql.Get(&pending, `SELECT count(*) FROM gc_retired_blocklists`); err != nil {
+				return wrap(err)
+			}
+			if pending == 0 {
+				slog.DebugContext(ctx, "Skipping unnecessary GC", "folder", fdb.folderID, "fdb", fdb.baseName)
+				return nil
+			}
 		}
 
 		// Run the GC steps, in a function to be able to use a deferred
@@ -246,15 +256,17 @@ func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB) error {
 }
 
 func garbageCollectBlocklistsAndBlocksLocked(ctx context.Context, fdb *folderDB) error {
-	// Remove all blocklists not referred to by any files and, by extension,
-	// any blocks not referred to by a blocklist. This is an expensive
-	// operation when run normally, especially if there are a lot of blocks
-	// to collect.
+	// Remove blocklists not referred to by any files, then the blocks that
+	// belonged to those hashes. File updates record retired hashes in
+	// gc_retired_blocklists so the common path does not scan live tables.
 	//
-	// We make this orders of magnitude faster by disabling foreign keys for
-	// the transaction and doing the cleanup manually. This requires using
-	// an explicit connection and disabling foreign keys before starting the
-	// transaction. We make sure to clean up on the way out.
+	// Foreign keys are disabled for the connection so we can delete orphans
+	// without paying the FK trigger cost. Each unit of work runs in its own
+	// transaction so a 5 minute time limit does not leave a multi-GB WAL from
+	// one uncommitted DELETE, and so the folder lock can be released between
+	// chunks.
+	fdb.updateLock.Unlock()
+	defer fdb.updateLock.Lock()
 
 	conn, err := fdb.sql.Connx(ctx)
 	if err != nil {
@@ -269,61 +281,175 @@ func garbageCollectBlocklistsAndBlocksLocked(ctx context.Context, fdb *folderDB)
 		_, _ = conn.ExecContext(context.Background(), `PRAGMA foreign_keys = 1`)
 	}()
 
-	tx, err := conn.BeginTxx(ctx, nil)
+	var pending int64
+	if err := conn.GetContext(ctx, &pending, `SELECT count(*) FROM gc_retired_blocklists`); err != nil {
+		return wrap(err)
+	}
+
+	meta := db.NewTyped(fdb, internalMetaPrefix)
+	needsFull, ok, err := meta.Bool(gcNeedsFullScanKey)
 	if err != nil {
 		return wrap(err)
 	}
-	defer tx.Rollback() //nolint:errcheck
-
-	// Both blocklists and blocks refer to blocklists_hash from the files table.
-	for _, table := range []string{"blocklists", "blocks"} {
-		// Count the number of rows
-		var rows int64
-		if err := tx.GetContext(ctx, &rows, `SELECT count(*) FROM `+table); err != nil {
+	if !ok {
+		// Unset means a pre-queue database: one live-table scan, then queue-only.
+		if _, hadSeq, err := meta.Int64(lastSuccessfulGCSeqKey); err != nil {
 			return wrap(err)
-		}
-
-		chunks := max(gcMinChunks, rows/gcChunkSize)
-		l := slog.With("folder", fdb.folderID, "fdb", fdb.baseName, "table", table, "rows", rows, "chunks", chunks)
-
-		// Process rows in chunks up to a given time limit. We always use at
-		// least gcMinChunks chunks, then increase the number as the number of rows
-		// exceeds gcMinChunks*gcChunkSize.
-		t0 := time.Now()
-		for i, br := range randomBlobRanges(int(chunks)) {
-			if d := time.Since(t0); d > gcMaxRuntime {
-				l.InfoContext(ctx, "GC was interrupted due to exceeding time limit", "processed", i, "runtime", time.Since(t0))
-				break
-			}
-
-			// The limit column must be an indexed column with a mostly random distribution of blobs.
-			// That's the blocklist_hash column for blocklists, and the hash column for blocks.
-			limitColumn := table + ".blocklist_hash"
-			if table == "blocks" {
-				limitColumn = "blocks.hash"
-			}
-
-			q := fmt.Sprintf(`
-				DELETE FROM %s
-				WHERE %s AND NOT EXISTS (
-					SELECT 1 FROM files WHERE files.blocklist_hash = %s.blocklist_hash
-				)`, table, br.SQL(limitColumn), table)
-
-			if res, err := tx.ExecContext(ctx, q); err != nil {
-				return wrap(err, "delete from "+table)
-			} else {
-				l.DebugContext(ctx, "GC query result", "processed", i, "runtime", time.Since(t0), "result", slogutil.Expensive(func() any {
-					rows, err := res.RowsAffected()
-					if err != nil {
-						return slogutil.Error(err)
-					}
-					return slog.Int64("rows", rows)
-				}))
-			}
+		} else if hadSeq {
+			needsFull = true
 		}
 	}
 
-	return wrap(tx.Commit())
+	if pending > 0 {
+		if err := garbageCollectRetiredBlocklists(ctx, fdb, conn); err != nil {
+			return err
+		}
+	}
+
+	if !needsFull {
+		// Queue path is the source of truth after the first full scan.
+		return nil
+	}
+
+	completed, err := garbageCollectOrphanBlocklistsFull(ctx, fdb, conn, gcMaxRuntime)
+	if err != nil {
+		return err
+	}
+	if !completed {
+		// Time limit hit. Leave the flag set so the next run continues, rather
+		// than claiming a full scan we did not finish.
+		return nil
+	}
+	return meta.PutBool(gcNeedsFullScanKey, false)
+}
+
+func garbageCollectRetiredBlocklists(ctx context.Context, fdb *folderDB, conn *sqlx.Conn) error {
+	l := slog.With("folder", fdb.folderID, "fdb", fdb.baseName, "table", "gc_retired_blocklists")
+	t0 := time.Now()
+
+	fdb.updateLock.Lock()
+	tx, err := conn.BeginTxx(ctx, nil)
+	if err != nil {
+		fdb.updateLock.Unlock()
+		return wrap(err)
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		DELETE FROM blocklists
+		WHERE blocklist_hash IN (SELECT blocklist_hash FROM gc_retired_blocklists)
+		  AND NOT EXISTS (
+			SELECT 1 FROM files WHERE files.blocklist_hash = blocklists.blocklist_hash
+		  )`)
+	if err != nil {
+		_ = tx.Rollback()
+		fdb.updateLock.Unlock()
+		return wrap(err, "delete retired blocklists")
+	}
+	deletedLists, _ := res.RowsAffected()
+
+	res, err = tx.ExecContext(ctx, `
+		DELETE FROM blocks
+		WHERE blocklist_hash IN (SELECT blocklist_hash FROM gc_retired_blocklists)
+		  AND NOT EXISTS (
+			SELECT 1 FROM files WHERE files.blocklist_hash = blocks.blocklist_hash
+		  )`)
+	if err != nil {
+		_ = tx.Rollback()
+		fdb.updateLock.Unlock()
+		return wrap(err, "delete retired blocks")
+	}
+	deletedBlocks, _ := res.RowsAffected()
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM gc_retired_blocklists
+		WHERE NOT EXISTS (
+			SELECT 1 FROM blocklists WHERE blocklists.blocklist_hash = gc_retired_blocklists.blocklist_hash
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM blocks WHERE blocks.blocklist_hash = gc_retired_blocklists.blocklist_hash
+		)`); err != nil {
+		_ = tx.Rollback()
+		fdb.updateLock.Unlock()
+		return wrap(err, "delete retired queue")
+	}
+
+	if err := tx.Commit(); err != nil {
+		fdb.updateLock.Unlock()
+		return wrap(err, "commit retired gc")
+	}
+	fdb.updateLock.Unlock()
+
+	l.DebugContext(ctx, "Retired GC", "runtime", time.Since(t0), "blocklists", deletedLists, "blocks", deletedBlocks)
+	return nil
+}
+
+// garbageCollectOrphanBlocklistsFull scans every blocklist with the NOT EXISTS
+// files predicate, in time-bounded chunks. It returns completed=false when the
+// time limit stopped it early, so the caller can leave the "needs a full scan"
+// flag set and try again next run. Clearing that flag on an interrupted scan
+// would silently strand the orphans that predate the retirement queue.
+func garbageCollectOrphanBlocklistsFull(ctx context.Context, fdb *folderDB, conn *sqlx.Conn, maxRuntime time.Duration) (bool, error) {
+	var rows int64
+	if err := conn.GetContext(ctx, &rows, `SELECT count(*) FROM blocklists`); err != nil {
+		return false, wrap(err)
+	}
+	chunks := max(gcMinChunks, rows/gcChunkSize)
+	l := slog.With("folder", fdb.folderID, "fdb", fdb.baseName, "table", "blocklists", "rows", rows, "chunks", chunks)
+	t0 := time.Now()
+
+	for i, br := range randomBlobRanges(int(chunks)) {
+		if d := time.Since(t0); d > maxRuntime {
+			l.InfoContext(ctx, "GC was interrupted due to exceeding time limit", "processed", i, "runtime", time.Since(t0))
+			return false, nil
+		}
+
+		q := fmt.Sprintf(`
+			DELETE FROM blocklists
+			WHERE %s AND NOT EXISTS (
+				SELECT 1 FROM files WHERE files.blocklist_hash = blocklists.blocklist_hash
+			)`, br.SQL("blocklists.blocklist_hash"))
+
+		fdb.updateLock.Lock()
+		tx, err := conn.BeginTxx(ctx, nil)
+		if err != nil {
+			fdb.updateLock.Unlock()
+			return false, wrap(err)
+		}
+		res, err := tx.ExecContext(ctx, q)
+		if err != nil {
+			_ = tx.Rollback()
+			fdb.updateLock.Unlock()
+			return false, wrap(err, "delete from blocklists")
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM blocks
+			WHERE NOT EXISTS (
+				SELECT 1 FROM files WHERE files.blocklist_hash = blocks.blocklist_hash
+			)
+			AND NOT EXISTS (
+				SELECT 1 FROM blocklists WHERE blocklists.blocklist_hash = blocks.blocklist_hash
+			)`); err != nil {
+			_ = tx.Rollback()
+			fdb.updateLock.Unlock()
+			return false, wrap(err, "delete orphan blocks")
+		}
+
+		if err := tx.Commit(); err != nil {
+			fdb.updateLock.Unlock()
+			return false, wrap(err, "commit blocklists")
+		}
+		fdb.updateLock.Unlock()
+
+		l.DebugContext(ctx, "GC query result", "processed", i, "runtime", time.Since(t0), "result", slogutil.Expensive(func() any {
+			n, err := res.RowsAffected()
+			if err != nil {
+				return slogutil.Error(err)
+			}
+			return slog.Int64("rows", n)
+		}))
+	}
+	return true, nil
 }
 
 // blobRange defines a range for blob searching. A range is open ended if
