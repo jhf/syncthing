@@ -240,10 +240,13 @@ func garbageCollectBlocklistsAndBlocksLocked(ctx context.Context, fdb *folderDB)
 	// operation when run normally, especially if there are a lot of blocks
 	// to collect.
 	//
-	// We make this orders of magnitude faster by disabling foreign keys for
-	// the transaction and doing the cleanup manually. This requires using
-	// an explicit connection and disabling foreign keys before starting the
-	// transaction. We make sure to clean up on the way out.
+	// Foreign keys are disabled for the connection so we can delete orphans
+	// without paying the FK trigger cost. Each hash-range chunk runs in its
+	// own transaction so a 5 minute time limit does not leave a multi-GB WAL
+	// from one uncommitted DELETE, and so the folder lock can be released
+	// between chunks.
+	fdb.updateLock.Unlock()
+	defer fdb.updateLock.Lock()
 
 	conn, err := fdb.sql.Connx(ctx)
 	if err != nil {
@@ -258,17 +261,10 @@ func garbageCollectBlocklistsAndBlocksLocked(ctx context.Context, fdb *folderDB)
 		_, _ = conn.ExecContext(context.Background(), `PRAGMA foreign_keys = 1`)
 	}()
 
-	tx, err := conn.BeginTxx(ctx, nil)
-	if err != nil {
-		return wrap(err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-
 	// Both blocklists and blocks refer to blocklists_hash from the files table.
 	for _, table := range []string{"blocklists", "blocks"} {
-		// Count the number of rows
 		var rows int64
-		if err := tx.GetContext(ctx, &rows, `SELECT count(*) FROM `+table); err != nil {
+		if err := conn.GetContext(ctx, &rows, `SELECT count(*) FROM `+table); err != nil {
 			return wrap(err)
 		}
 
@@ -285,8 +281,6 @@ func garbageCollectBlocklistsAndBlocksLocked(ctx context.Context, fdb *folderDB)
 				break
 			}
 
-			// The limit column must be an indexed column with a mostly random distribution of blobs.
-			// That's the blocklist_hash column for blocklists, and the hash column for blocks.
 			limitColumn := table + ".blocklist_hash"
 			if table == "blocks" {
 				limitColumn = "blocks.hash"
@@ -298,21 +292,35 @@ func garbageCollectBlocklistsAndBlocksLocked(ctx context.Context, fdb *folderDB)
 					SELECT 1 FROM files WHERE files.blocklist_hash = %s.blocklist_hash
 				)`, table, br.SQL(limitColumn), table)
 
-			if res, err := tx.ExecContext(ctx, q); err != nil {
-				return wrap(err, "delete from "+table)
-			} else {
-				l.DebugContext(ctx, "GC query result", "processed", i, "runtime", time.Since(t0), "result", slogutil.Expensive(func() any {
-					rows, err := res.RowsAffected()
-					if err != nil {
-						return slogutil.Error(err)
-					}
-					return slog.Int64("rows", rows)
-				}))
+			fdb.updateLock.Lock()
+			tx, err := conn.BeginTxx(ctx, nil)
+			if err != nil {
+				fdb.updateLock.Unlock()
+				return wrap(err)
 			}
+			res, err := tx.ExecContext(ctx, q)
+			if err != nil {
+				_ = tx.Rollback()
+				fdb.updateLock.Unlock()
+				return wrap(err, "delete from "+table)
+			}
+			if err := tx.Commit(); err != nil {
+				fdb.updateLock.Unlock()
+				return wrap(err, "commit "+table)
+			}
+			fdb.updateLock.Unlock()
+
+			l.DebugContext(ctx, "GC query result", "processed", i, "runtime", time.Since(t0), "result", slogutil.Expensive(func() any {
+				n, err := res.RowsAffected()
+				if err != nil {
+					return slogutil.Error(err)
+				}
+				return slog.Int64("rows", n)
+			}))
 		}
 	}
 
-	return wrap(tx.Commit())
+	return nil
 }
 
 // blobRange defines a range for blob searching. A range is open ended if
