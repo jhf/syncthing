@@ -316,6 +316,25 @@ func TestLstatExistsSkipsMtimeDatabase(t *testing.T) {
 			t.Fatalf("STTRACE=fs case-conflict LstatExists should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
 		}
 	}
+
+	// STTRACE=walkfs wraps walkfs around logfs, then casefs outside that.
+	walkTrace := NewWalkFilesystem(newLogFilesystem(stacked.(*caseFilesystem).Filesystem, 1))
+	caseWalkTrace := globalCaseFilesystemRegistry.get(walkTrace)
+	getsBefore = db.gets
+	if _, err := LstatExists(caseWalkTrace, "file"); err != nil {
+		t.Fatal(err)
+	}
+	if db.gets != getsBefore {
+		t.Fatalf("LstatExists through STTRACE=walkfs stack should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+	}
+	if build.IsDarwin || build.IsWindows {
+		if _, err := LstatExists(caseWalkTrace, "FILE"); !IsErrCaseConflict(err) {
+			t.Fatalf("STTRACE=walkfs LstatExists should still report case conflicts, got %v", err)
+		}
+		if db.gets != getsBefore {
+			t.Fatalf("STTRACE=walkfs case-conflict LstatExists should skip the mtime database, got %d extra lookups", db.gets-getsBefore)
+		}
+	}
 }
 
 func TestMtimeFSInsensitive(t *testing.T) {
