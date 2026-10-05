@@ -8,6 +8,7 @@ package fs
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -227,12 +228,26 @@ func TestLstatExistsSkipsMtimeDatabase(t *testing.T) {
 	// The live home folder stacks case conflict detection outside mtimeFS.
 	// Skipping mtime lookups must not also skip that wrapper.
 	stacked := NewFilesystem(FilesystemTypeBasic, dir, &OptionDetectCaseConflicts{}, NewMtimeOption(db, ""))
-	if _, ok := stacked.(*caseFilesystem); !ok {
-		t.Fatalf("expected outermost wrapper *caseFilesystem, got %T", stacked)
+	var stack []string
+	for fs := stacked; fs != nil; {
+		stack = append(stack, fmt.Sprintf("%T", fs))
+		w, ok := fs.(wrappingFilesystem)
+		if !ok {
+			break
+		}
+		next, ok := w.underlying()
+		if !ok {
+			break
+		}
+		fs = next
 	}
-	if caseFs, ok := stacked.(*caseFilesystem); ok {
-		if _, ok := caseFs.Filesystem.(*walkFilesystem); !ok {
-			t.Fatalf("expected walkFilesystem under casefs, got %T", caseFs.Filesystem)
+	wantPrefix := []string{"*fs.caseFilesystem", "*fs.walkFilesystem", "*fs.metricsFS", "*fs.mtimeFS"}
+	if len(stack) < len(wantPrefix) {
+		t.Fatalf("wrapper stack too short: %v", stack)
+	}
+	for i, want := range wantPrefix {
+		if stack[i] != want {
+			t.Fatalf("wrapper stack %v, want prefix %v", stack, wantPrefix)
 		}
 	}
 	getsBefore = db.gets
