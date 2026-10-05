@@ -14,6 +14,7 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -71,11 +72,11 @@ func TestBasics(t *testing.T) {
 		t.Fatal(err)
 	}
 	const (
-		localSize      = (1+2+3)*blockSize
+		localSize      = (1 + 2 + 3) * blockSize
 		remoteSize     = (3 + 4 + 5) * blockSize
-		globalSize     = (2+3+3+4+5)*blockSize
+		globalSize     = (2 + 3 + 3 + 4 + 5) * blockSize
 		needSizeLocal  = remoteSize
-		needSizeRemote = (2+3)*blockSize
+		needSizeRemote = (2 + 3) * blockSize
 	)
 
 	t.Run("SchemaVersion", func(t *testing.T) {
@@ -1144,6 +1145,201 @@ func TestBlocklistGarbageCollection(t *testing.T) {
 	if count != 3 {
 		t.Log(count)
 		t.Error("expected 3 blocks")
+	}
+}
+
+func TestBlocklistRetirementQueue(t *testing.T) {
+	t.Parallel()
+
+	sdb, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := sdb.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	svc := sdb.Service(time.Hour).(*Service)
+
+	first := genFile("shared", 2, 1)
+	second := genFile("other", 2, 2)
+	second.Blocks = append([]protocol.BlockInfo(nil), first.Blocks...)
+	second.Size = first.Size
+	if err := sdb.Update(folderID, protocol.LocalDeviceID, []protocol.FileInfo{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	fdb, err := sdb.getFolderDB(folderID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldHash := protocol.BlocksHash(first.Blocks)
+	replaced := genFile("shared", 3, 3)
+	replaced.Version = first.Version.Update(1)
+	if err := sdb.Update(folderID, protocol.LocalDeviceID, []protocol.FileInfo{replaced}); err != nil {
+		t.Fatal(err)
+	}
+
+	var queued int
+	if err := fdb.sql.Get(&queued, `SELECT count(*) FROM gc_retired_blocklists WHERE blocklist_hash = ?`, oldHash); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 1 {
+		t.Fatalf("expected old hash in retirement queue, got %d", queued)
+	}
+
+	if err := svc.periodic(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var still int
+	if err := fdb.sql.Get(&still, `SELECT count(*) FROM blocklists WHERE blocklist_hash = ?`, oldHash); err != nil {
+		t.Fatal(err)
+	}
+	if still != 1 {
+		t.Fatal("shared blocklist was collected while still referenced")
+	}
+
+	gone := second
+	gone.SetDeleted(42)
+	if err := sdb.Update(folderID, protocol.LocalDeviceID, []protocol.FileInfo{gone}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.periodic(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := fdb.sql.Get(&still, `SELECT count(*) FROM blocklists WHERE blocklist_hash = ?`, oldHash); err != nil {
+		t.Fatal(err)
+	}
+	if still != 0 {
+		t.Fatal("expected unreferenced blocklist to be collected")
+	}
+	if err := fdb.sql.Get(&queued, `SELECT count(*) FROM gc_retired_blocklists`); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 0 {
+		t.Fatalf("expected empty retirement queue, got %d", queued)
+	}
+}
+
+func TestBlocklistGCSkipsFullScanWhenQueueEmpty(t *testing.T) {
+	t.Parallel()
+
+	sdb, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := sdb.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	svc := sdb.Service(time.Hour).(*Service)
+	if err := sdb.Update(folderID, protocol.LocalDeviceID, []protocol.FileInfo{genFile("keep", 1, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.periodic(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	fdb, err := sdb.getFolderDB(folderID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := db.NewTyped(fdb, internalMetaPrefix)
+	if err := meta.PutBool(gcNeedsFullScanKey, false); err != nil {
+		t.Fatal(err)
+	}
+
+	keep := genFile("keep", 1, 2)
+	keep.Version = keep.Version.Update(1)
+	if err := sdb.Update(folderID, protocol.LocalDeviceID, []protocol.FileInfo{keep}); err != nil {
+		t.Fatal(err)
+	}
+	var pending int
+	if err := fdb.sql.Get(&pending, `SELECT count(*) FROM gc_retired_blocklists`); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 {
+		t.Fatalf("version-only update should not retire hashes, got %d", pending)
+	}
+	if err := svc.periodic(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var lists int
+	if err := fdb.sql.Get(&lists, `SELECT count(*) FROM blocklists`); err != nil {
+		t.Fatal(err)
+	}
+	if lists != 1 {
+		t.Fatalf("empty-queue GC should not delete live blocklists, got %d", lists)
+	}
+}
+
+func TestRetiredGCCheaperThanFullScanPlan(t *testing.T) {
+	t.Parallel()
+
+	sdb, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := sdb.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	files := make([]protocol.FileInfo, 400)
+	for i := range files {
+		files[i] = genFile("file-"+strconv.Itoa(i), 3, i+1)
+	}
+	if err := sdb.Update(folderID, protocol.LocalDeviceID, files); err != nil {
+		t.Fatal(err)
+	}
+
+	gone := files[0]
+	gone.SetDeleted(42)
+	if err := sdb.Update(folderID, protocol.LocalDeviceID, []protocol.FileInfo{gone}); err != nil {
+		t.Fatal(err)
+	}
+	fdb, err := sdb.getFolderDB(folderID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	queueSQL := `
+		SELECT count(*) FROM blocklists
+		WHERE blocklist_hash IN (SELECT blocklist_hash FROM gc_retired_blocklists)
+		  AND NOT EXISTS (
+			SELECT 1 FROM files WHERE files.blocklist_hash = blocklists.blocklist_hash
+		  )`
+	fullSQL := `
+		SELECT count(*) FROM blocklists
+		WHERE NOT EXISTS (
+			SELECT 1 FROM files WHERE files.blocklist_hash = blocklists.blocklist_hash
+		)`
+
+	const rounds = 30
+	var n int
+	queueStart := time.Now()
+	for range rounds {
+		if err := fdb.sql.Get(&n, queueSQL); err != nil {
+			t.Fatal(err)
+		}
+	}
+	queueDur := time.Since(queueStart)
+	fullStart := time.Now()
+	for range rounds {
+		if err := fdb.sql.Get(&n, fullSQL); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fullDur := time.Since(fullStart)
+	t.Logf("queue %s full %s ratio %.2fx n=%d", queueDur, fullDur, float64(fullDur)/float64(queueDur+1), n)
+	if n != 1 {
+		t.Fatalf("expected 1 orphan blocklist, got %d", n)
+	}
+	if queueDur >= fullDur {
+		t.Fatalf("queue-bounded lookup was not cheaper: queue=%s full=%s", queueDur, fullDur)
 	}
 }
 
