@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/rand"
@@ -86,7 +87,7 @@ func TestIsDeletedSkipsMtimeDatabase(t *testing.T) {
 	}
 
 	db := &countingMtimeStore{}
-	ffs := fs.NewFilesystem(fs.FilesystemTypeBasic, dir, fs.NewMtimeOption(db, "test"))
+	ffs := fs.NewFilesystem(fs.FilesystemTypeBasic, dir, new(fs.OptionDetectCaseConflicts), fs.NewMtimeOption(db, "test"))
 	if osutil.IsDeleted(ffs, "file") {
 		t.Fatal("existing file should not be deleted")
 	}
@@ -98,6 +99,14 @@ func TestIsDeletedSkipsMtimeDatabase(t *testing.T) {
 	}
 	if db.gets != 0 {
 		t.Fatalf("IsDeleted missing path should skip the mtime database, got %d lookups", db.gets)
+	}
+	if build.IsDarwin || build.IsWindows {
+		if !osutil.IsDeleted(ffs, "FILE") {
+			t.Fatal("wrong-case existing file should count as deleted on a case-conflict wrapping")
+		}
+		if db.gets != 0 {
+			t.Fatalf("case-conflict IsDeleted should skip the mtime database, got %d lookups", db.gets)
+		}
 	}
 }
 
