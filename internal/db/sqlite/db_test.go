@@ -1343,6 +1343,96 @@ func TestRetiredGCCheaperThanFullScanPlan(t *testing.T) {
 	}
 }
 
+func TestBlocklistGCFullScanInterruptedKeepsFlag(t *testing.T) {
+	// Not parallel: this test mutates gcMaxRuntime. Go runs sequential tests
+	// before resuming parallel ones, so nothing else is reading it here.
+	oldMax := gcMaxRuntime
+	defer func() { gcMaxRuntime = oldMax }()
+
+	sdb, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := sdb.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := sdb.Update(folderID, protocol.LocalDeviceID, []protocol.FileInfo{genFile("live", 1, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	fdb, err := sdb.getFolderDB(folderID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A pre-queue orphan: a blocklist row nothing refers to, with an empty
+	// retirement queue, as a database upgraded from before the queue looks.
+	orphan := protocol.BlocksHash(genBlocks("orphan", 1, 1))
+	if _, err := fdb.sql.Exec(
+		`INSERT INTO blocklists (blocklist_hash, blprotobuf) VALUES (?, ?)`,
+		orphan, []byte{0x0a, 0x00},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	meta := db.NewTyped(fdb, internalMetaPrefix)
+	if err := meta.PutBool(gcNeedsFullScanKey, true); err != nil {
+		t.Fatal(err)
+	}
+
+	countOrphan := func() int {
+		t.Helper()
+		var n int
+		if err := fdb.sql.Get(&n, `SELECT count(*) FROM blocklists WHERE blocklist_hash = ?`, orphan); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	flag := func() bool {
+		t.Helper()
+		v, _, err := meta.Bool(gcNeedsFullScanKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	runGC := func() {
+		t.Helper()
+		fdb.updateLock.Lock()
+		err := garbageCollectBlocklistsAndBlocksLocked(context.Background(), fdb)
+		fdb.updateLock.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if countOrphan() != 1 {
+		t.Fatal("orphan was not set up")
+	}
+
+	// Zero time budget: the scan must report itself interrupted, keep the
+	// orphan, and leave the flag set so a later run retries.
+	gcMaxRuntime = 0
+	runGC()
+	if n := countOrphan(); n != 1 {
+		t.Fatalf("interrupted scan collected the orphan: %d rows left", n)
+	}
+	if !flag() {
+		t.Fatal("interrupted scan cleared the needs-full-scan flag")
+	}
+
+	// With time available it completes, collects the orphan, and clears the flag.
+	gcMaxRuntime = 5 * time.Minute
+	runGC()
+	if n := countOrphan(); n != 0 {
+		t.Fatalf("completed scan left the orphan behind: %d rows", n)
+	}
+	if flag() {
+		t.Fatal("completed scan did not clear the needs-full-scan flag")
+	}
+}
+
 func TestInsertLargeFile(t *testing.T) {
 	t.Parallel()
 
