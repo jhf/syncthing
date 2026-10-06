@@ -24,6 +24,10 @@ type folderDB struct {
 	// needCache holds the expensive per-device need count. It has its own
 	// locking and must be invalidated by every write to the files table.
 	needCache needCountCache
+
+	// needListCache holds the remote need list for the out-of-sync view. Same
+	// locking and invalidation contract as needCache, and invalidated with it.
+	needListCache needListCache
 }
 
 func openFolderDB(folder, path string, deleteRetention time.Duration) (*folderDB, error) {

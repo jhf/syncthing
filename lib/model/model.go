@@ -1003,6 +1003,16 @@ func (m *model) FolderProgressBytesCompleted(folder string) int64 {
 // same query without the ORDER BY, sorted here, measured 0.60 s. See
 // db.PullOrderUnspecified.
 func (m *model) neededGlobalFilesByName(folder string, device protocol.DeviceID) ([]protocol.FileInfo, error) {
+	if device != protocol.LocalDeviceID {
+		// The remote need list is seconds of work even without the SQL ORDER BY,
+		// because it has to probe every global file against that device's
+		// entries to decide what is really missing, and the out-of-sync view
+		// asks for it every time it is opened. The database keeps it cached and
+		// invalidates it on writes, so this is usually free and at worst costs
+		// what the query below costs.
+		return m.sdb.AllNeededGlobalFilesCached(folder, device)
+	}
+
 	it, errFn := m.sdb.AllNeededGlobalFiles(folder, device, db.PullOrderUnspecified, 0, 0)
 	files := slices.Collect(it)
 	if err := errFn(); err != nil {
