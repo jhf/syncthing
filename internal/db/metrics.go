@@ -8,6 +8,7 @@ package db
 
 import (
 	"iter"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -63,39 +64,80 @@ func (m metricsDB) account(folder, op string) func() {
 	}
 }
 
+// accountIter wraps an iterator-returning DB call so that the operation is
+// accounted for as long as the caller can still be consuming it, instead of
+// only until the function that built the iterator returned.
+//
+// The previous shape, `defer m.account(...)()`, closed the span before a single
+// row had been fetched, because the query is executed lazily while the caller
+// ranges over the iterator. AllNeededGlobalFiles, for example, reported 0.12 ms
+// per call on a database where the same call really took 9-20 seconds: the
+// metric was measuring statement preparation and calling it the operation.
+//
+// The span closes when the iterator is exhausted, when the caller abandons it
+// (breaking out of the range makes yield return false), or when the error
+// function is called, whichever happens first. Callers are allowed to consume
+// the iterator and then call the error function, so closing twice is prevented
+// rather than assumed away. A caller that does neither will keep the operation
+// open, which is the same lifetime as the leaked database cursor it is holding.
+func accountIter[T any](done func(), it iter.Seq[T], errFn func() error) (iter.Seq[T], func() error) {
+	finish := sync.OnceFunc(done)
+	return func(yield func(T) bool) {
+		defer finish()
+		for v := range it {
+			if !yield(v) {
+				return
+			}
+		}
+	}, func() error {
+		defer finish()
+		if errFn == nil {
+			return nil
+		}
+		return errFn()
+	}
+}
+
 func (m metricsDB) AllLocalFilesWithBlocksHash(folder string, h []byte) (iter.Seq[FileMetadata], func() error) {
-	defer m.account(folder, "AllLocalFilesWithBlocksHash")()
-	return m.DB.AllLocalFilesWithBlocksHash(folder, h)
+	done := m.account(folder, "AllLocalFilesWithBlocksHash")
+	it, errFn := m.DB.AllLocalFilesWithBlocksHash(folder, h)
+	return accountIter(done, it, errFn)
 }
 
 func (m metricsDB) AllGlobalFiles(folder string) (iter.Seq[FileMetadata], func() error) {
-	defer m.account(folder, "AllGlobalFiles")()
-	return m.DB.AllGlobalFiles(folder)
+	done := m.account(folder, "AllGlobalFiles")
+	it, errFn := m.DB.AllGlobalFiles(folder)
+	return accountIter(done, it, errFn)
 }
 
 func (m metricsDB) AllGlobalFilesPrefix(folder string, prefix string) (iter.Seq[FileMetadata], func() error) {
-	defer m.account(folder, "AllGlobalFilesPrefix")()
-	return m.DB.AllGlobalFilesPrefix(folder, prefix)
+	done := m.account(folder, "AllGlobalFilesPrefix")
+	it, errFn := m.DB.AllGlobalFilesPrefix(folder, prefix)
+	return accountIter(done, it, errFn)
 }
 
 func (m metricsDB) AllLocalFiles(folder string, device protocol.DeviceID) (iter.Seq[protocol.FileInfo], func() error) {
-	defer m.account(folder, "AllLocalFiles")()
-	return m.DB.AllLocalFiles(folder, device)
+	done := m.account(folder, "AllLocalFiles")
+	it, errFn := m.DB.AllLocalFiles(folder, device)
+	return accountIter(done, it, errFn)
 }
 
 func (m metricsDB) AllLocalFilesWithPrefix(folder string, device protocol.DeviceID, prefix string) (iter.Seq[protocol.FileInfo], func() error) {
-	defer m.account(folder, "AllLocalFilesPrefix")()
-	return m.DB.AllLocalFilesWithPrefix(folder, device, prefix)
+	done := m.account(folder, "AllLocalFilesPrefix")
+	it, errFn := m.DB.AllLocalFilesWithPrefix(folder, device, prefix)
+	return accountIter(done, it, errFn)
 }
 
 func (m metricsDB) AllLocalFilesBySequence(folder string, device protocol.DeviceID, startSeq int64, limit int) (iter.Seq[protocol.FileInfo], func() error) {
-	defer m.account(folder, "AllLocalFilesBySequence")()
-	return m.DB.AllLocalFilesBySequence(folder, device, startSeq, limit)
+	done := m.account(folder, "AllLocalFilesBySequence")
+	it, errFn := m.DB.AllLocalFilesBySequence(folder, device, startSeq, limit)
+	return accountIter(done, it, errFn)
 }
 
 func (m metricsDB) AllNeededGlobalFiles(folder string, device protocol.DeviceID, order config.PullOrder, limit, offset int) (iter.Seq[protocol.FileInfo], func() error) {
-	defer m.account(folder, "AllNeededGlobalFiles")()
-	return m.DB.AllNeededGlobalFiles(folder, device, order, limit, offset)
+	done := m.account(folder, "AllNeededGlobalFiles")
+	it, errFn := m.DB.AllNeededGlobalFiles(folder, device, order, limit, offset)
+	return accountIter(done, it, errFn)
 }
 
 func (m metricsDB) GetGlobalAvailability(folder, file string) ([]protocol.DeviceID, error) {
@@ -104,8 +146,9 @@ func (m metricsDB) GetGlobalAvailability(folder, file string) ([]protocol.Device
 }
 
 func (m metricsDB) AllLocalBlocksWithHash(folder string, hash []byte) (iter.Seq[BlockMapEntry], func() error) {
-	defer m.account("-", "AllLocalBlocksWithHash")()
-	return m.DB.AllLocalBlocksWithHash(folder, hash)
+	done := m.account("-", "AllLocalBlocksWithHash")
+	it, errFn := m.DB.AllLocalBlocksWithHash(folder, hash)
+	return accountIter(done, it, errFn)
 }
 
 func (m metricsDB) Close() error {
@@ -225,6 +268,7 @@ func (m metricsDB) DeleteKV(key string) error {
 }
 
 func (m metricsDB) PrefixKV(prefix string) (iter.Seq[KeyValue], func() error) {
-	defer m.account("-", "PrefixKV")()
-	return m.DB.PrefixKV(prefix)
+	done := m.account("-", "PrefixKV")
+	it, errFn := m.DB.PrefixKV(prefix)
+	return accountIter(done, it, errFn)
 }
