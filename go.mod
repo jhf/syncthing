@@ -108,3 +108,5 @@ tool (
 	github.com/maxbrunsfeld/counterfeiter/v6
 	golang.org/x/tools/cmd/goimports
 )
+
+replace github.com/syncthing/notify => github.com/fluffypony/notify v0.0.0-20260923145434-fbdebdee763b
