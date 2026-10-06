@@ -244,6 +244,18 @@ func (s *DB) AllNeededGlobalFiles(folder string, device protocol.DeviceID, order
 	return fdb.AllNeededGlobalFiles(device, order, limit, offset)
 }
 
+func (s *DB) AllNeededGlobalFilesCached(folder string, device protocol.DeviceID) ([]protocol.FileInfo, error) {
+	fdb, err := s.getFolderDB(folder, false)
+	if errors.Is(err, errNoSuchFolder) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	files, _, err := fdb.neededGlobalFilesCached(device, time.Now())
+	return files, err
+}
+
 func (s *DB) DropAllFiles(folder string, device protocol.DeviceID) error {
 	fdb, err := s.getFolderDB(folder, false)
 	if errors.Is(err, errNoSuchFolder) {

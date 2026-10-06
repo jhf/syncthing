@@ -86,6 +86,14 @@ type DB interface {
 	AllLocalFilesWithPrefix(folder string, device protocol.DeviceID, prefix string) (iter.Seq[protocol.FileInfo], func() error)
 	AllLocalFilesWithBlocksHash(folder string, h []byte) (iter.Seq[FileMetadata], func() error)
 	AllNeededGlobalFiles(folder string, device protocol.DeviceID, order config.PullOrder, limit, offset int) (iter.Seq[protocol.FileInfo], func() error)
+
+	// AllNeededGlobalFilesCached returns the whole remote need list for a
+	// device, sorted by name. Unlike AllNeededGlobalFiles this is a complete
+	// list rather than a page, and it may be served from a cache that is
+	// invalidated by every write to the files table and expires after a minute
+	// as a safety net. It exists for views that would otherwise recompute
+	// seconds of work for every page they show.
+	AllNeededGlobalFilesCached(folder string, device protocol.DeviceID) ([]protocol.FileInfo, error)
 	AllLocalBlocksWithHash(folder string, hash []byte) (iter.Seq[BlockMapEntry], func() error)
 
 	// Block index management
