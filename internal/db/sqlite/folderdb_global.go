@@ -109,6 +109,10 @@ func (s *folderDB) AllGlobalFilesPrefix(prefix string) (iter.Seq[db.FileMetadata
 func (s *folderDB) AllNeededGlobalFiles(device protocol.DeviceID, order config.PullOrder, limit, offset int) (iter.Seq[protocol.FileInfo], func() error) {
 	var selectOpts string
 	switch order {
+	case db.PullOrderUnspecified:
+		// No ORDER BY. The caller sorts. See the comment on the constant: the
+		// name-ordered plan walks every file name in the folder and probes per
+		// name, so it costs seconds even when the result is empty.
 	case config.PullOrderRandom:
 		selectOpts = "ORDER BY RANDOM()"
 	case config.PullOrderAlphabetic:
