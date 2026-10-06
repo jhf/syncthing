@@ -992,6 +992,28 @@ func (m *model) FolderProgressBytesCompleted(folder string) int64 {
 	return m.progressEmitter.BytesCompleted(folder)
 }
 
+// neededGlobalFilesByName returns the whole needed set for a device, sorted by
+// name.
+//
+// The sorting happens here rather than in SQL deliberately. Asking the database
+// for ORDER BY n.name makes SQLite drive from file_names in name order and probe
+// files and then fileinfos once per name, so it walks every name in the folder:
+// on a folder with 2.8M names that is ~20 s even when nothing is needed, and the
+// LIMIT cannot cut it short because the predicate rejects nearly every row. The
+// same query without the ORDER BY, sorted here, measured 0.60 s. See
+// db.PullOrderUnspecified.
+func (m *model) neededGlobalFilesByName(folder string, device protocol.DeviceID) ([]protocol.FileInfo, error) {
+	it, errFn := m.sdb.AllNeededGlobalFiles(folder, device, db.PullOrderUnspecified, 0, 0)
+	files := slices.Collect(it)
+	if err := errFn(); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(files, func(a, b protocol.FileInfo) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	return files, nil
+}
+
 // NeedFolderFiles returns paginated list of currently needed files in
 // progress, queued, and to be queued on next puller iteration.
 func (m *model) NeedFolderFiles(folder string, page, perpage int) ([]protocol.FileInfo, []protocol.FileInfo, []protocol.FileInfo, error) {
@@ -1039,8 +1061,11 @@ func (m *model) NeedFolderFiles(folder string, page, perpage int) ([]protocol.Fi
 
 	if p.get > 0 {
 		rest = make([]protocol.FileInfo, 0, p.get)
-		it, errFn := m.sdb.AllNeededGlobalFiles(folder, protocol.LocalDeviceID, config.PullOrderAlphabetic, 0, 0)
-		for f := range it {
+		needed, err := m.neededGlobalFilesByName(folder, protocol.LocalDeviceID)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		for _, f := range needed {
 			if cfg.IgnoreDelete && f.IsDeleted() {
 				continue
 			}
@@ -1055,9 +1080,6 @@ func (m *model) NeedFolderFiles(folder string, page, perpage int) ([]protocol.Fi
 			if p.get == 0 {
 				break
 			}
-		}
-		if err := errFn(); err != nil {
-			return nil, nil, nil, err
 		}
 	}
 
@@ -1075,9 +1097,28 @@ func (m *model) RemoteNeedFolderFiles(folder string, device protocol.DeviceID, p
 		return nil, ErrFolderMissing
 	}
 
-	it, errFn := m.sdb.AllNeededGlobalFiles(folder, device, config.PullOrderAlphabetic, perpage, (page-1)*perpage)
-	files := slices.Collect(it)
-	return files, errFn()
+	// Fetch the whole set unordered and page it here, rather than asking SQL for
+	// a name-ordered slice of it: the ordered query costs seconds on a large
+	// folder no matter how small the page is. See neededGlobalFilesByName.
+	files, err := m.neededGlobalFilesByName(folder, device)
+	if err != nil {
+		return nil, err
+	}
+	if perpage <= 0 {
+		return files, nil
+	}
+	start := (page - 1) * perpage
+	if start < 0 {
+		start = 0
+	}
+	if start > len(files) {
+		start = len(files)
+	}
+	end := start + perpage
+	if end > len(files) {
+		end = len(files)
+	}
+	return files[start:end], nil
 }
 
 func (m *model) LocalChangedFolderFiles(folder string, page, perpage int) ([]protocol.FileInfo, error) {
