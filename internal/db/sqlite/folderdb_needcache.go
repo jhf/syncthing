@@ -7,6 +7,8 @@
 package sqlite
 
 import (
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -87,11 +89,14 @@ func (c *needCountCache) invalidate() {
 }
 
 // invalidateNeedCounts must be called by every write path that can change the
-// files table. The need count is derived from that table, so a write makes every
-// cached value suspect. The local device's counts come from the maintained
-// counts table and are not cached.
+// files table. Both the need count and the need list are derived from that
+// table, so a write makes every cached value of either suspect. They are
+// invalidated together here so a write path cannot remember one and forget the
+// other. The local device's counts come from the maintained counts table and are
+// not cached.
 func (s *folderDB) invalidateNeedCounts() {
 	s.needCache.invalidate()
+	s.needListCache.invalidate()
 }
 
 // countNeed returns the need counts for a device, and whether they came from the
@@ -112,4 +117,92 @@ func (s *folderDB) countNeed(device protocol.DeviceID, now time.Time) (db.Counts
 	}
 	s.needCache.put(device, counts, now)
 	return counts, false, nil
+}
+
+type needListEntry struct {
+	files   []protocol.FileInfo
+	at      time.Time
+	invalid bool
+}
+
+// needListCache holds the remote need list, which is what the "out of sync with
+// device X" view asks for. Even without the SQL ORDER BY that query is seconds
+// of work on a large folder, because it has to probe every global file against
+// the device's entries to decide whether it is really missing; the list itself
+// is usually empty or tiny. The GUI asks for it every time that view is opened.
+//
+// It shares the lifetime rules of needCountCache rather than inventing its own:
+// same 60 s TTL as a safety net against a write path that forgets to invalidate,
+// and the same minimum-recompute floor so that a burst of index batches
+// coalesces into one recomputation instead of one per batch. Both are
+// invalidated together, from the same call in every write path.
+type needListCache struct {
+	mut     sync.Mutex
+	entries map[protocol.DeviceID]needListEntry
+}
+
+// get returns a usable entry, name-sorted. An invalidated entry is still served
+// until needCountCacheMinRecompute has passed since it was computed.
+func (c *needListCache) get(device protocol.DeviceID, now time.Time) ([]protocol.FileInfo, bool) {
+	c.mut.Lock()
+	defer c.mut.Unlock()
+
+	entry, ok := c.entries[device]
+	if !ok {
+		return nil, false
+	}
+	age := now.Sub(entry.at)
+	if age >= needCountCacheTTL {
+		return nil, false
+	}
+	if entry.invalid && age >= needCountCacheMinRecompute {
+		return nil, false
+	}
+	return entry.files, true
+}
+
+// put stores a list. The caller's slice is kept as-is: it is built locally and
+// never mutated afterwards, and copying a large list on every index update would
+// cost more than the lookups it saves.
+func (c *needListCache) put(device protocol.DeviceID, files []protocol.FileInfo, now time.Time) {
+	c.mut.Lock()
+	defer c.mut.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[protocol.DeviceID]needListEntry)
+	}
+	c.entries[device] = needListEntry{files: files, at: now}
+}
+
+func (c *needListCache) invalidate() {
+	c.mut.Lock()
+	defer c.mut.Unlock()
+	for device, entry := range c.entries {
+		entry.invalid = true
+		c.entries[device] = entry
+	}
+}
+
+// neededGlobalFilesCached returns the whole remote need list for a device,
+// sorted by name, and whether it came from the cache. It is the form the
+// out-of-sync view wants: complete, ordered, and pageable by the caller without
+// asking the database again per page.
+//
+// The order is applied here rather than in SQL because ordering by name makes
+// SQLite walk every name in the folder; see db.PullOrderUnspecified.
+func (s *folderDB) neededGlobalFilesCached(device protocol.DeviceID, now time.Time) ([]protocol.FileInfo, bool, error) {
+	if files, ok := s.needListCache.get(device, now); ok {
+		return files, true, nil
+	}
+
+	it, errFn := s.AllNeededGlobalFiles(device, db.PullOrderUnspecified, 0, 0)
+	files := slices.Collect(it)
+	if err := errFn(); err != nil {
+		return nil, false, err
+	}
+	slices.SortFunc(files, func(a, b protocol.FileInfo) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	s.needListCache.put(device, files, now)
+	return files, false, nil
 }
