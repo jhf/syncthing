@@ -230,6 +230,8 @@ func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB) error {
 
 	// Remove deleted files that are marked as not needed (we have processed
 	// them) and they were deleted more than MaxDeletedFileAge ago.
+	// Dropping rows can change what a device is counted as needing.
+	defer fdb.invalidateNeedCounts()
 	l.DebugContext(ctx, "Forgetting deleted files", "retention", fdb.deleteRetention)
 	res, err := fdb.stmt(`
 		DELETE FROM files
