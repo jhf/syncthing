@@ -9,6 +9,7 @@ package model
 import (
 	"context"
 
+	"github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/internal/itererr"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/events"
@@ -45,7 +46,10 @@ func (f *sendOnlyFolder) pull(ctx context.Context) (bool, error) {
 		return nil
 	})
 
-	for file, err := range itererr.Zip(f.db.AllNeededGlobalFiles(f.folderID, protocol.LocalDeviceID, config.PullOrderAlphabetic, 0, 0)) {
+	// No order: both loops here process the whole set independently of sequence, and asking
+	// SQL to order by name makes it walk every name in the folder to find the matches. See
+	// db.PullOrderUnspecified.
+	for file, err := range itererr.Zip(f.db.AllNeededGlobalFiles(f.folderID, protocol.LocalDeviceID, db.PullOrderUnspecified, 0, 0)) {
 		if err != nil {
 			return false, err
 		}
@@ -104,7 +108,8 @@ func (f *sendOnlyFolder) override(ctx context.Context) error {
 		return nil
 	})
 
-	for need, err := range itererr.Zip(f.db.AllNeededGlobalFiles(f.folderID, protocol.LocalDeviceID, config.PullOrderAlphabetic, 0, 0)) {
+	// See the note in pull() above: the order is not used.
+	for need, err := range itererr.Zip(f.db.AllNeededGlobalFiles(f.folderID, protocol.LocalDeviceID, db.PullOrderUnspecified, 0, 0)) {
 		if err != nil {
 			return err
 		}
