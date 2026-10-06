@@ -20,6 +20,10 @@ type folderDB struct {
 
 	localDeviceIdx  int64
 	deleteRetention time.Duration
+
+	// needCache holds the expensive per-device need count. It has its own
+	// locking and must be invalidated by every write to the files table.
+	needCache needCountCache
 }
 
 func openFolderDB(folder, path string, deleteRetention time.Duration) (*folderDB, error) {
