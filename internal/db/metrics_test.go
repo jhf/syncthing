@@ -35,17 +35,17 @@ type fakeDB struct {
 
 func (f *fakeDB) AllNeededGlobalFiles(string, protocol.DeviceID, config.PullOrder, int, int) (iter.Seq[protocol.FileInfo], func() error) {
 	return func(yield func(protocol.FileInfo) bool) {
-		for i := range f.rows {
-			// The work happens while the caller consumes, which is exactly what
-			// the old accounting missed.
-			time.Sleep(f.delay)
-			if !yield(protocol.FileInfo{Name: string(rune('a' + i))}) {
-				return
+			for i := range f.rows {
+				// The work happens while the caller consumes, which is exactly what
+				// the old accounting missed.
+				time.Sleep(f.delay)
+				if !yield(protocol.FileInfo{Name: string(rune('a' + i))}) {
+					return
+				}
 			}
+		}, func() error {
+			return nil
 		}
-	}, func() error {
-		return nil
-	}
 }
 
 func counterValue(t *testing.T, c prometheus.Counter) float64 {
