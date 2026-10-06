@@ -140,6 +140,11 @@ func (m metricsDB) AllNeededGlobalFiles(folder string, device protocol.DeviceID,
 	return accountIter(done, it, errFn)
 }
 
+func (m metricsDB) AllNeededGlobalFilesCached(folder string, device protocol.DeviceID) ([]protocol.FileInfo, error) {
+	defer m.account(folder, "AllNeededGlobalFilesCached")()
+	return m.DB.AllNeededGlobalFilesCached(folder, device)
+}
+
 func (m metricsDB) GetGlobalAvailability(folder, file string) ([]protocol.DeviceID, error) {
 	defer m.account(folder, "GetGlobalAvailability")()
 	return m.DB.GetGlobalAvailability(folder, file)
