@@ -10,6 +10,7 @@ import (
 	"slices"
 	"testing"
 
+	dbpkg "github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/protocol"
 )
@@ -70,6 +71,23 @@ func TestNeed(t *testing.T) {
 	if !slices.Equal(remoteNeed, []string{"test1", "test3"}) {
 		t.Log(remoteNeed)
 		t.Fatal("bad remote need")
+	}
+
+	// Asking for no particular order must not change which rows come back. The
+	// rows come out in scan order rather than by name, which is the whole point,
+	// so compare sets. Callers that want an order sort the result themselves.
+	unspecifiedLocal := fiNames(mustCollect[protocol.FileInfo](t)(db.AllNeededGlobalFiles(folderID, protocol.LocalDeviceID, dbpkg.PullOrderUnspecified, 0, 0)))
+	slices.Sort(unspecifiedLocal)
+	if !slices.Equal(unspecifiedLocal, []string{"test2", "test4"}) {
+		t.Log(unspecifiedLocal)
+		t.Fatal("bad local need with unspecified order")
+	}
+
+	unspecifiedRemote := fiNames(mustCollect[protocol.FileInfo](t)(db.AllNeededGlobalFiles(folderID, protocol.DeviceID{42}, dbpkg.PullOrderUnspecified, 0, 0)))
+	slices.Sort(unspecifiedRemote)
+	if !slices.Equal(unspecifiedRemote, []string{"test1", "test3"}) {
+		t.Log(unspecifiedRemote)
+		t.Fatal("bad remote need with unspecified order")
 	}
 }
 
