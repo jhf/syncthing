@@ -53,8 +53,13 @@ func NewFolderSummaryService(cfg config.Wrapper, m Model, id protocol.DeviceID, 
 		model:      m,
 		id:         id,
 		evLogger:   evLogger,
-		immediate:  make(chan string),
-		folders:    make(map[string]struct{}),
+		// immediate carries folders that need an urgent summary refresh. It is
+		// buffered so that a nudge arriving while a summary pass is in flight is
+		// remembered and handled as soon as that pass ends, instead of being
+		// dropped and waiting for the next scheduled pass. One pending folder is
+		// enough: the folders set below already records any that are missed.
+		immediate: make(chan string, 1),
+		folders:   make(map[string]struct{}),
 	}
 
 	service.Add(svcutil.AsService(service.listenForUpdates, fmt.Sprintf("%s/listenForUpdates", service)))
@@ -273,10 +278,12 @@ func (c *folderSummaryService) processUpdate(ev events.Event) {
 			return
 		}
 
-		// The folder changed to idle from syncing. We should do an
-		// immediate refresh to update the GUI. The send to
-		// c.immediate must be nonblocking so that we can continue
-		// handling events.
+		// The folder changed to idle from syncing, so the GUI should be told as
+		// soon as possible. The send is nonblocking (a summary pass may be in
+		// flight and may take seconds on a large folder); with the buffered
+		// channel above the nudge is queued rather than discarded. If the buffer
+		// is already full, the folders set still schedules this folder for the
+		// next pass, so the refresh is delayed but never lost.
 
 		folder = data["folder"].(string)
 		select {
