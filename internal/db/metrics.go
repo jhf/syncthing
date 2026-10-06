@@ -83,19 +83,19 @@ func (m metricsDB) account(folder, op string) func() {
 func accountIter[T any](done func(), it iter.Seq[T], errFn func() error) (iter.Seq[T], func() error) {
 	finish := sync.OnceFunc(done)
 	return func(yield func(T) bool) {
-		defer finish()
-		for v := range it {
-			if !yield(v) {
-				return
+			defer finish()
+			for v := range it {
+				if !yield(v) {
+					return
+				}
 			}
+		}, func() error {
+			defer finish()
+			if errFn == nil {
+				return nil
+			}
+			return errFn()
 		}
-	}, func() error {
-		defer finish()
-		if errFn == nil {
-			return nil
-		}
-		return errFn()
-	}
 }
 
 func (m metricsDB) AllLocalFilesWithBlocksHash(folder string, h []byte) (iter.Seq[FileMetadata], func() error) {
