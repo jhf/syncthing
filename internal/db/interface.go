@@ -27,6 +27,21 @@ type DBService interface {
 	LastMaintenanceTime() time.Time
 }
 
+// PullOrderUnspecified asks AllNeededGlobalFiles for the rows in whatever order
+// the query planner finds cheapest, i.e. no ORDER BY at all.
+//
+// This exists because ordering by name is not free at scale, and it is not a
+// small constant either. The name-ordered plan drives from the file_names table
+// in name order and probes files and fileinfos once per name, so on a folder
+// with 2.8M names it must walk all of them even when nothing is needed, and the
+// LIMIT never fires: measured 19.71 s for the plain local need query against
+// 0.60 s for the same query without the ORDER BY. Callers that need a
+// particular order should ask for no order and sort the result themselves.
+//
+// It is deliberately not part of the config.PullOrder set: it is not something
+// a user can choose for a folder, only an instruction to the query.
+const PullOrderUnspecified config.PullOrder = -1
+
 // UpdateOption modifies the behavior of a DB Update call.
 type UpdateOption func(*UpdateOptions)
 
@@ -71,6 +86,14 @@ type DB interface {
 	AllLocalFilesWithPrefix(folder string, device protocol.DeviceID, prefix string) (iter.Seq[protocol.FileInfo], func() error)
 	AllLocalFilesWithBlocksHash(folder string, h []byte) (iter.Seq[FileMetadata], func() error)
 	AllNeededGlobalFiles(folder string, device protocol.DeviceID, order config.PullOrder, limit, offset int) (iter.Seq[protocol.FileInfo], func() error)
+
+	// AllNeededGlobalFilesCached returns the whole remote need list for a
+	// device, sorted by name. Unlike AllNeededGlobalFiles this is a complete
+	// list rather than a page, and it may be served from a cache that is
+	// invalidated by every write to the files table and expires after a minute
+	// as a safety net. It exists for views that would otherwise recompute
+	// seconds of work for every page they show.
+	AllNeededGlobalFilesCached(folder string, device protocol.DeviceID) ([]protocol.FileInfo, error)
 	AllLocalBlocksWithHash(folder string, hash []byte) (iter.Seq[BlockMapEntry], func() error)
 
 	// Block index management

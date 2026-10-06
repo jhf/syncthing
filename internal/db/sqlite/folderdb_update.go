@@ -37,6 +37,8 @@ const (
 func (s *folderDB) Update(device protocol.DeviceID, fs []protocol.FileInfo, options db.UpdateOptions) error {
 	s.updateLock.Lock()
 	defer s.updateLock.Unlock()
+	// This can change global flags, so every cached need count is suspect.
+	defer s.invalidateNeedCounts()
 
 	deviceIdx, err := s.deviceIdxLocked(device)
 	if err != nil {
@@ -268,6 +270,8 @@ func (s *folderDB) DropDevice(device protocol.DeviceID) error {
 
 	s.updateLock.Lock()
 	defer s.updateLock.Unlock()
+	// Cascades to this device's files, so cached need counts are suspect.
+	defer s.invalidateNeedCounts()
 
 	tx, err := s.sql.BeginTxx(context.Background(), nil)
 	if err != nil {
@@ -303,6 +307,7 @@ func (s *folderDB) DropDevice(device protocol.DeviceID) error {
 func (s *folderDB) DropAllFiles(device protocol.DeviceID) error {
 	s.updateLock.Lock()
 	defer s.updateLock.Unlock()
+	defer s.invalidateNeedCounts()
 
 	// This is a two part operation, first dropping all the files and then
 	// recalculating the global state for the entire folder.
@@ -360,6 +365,7 @@ func (s *folderDB) DropFilesNamed(device protocol.DeviceID, names []string) erro
 
 	s.updateLock.Lock()
 	defer s.updateLock.Unlock()
+	defer s.invalidateNeedCounts()
 
 	deviceIdx, err := s.deviceIdxLocked(device)
 	if err != nil {
