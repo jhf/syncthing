@@ -7,6 +7,8 @@
 package sqlite
 
 import (
+	"time"
+
 	"github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/lib/protocol"
 )
@@ -32,10 +34,8 @@ func (s *folderDB) CountLocal(device protocol.DeviceID) (db.Counts, error) {
 }
 
 func (s *folderDB) CountNeed(device protocol.DeviceID) (db.Counts, error) {
-	if device == protocol.LocalDeviceID {
-		return s.needSizeLocal()
-	}
-	return s.needSizeRemote(device)
+	counts, _, err := s.countNeed(device, time.Now())
+	return counts, err
 }
 
 func (s *folderDB) CountGlobal() (db.Counts, error) {
