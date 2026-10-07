@@ -476,6 +476,24 @@ func (f *folder) pull(ctx context.Context) (success bool, err error) {
 	return false, err
 }
 
+// scanChunkBudget bounds how long one chunk of a walk may run before it yields. It is a var so
+// tests can shrink it to force chunk boundaries; production wants it small enough that a pull is
+// never waiting long, and large enough that the per-chunk overhead stays irrelevant.
+var scanChunkBudget = 250 * time.Millisecond
+
+// serviceQueuedPull runs one pull iteration if the folder has one queued, and returns immediately
+// otherwise. It exists so that a chunked scan does not starve the puller: the scan and the pull both
+// run in the serve goroutine, so this is the same work the loop would have done between two selects.
+func (f *folder) serviceQueuedPull(ctx context.Context) error {
+	select {
+	case <-f.pullScheduled:
+		_, err := f.pull(ctx)
+		return err
+	default:
+		return nil
+	}
+}
+
 func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 	f.sl.DebugContext(ctx, "Scanning")
 
@@ -546,10 +564,34 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 		}
 	}()
 
-	changesHere, err := f.scanSubdirsChangedAndNew(ctx, subDirs, batch)
-	changes += changesHere
-	if err != nil {
-		return err
+	// The walk runs in bounded chunks, and a queued pull is serviced between them. This is the
+	// whole point of the chunking: a scan holds the serve loop for its entire duration, and while
+	// it holds it nothing is pulled. Measured on this folder, that was a 585-second scan with a
+	// 300-file queue frozen behind it. Both the scan and the pull run in the serve goroutine, so
+	// servicing a pull here is the same thing the loop would have done had it not been scanning.
+	resumeFrom := ""
+	for {
+		f.setState(FolderScanning)
+
+		changesHere, last, more, err := f.scanSubdirsChangedAndNew(ctx, subDirs, batch, resumeFrom)
+		changes += changesHere
+		if err != nil {
+			return err
+		}
+		if !more {
+			break
+		}
+		resumeFrom = last
+
+		if err := batch.Flush(); err != nil {
+			return err
+		}
+		if err := f.serviceQueuedPull(ctx); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
 
 	if err := batch.Flush(); err != nil {
@@ -565,7 +607,7 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 	// Do a scan of the database for each prefix, to check for deleted and
 	// ignored files.
 
-	changesHere, err = f.scanSubdirsDeletedAndIgnored(ctx, subDirs, batch)
+	changesHere, err := f.scanSubdirsDeletedAndIgnored(ctx, subDirs, batch)
 	changes += changesHere
 	if err != nil {
 		return err
@@ -672,8 +714,17 @@ func (b *scanBatch) Update(fi protocol.FileInfo) (bool, error) {
 	return true, nil
 }
 
-func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string, batch *scanBatch) (int, error) {
-	changes := 0
+// scanSubdirsChangedAndNew walks the given subs, reporting entries that are new or changed.
+//
+// It runs for at most scanChunkBudget and then returns with more set and lastPath being the resume
+// marker for the next chunk. The marker is the minimum of the last applied path and the first
+// aborted path seen in this chunk: results arrive out of order, so the set of applied entries has
+// holes, and everything the walk handed over but did not apply is reported as an error result by
+// the scanner. Everything strictly below the marker is then known to be applied, and nothing below
+// it was silently dropped, so resuming the walk from the marker loses nothing. The re-walked window
+// is bounded by the hashers in flight at the cut, not by the size of the chunk.
+func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string, batch *scanBatch, resumeFrom string) (changes int, lastPath string, more bool, err error) {
+	deadline := time.Now().Add(scanChunkBudget)
 
 	// If we return early e.g. due to a folder health error, the scan needs
 	// to be cancelled.
@@ -698,6 +749,7 @@ func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string,
 		ScanOwnership:         f.SendOwnership || f.SyncOwnership,
 		ScanXattrs:            f.SendXattrs || f.SyncXattrs,
 		XattrFilter:           f.XattrFilter,
+		ResumeFrom:            resumeFrom,
 	}
 	var fchan chan scanner.ScanResult
 	if f.Type == config.FolderTypeReceiveEncrypted {
@@ -706,10 +758,37 @@ func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string,
 		fchan = scanner.Walk(scanCtx, scanConfig)
 	}
 
+	// stopped records that the deadline cut the walk short. The walk is cancelled there, but results
+	// already in the hashing pipeline are still consumed and applied rather than thrown away. They
+	// have to be: results do not arrive in walk order, so an entry whose result is still in flight
+	// may sort before the resume marker, and resuming would then skip it for good. Draining in
+	// flight work is bounded by the hashers and the queue depth, not by the size of the folder.
+	stopped := false
+	// firstAborted is the smallest path of any error result in this chunk, aborts included. The
+	// scanner reports every handed-over file it could not apply, so the resume marker must stay
+	// behind all of them: an entry the marker moved past would never be visited again.
+	firstAborted := ""
 	for res := range fchan {
 		if res.Err != nil {
-			f.newScanError(res.Path, res.Err)
+			// An abort (the chunk deadline cancelled the scan under this entry) is
+			// bookkeeping for the resume marker, not a user-visible scan error: the
+			// entry is retried by the next chunk. Anything else is a real error.
+			if !errors.Is(res.Err, context.Canceled) {
+				f.newScanError(res.Path, res.Err)
+			}
+			// The minimum must be in walk order for the same reason as below.
+			if firstAborted == "" || scanner.WalkOrderLess(res.Path, firstAborted) {
+				firstAborted = res.Path
+			}
 			continue
+		}
+
+		if !stopped && time.Now().After(deadline) {
+			// Stop walking here, at an item boundary, and let the loop below finish what is
+			// already in flight. This entry has not been handled yet, so lastPath still names the
+			// entry before it and resuming from there skips nothing.
+			stopped = true
+			scanCancel()
 		}
 
 		if err := batch.FlushIfFull(); err != nil {
@@ -718,11 +797,17 @@ func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string,
 			scanCancel()
 			for range fchan {
 			}
-			return changes, err
+			return changes, lastPath, false, err
 		}
 
 		if ok, err := batch.Update(res.File); err != nil {
-			return 0, err
+			// The scanner's abort reports cannot be abandoned to a cancelled context,
+			// so the channel must be drained before returning, or the scanner blocks
+			// on a send forever.
+			scanCancel()
+			for range fchan {
+			}
+			return changes, lastPath, false, err
 		} else if ok {
 			changes++
 		}
@@ -738,16 +823,31 @@ func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string,
 			if res.File.New && res.File.Size > 0 {
 				if nf, ok := f.findRename(ctx, res.File, batch); ok {
 					if ok, err := batch.Update(nf); err != nil {
-						return 0, err
+						scanCancel()
+						for range fchan {
+						}
+						return changes, lastPath, false, err
 					} else if ok {
 						changes++
 					}
 				}
 			}
 		}
+
+		lastPath = res.File.Name
 	}
 
-	return changes, nil
+	// The marker stays behind every reported abort: the minimum of what was applied and what
+	// was reported aborted. The minimum is in walk order, not string order, because that is
+	// the order the scanner's resume predicate speaks: "doc01.txt" < "doc01/file" as strings
+	// (0x2E < 0x2F), but the walk visits "doc01/file" first, so a string minimum would let the
+	// marker jump past an aborted file that was never applied. Nothing below the marker is
+	// then unaccounted for.
+	if firstAborted != "" && (lastPath == "" || scanner.WalkOrderLess(firstAborted, lastPath)) {
+		lastPath = firstAborted
+	}
+
+	return changes, lastPath, stopped, nil
 }
 
 func (f *folder) scanSubdirsDeletedAndIgnored(ctx context.Context, subDirs []string, batch *scanBatch) (int, error) {
