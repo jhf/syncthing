@@ -88,13 +88,20 @@ func newParallelHasher(ctx context.Context, folderID string, fs fs.Filesystem, w
 		go ph.hashFiles(ctx)
 	}
 
-	go ph.closeWhenDone()
+	go ph.closeWhenDone(ctx)
 }
 
 func (ph *parallelHasher) hashFiles(ctx context.Context) {
 	defer ph.wg.Done()
 
 	for {
+		// Do not start on another item once the scan is cancelled. This is checked
+		// explicitly, not just in the select below, so that a pending inbox send does
+		// not win the race against cancellation.
+		if ctx.Err() != nil {
+			return
+		}
+
 		select {
 		case f, ok := <-ph.inbox:
 			if !ok {
@@ -109,6 +116,10 @@ func (ph *parallelHasher) hashFiles(ctx context.Context) {
 
 			blocks, err := HashFile(ctx, ph.folderID, ph.fs, f.Name, f.BlockSize(), ph.counter)
 			if err != nil {
+				// The hash may have been cut short by cancellation. Either way the
+				// file must be reported, not dropped: the walker counted the handover,
+				// and a caller resuming the scan from a marker relies on every handed
+				// over file being either applied or reported.
 				handleError(ctx, "hashing", f.Name, err, ph.outbox)
 				continue
 			}
@@ -129,6 +140,10 @@ func (ph *parallelHasher) hashFiles(ctx context.Context) {
 			select {
 			case ph.outbox <- ScanResult{File: f}:
 			case <-ctx.Done():
+				// The scan was cancelled with this file fully hashed but
+				// undelivered. Report it as aborted instead of dropping it, so
+				// that a caller resuming the scan knows it was not applied.
+				handleError(ctx, "hashing", f.Name, ctx.Err(), ph.outbox)
 				return
 			}
 
@@ -138,11 +153,19 @@ func (ph *parallelHasher) hashFiles(ctx context.Context) {
 	}
 }
 
-func (ph *parallelHasher) closeWhenDone() {
+func (ph *parallelHasher) closeWhenDone(ctx context.Context) {
 	ph.wg.Wait()
 	// In case the hasher aborted on context, wait for filesystem
-	// walking/progress routine to finish.
-	for range ph.inbox {
+	// walking/progress routine to finish. Whatever the walk still hands over
+	// is not going to be hashed; report each such file as aborted instead of
+	// throwing it away, so that a caller resuming the scan knows it was not
+	// handled.
+	err := ctx.Err()
+	if err == nil {
+		err = context.Canceled
+	}
+	for f := range ph.inbox {
+		handleError(ctx, "hashing", f.Name, err, ph.outbox)
 	}
 	if ph.done != nil {
 		close(ph.done)

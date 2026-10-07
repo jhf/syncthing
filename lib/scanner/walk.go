@@ -211,11 +211,18 @@ func (w *walker) walk(ctx context.Context) chan ScanResult {
 		}()
 
 	loop:
-		for _, file := range filesToHash {
+		for i, file := range filesToHash {
 			l.Debugln(w, "real to hash:", file.Name)
 			select {
 			case realToHashChan <- file:
 			case <-ctx.Done():
+				// The scan was cut short with part of the list unhashed. Those files
+				// were counted as handed over when the walk sent them, so they must be
+				// reported as aborted, not dropped: a caller resuming the scan from a
+				// marker relies on it to know they were not handled.
+				for _, f := range filesToHash[i:] {
+					handleError(ctx, "hashing", f.Name, ctx.Err(), finishedChan)
+				}
 				break loop
 			}
 		}
@@ -520,6 +527,14 @@ func (w *walker) walkRegular(ctx context.Context, relPath string, info fs.FileIn
 
 	l.Debugln(w, "to hash:", relPath, f)
 
+	// Do not hand over new work once the walk is cancelled. Checked explicitly so that a
+	// ready receiver (the hasher cleanup drain) does not win the race against cancellation
+	// in the select below; prompt cancellation keeps the set of files aborted at a chunk
+	// boundary bounded by the number of hashers.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	select {
 	case toHashChan <- f:
 	case <-ctx.Done():
@@ -704,12 +719,18 @@ func (w *walker) updateFileInfo(dst, src protocol.FileInfo) protocol.FileInfo {
 
 func handleError(ctx context.Context, context, path string, err error, finishedChan chan<- ScanResult) {
 	l.Debugf("handle error on '%v': %v: %v", path, context, err)
-	select {
-	case finishedChan <- ScanResult{
+	res := ScanResult{
 		Err:  fmt.Errorf("%s: %w", context, err),
 		Path: path,
-	}:
+	}
+	select {
+	case finishedChan <- res:
 	case <-ctx.Done():
+		// The context is cancelled, but the result must still be delivered: the
+		// receiver drains the channel until it is closed, and a scan that resumes
+		// from a marker relies on every file the walker handed over being either
+		// applied or reported, never dropped silently.
+		finishedChan <- res
 	}
 }
 

@@ -713,15 +713,19 @@ func TestStopWalk(t *testing.T) {
 	// Empty out any waiting entries and wait for the channel to close.
 	// Count them, they should be zero or very few - essentially, each
 	// hasher has the choice of returning a fully handled entry or
-	// cancelling, but they should not start on another item. The scan
-	// goroutine can also have one directory entry in-flight on finishedChan
-	// (directories bypass the hashers).
+	// cancelling, but they should not start on another item. A hasher that
+	// is cancelled mid-item reports that item as aborted instead of
+	// dropping it, so each hasher accounts for at most one extra entry,
+	// delivered or reported. The scan goroutine can also have one directory
+	// entry in-flight on finishedChan (directories bypass the hashers), and
+	// the walker can have one file in-flight that the hasher cleanup drain
+	// takes over and reports.
 	extra := 0
 	for range fchan {
 		extra++
 	}
 	t.Log("Extra entries:", extra)
-	if extra > numHashers+1 {
+	if extra > numHashers+2 {
 		t.Error("unexpected extra entries received after cancel")
 	}
 }
