@@ -67,6 +67,11 @@ type Config struct {
 	ScanXattrs bool
 	// Filter for extended attributes
 	XattrFilter XattrFilter
+	// ResumeFrom, when non-empty, skips everything that sorts before it, so a caller that cut a
+	// previous walk short can ask for the rest of it without re-reporting the part it already
+	// handled. The comparison is strictly less-than, so the entry named is visited again:
+	// reporting one item twice is harmless, missing one is not.
+	ResumeFrom string
 }
 
 type CurrentFiler interface {
@@ -304,6 +309,21 @@ func (w *walker) walkAndHashFiles(ctx context.Context, toHashChan chan<- protoco
 		// info nil when error is not nil
 		if info != nil && info.IsDir() {
 			skip = fs.SkipDir
+		}
+
+		// A resumed walk skips what a previous one already handled. The comparison is strictly
+		// less-than, so the entry the marker names is visited again: re-reporting one item is
+		// harmless, missing one is not.
+		if w.ResumeFrom != "" && path < w.ResumeFrom {
+			// A directory that can still contain entries at or after the marker must be
+			// descended into even though its own name sorts before the marker, or the resume
+			// silently loses that whole subtree. The walk root always qualifies: it is "." for a
+			// whole-folder walk, or the sub path for a sub walk, and everything to be resumed is
+			// inside it. Missing that case skips the entire walk, which a test pins.
+			if info != nil && info.IsDir() && (path == "." || strings.HasPrefix(w.ResumeFrom, path+"/")) {
+				return nil
+			}
+			return skip
 		}
 
 		if !utf8.ValidString(path) {
