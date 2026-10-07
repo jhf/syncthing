@@ -997,3 +997,72 @@ func BenchmarkWalk(b *testing.B) {
 		walkDir(testFs, "/", nil, nil, 0)
 	}
 }
+
+// TestWalkResumeFrom pins the contract of Config.ResumeFrom: a walk that was cut short can be
+// resumed from the last path the previous one fully handled. The resumed walk must report
+// everything from that path onwards, must not report what came before, and must descend into a
+// directory whose own name sorts before the marker when that directory can still contain entries
+// after it - or the resume silently loses a subtree.
+func TestWalkResumeFrom(t *testing.T) {
+	fsys := fs.NewFilesystem(fs.FilesystemTypeBasic, t.TempDir())
+
+	// Lexical order and nesting disagree here on purpose: "d" sorts before the marker "d/5", but
+	// "d/9" sorts after it, so a correct resume descends into "d". "b/x" sorts entirely before
+	// the marker and must not be reported at all.
+	for _, name := range []string{"a", "b/x", "d/1", "d/5", "d/9", "m", "z"} {
+		if dir := filepath.Dir(name); dir != "." {
+			if err := fsys.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fd, err := fsys.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fd.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	walkNames := func(marker string) []string {
+		cfg, cancel := testConfig()
+		defer cancel()
+		cfg.Filesystem = fsys
+		cfg.Subs = nil
+		cfg.ResumeFrom = marker
+
+		var names []string
+		for res := range Walk(context.Background(), cfg) {
+			if res.Err != nil {
+				t.Fatalf("scan error at %q: %v", res.Path, res.Err)
+			}
+			if res.File.IsDirectory() {
+				continue
+			}
+			names = append(names, res.File.Name)
+		}
+		slices.Sort(names)
+		return names
+	}
+
+	// The control: with no marker, everything is reported.
+	if got, want := walkNames(""), []string{"a", "b/x", "d/1", "d/5", "d/9", "m", "z"}; !slices.Equal(got, want) {
+		t.Errorf("unresumed walk reported %v, want %v", got, want)
+	}
+
+	// The resume: from "d/5" onwards, including the marker itself.
+	if got, want := walkNames("d/5"), []string{"d/5", "d/9", "m", "z"}; !slices.Equal(got, want) {
+		t.Errorf("walk resumed from d/5 reported %v, want %v", got, want)
+	}
+
+	// A marker deep inside a directory whose own name sorts before it still descends.
+	if got, want := walkNames("d/9"), []string{"d/9", "m", "z"}; !slices.Equal(got, want) {
+		t.Errorf("walk resumed from d/9 reported %v, want %v", got, want)
+	}
+
+	// A marker after everything reports nothing new, which is the end condition a caller sees
+	// when a previous walk had already finished.
+	if got := walkNames("zzz"); len(got) != 0 {
+		t.Errorf("walk resumed past the end reported %v, want nothing", got)
+	}
+}
