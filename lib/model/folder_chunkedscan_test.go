@@ -1,0 +1,546 @@
+// Copyright (C) 2026 The Syncthing Authors.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this file,
+// You can obtain one at https://mozilla.org/MPL/2.0/.
+
+package model
+
+import (
+	"fmt"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/syncthing/syncthing/lib/osutil"
+	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/scanner"
+)
+
+// liveLocalNames returns the names of the local files that are present and not deleted, which is
+// what a scan is expected to bring in line with the filesystem. Names are normalized to slash
+// form: the database stores native names, which differ on Windows.
+func liveLocalNames(t *testing.T, m *model, folder string) map[string]struct{} {
+	t.Helper()
+	names := make(map[string]struct{})
+	it, errFn := m.LocalFiles(folder, protocol.LocalDeviceID)
+	for fi := range it {
+		if fi.IsDeleted() || fi.IsDirectory() {
+			continue
+		}
+		names[osutil.NormalizedFilename(fi.Name)] = struct{}{}
+	}
+	if err := errFn(); err != nil {
+		t.Fatal(err)
+	}
+	return names
+}
+
+// TestScanChunkedServicesWatchEvents checks that a watch event queued while a chunked scan runs
+// is serviced between chunks, instead of waiting for the whole scan to finish. The Mac showed why
+// this matters: it scanned back to back for hours on a busy tree, and a directory created on disk
+// was never announced to the peer at all - the watch events waited behind every scan and were
+// lost before they were processed.
+//
+// The outer scan only covers "a"; the watch event names "b", which that walk can never reach, so
+// "b/file2" being indexed afterwards proves the event was serviced mid-scan. The send on the
+// unbuffered watch channel doubles as the handshake: it completes exactly when the chunk loop
+// accepts the event.
+func TestScanChunkedServicesWatchEvents(t *testing.T) {
+	// Not parallel: mutates a package-level budget.
+	old := scanChunkBudget
+	defer func() { scanChunkBudget = old }()
+	scanChunkBudget = 0
+
+	_, f := setupSendReceiveFolder(t)
+	ffs := f.Filesystem()
+	ctx := t.Context()
+
+	must(t, ffs.MkdirAll("a", 0o755))
+	writeFile(t, ffs, "a/file1", []byte("a"))
+	must(t, ffs.MkdirAll("b", 0o755))
+	writeFile(t, ffs, "b/file2", []byte("b"))
+
+	// The watch channel is normally created by startWatch, which is not running here.
+	f.watchChan = make(chan []string)
+	delivered := make(chan struct{})
+	go func() {
+		select {
+		case f.watchChan <- []string{"b"}:
+			close(delivered)
+		case <-ctx.Done():
+		}
+	}()
+
+	must(t, f.scanSubdirs(ctx, []string{"a"}))
+
+	select {
+	case <-delivered:
+	default:
+		t.Fatal("the watch event was never serviced during the chunked scan")
+	}
+
+	got := liveLocalNames(t, f.model, f.ID)
+	if _, ok := got["a/file1"]; !ok {
+		t.Error("a/file1 missing after scanning a")
+	}
+	if _, ok := got["b/file2"]; !ok {
+		t.Error("b/file2 missing: the queued watch event was not serviced between chunks")
+	}
+}
+
+// TestScanChunkedBoundaryWithoutResults checks that a chunk boundary still happens when the walk
+// produces nothing at all. The scanner reports no result for an unchanged file, so a re-scan of an
+// unchanged tree can walk for minutes without a single result - and a budget check that runs only
+// when a result arrives then never fires. Measured on the Mac's 2.35M-file tree: the first chunk
+// boundary came 2m53s into the scan, when one changed file happened to produce a result, and a
+// directory created on disk in the meantime was never announced.
+//
+// The second scan here covers only "d", which is unchanged, so its walk produces no results. The
+// watch event naming "d2" is outside that walk, so "d2/new" can only be indexed if the budget cuts
+// the silent walk and the event is serviced between chunks. The send on the unbuffered watch
+// channel doubles as the handshake: it completes exactly when the chunk loop accepts the event.
+func TestScanChunkedBoundaryWithoutResults(t *testing.T) {
+	// Not parallel: mutates a package-level budget.
+	old := scanChunkBudget
+	defer func() { scanChunkBudget = old }()
+
+	_, f := setupSendReceiveFolder(t)
+	ffs := f.Filesystem()
+	ctx := t.Context()
+
+	// Enough files that walking them unchanged takes clearly longer than the budget.
+	must(t, ffs.MkdirAll("d", 0o755))
+	for i := range 2000 {
+		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte(fmt.Sprintf("x-%d", i)))
+	}
+	must(t, f.scanSubdirs(ctx, nil))
+
+	// The tiny budget applies only to the unchanged re-walk below. Setting it before
+	// the initial scan would chunk the first hashing pass over all files too, which
+	// is setup cost, not subject - and on slow runners that cost alone blew the
+	// package timeout (Linux CI: 29s for this test in isolation, worse under load).
+	scanChunkBudget = 5 * time.Millisecond
+
+	must(t, ffs.MkdirAll("d2", 0o755))
+	writeFile(t, ffs, "d2/new", []byte("y"))
+
+	f.watchChan = make(chan []string)
+	delivered := make(chan struct{})
+	go func() {
+		select {
+		case f.watchChan <- []string{"d2"}:
+			close(delivered)
+		case <-ctx.Done():
+		}
+	}()
+
+	must(t, f.scanSubdirs(ctx, []string{"d"}))
+
+	select {
+	case <-delivered:
+	default:
+		t.Fatal("no chunk boundary happened during a walk without results; the watch event was not serviced")
+	}
+
+	got := liveLocalNames(t, f.model, f.ID)
+	if _, ok := got["d2/new"]; !ok {
+		t.Error("d2/new missing: the queued watch event was not serviced between chunks")
+	}
+}
+
+// TestScanChunkMarkerAdvancesThroughSilence checks that the resume marker advances when a chunk
+// is cut in the middle of a silent stretch. Unchanged files produce no walk result, and on a quiet
+// tree the hashing pipeline is usually empty at the cut, so abort reports alone cannot tell the
+// next chunk how far the walk got: the walker reports its enumeration frontier on cancellation
+// instead. Without that report a silent chunk makes no progress, and the scan degrades into
+// re-walking the same stretch with an ever-growing budget - seen on the Mac, where the budget
+// ballooned to 32s while the scan crawled.
+func TestScanChunkMarkerAdvancesThroughSilence(t *testing.T) {
+	_, f := setupSendReceiveFolder(t)
+	ffs := f.Filesystem()
+	ctx := t.Context()
+
+	must(t, ffs.MkdirAll("d", 0o755))
+	// The tree must be large enough that one small budget cannot walk it, or the loop below
+	// passes by finishing rather than by advancing through the silent stretch - which is
+	// exactly the case that regressed. It must also be small enough to set up quickly,
+	// because hashing the initial scan dominates the test time.
+	for i := range 2000 {
+		writeFile(t, ffs, fmt.Sprintf("d/f%05d", i), []byte(fmt.Sprintf("x-%d", i)))
+	}
+	must(t, f.scanSubdirs(ctx, nil))
+
+	// A 1ms budget cuts the unchanged re-walk long before it finishes. The marker must still
+	// advance, or the next chunk restarts from the beginning. On a loaded runner the budget
+	// can expire before the walk enumerates its first entry, which says nothing about the
+	// property under test - so retry a few times and require one cut with a frontier report.
+	var last string
+	for attempt := range 5 {
+		batch := f.newScanBatch()
+		_, l, more, progressed, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, "", time.Millisecond)
+		must(t, err)
+		if !more {
+			t.Fatal("the 1ms budget did not cut the walk; the test setup is too fast to be meaningful")
+		}
+		if progressed && l != "" {
+			last = l
+			break
+		}
+		if attempt == 4 {
+			t.Fatalf("a chunk cut in a silent stretch made no progress (last=%q), five times in a row: the walk frontier was not reported", l)
+		}
+	}
+
+	// The production failure, pinned directly: resume from that marker with a budget that
+	// is past walk startup but far short of the remaining walk (a full re-walk takes tens
+	// of milliseconds here). The walk gets well beyond the resume point, the budget cuts it
+	// in silence, and the marker must advance all the same. With the frontier merely minned
+	// into the marker like an abort this never advances - the frontier sorts after the
+	// resume point and the minimum keeps the marker where it started.
+	// How small a budget actually cuts the walk depends on the runner, so halve from 8ms
+	// until it does. A cut can also legitimately land during catch-up to the resume point
+	// (no new ground covered), which says nothing about the property under test - retry
+	// those, and require one cut that advanced past the resume point.
+	var next string
+	for budget, attempt := 8*time.Millisecond, 0; ; attempt++ {
+		batch := f.newScanBatch()
+		_, n, more, progressed, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, last, budget)
+		must(t, err)
+		if !more {
+			if budget /= 2; budget < time.Millisecond {
+				t.Fatal("even a sub-millisecond budget walked the whole tree; the test setup is too fast to be meaningful")
+			}
+			continue
+		}
+		if progressed {
+			next = n
+			break
+		}
+		if attempt == 19 {
+			t.Fatalf("a resumed chunk cut in a silent stretch made no progress (marker stuck at %q), twenty times in a row: the frontier does not advance the resume marker", n)
+		}
+	}
+	last = next
+
+	// Then the whole walk must finish under chunked budgets. A chunk legitimately stalls
+	// when the budget expires while the walk is still catching up to the resume point - the
+	// covered region is re-enumerated before new ground is reached - so do what the caller
+	// does and double the budget on a stall.
+	budget := 2 * time.Millisecond
+	for i := range 300 {
+		batch := f.newScanBatch()
+		_, next, more, progressed, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, last, budget)
+		must(t, err)
+		if !more {
+			return // the walk finished; the marker chain reached the end
+		}
+		if progressed {
+			last = next
+			continue
+		}
+		if budget *= 2; budget > 256*time.Millisecond {
+			t.Fatalf("chunk %d made no progress even with a %s budget (marker stuck at %q): the frontier does not advance the resume marker", i, budget, last)
+		}
+	}
+	t.Fatalf("the walk did not finish within 300 chunks (marker stuck at %q)", last)
+}
+
+// TestScanChunkMarkerPassesErroringEntry checks that a scan error does not hold the resume
+// marker. The walk reports an unreadable directory as an error result on every chunk, and the
+// error is surfaced to the user - but the entry is retried by the next scan, not by this one,
+// so the marker must advance past it all the same. If error results were allowed to hold the
+// marker the way abort reports do, a persistently erroring entry (a file rewritten faster than
+// it can be hashed, an unreadable directory) would pin the marker at itself forever: measured
+// on the Mac, where a skills manifest that something rewrites every few minutes wedged the
+// whole scan while the walk frontier sailed past it.
+func TestScanChunkMarkerPassesErroringEntry(t *testing.T) {
+	_, f := setupSendReceiveFolder(t)
+	ffs := f.Filesystem()
+	ctx := t.Context()
+
+	// An entry whose name is not valid UTF-8 produces a real scan error every time the walk
+	// visits it - it can never be indexed, so it errors persistently. It sorts between the
+	// a* and z* files. (The folder filesystem in these tests is the in-memory fakefs, where
+	// permission bits are not enforced, so an unreadable directory would not error.)
+	// Markers are compared in native form: walk paths use the OS separator.
+	bad := osutil.NativeFilename("d/b\xad")
+	must(t, ffs.MkdirAll("d", 0o755))
+	for i := range 10 {
+		writeFile(t, ffs, fmt.Sprintf("d/a%03d", i), []byte(fmt.Sprintf("x-%d", i)))
+	}
+	writeFile(t, ffs, bad, []byte("x"))
+	for i := range 2000 {
+		writeFile(t, ffs, fmt.Sprintf("d/z%04d", i), []byte(fmt.Sprintf("x-%d", i)))
+	}
+	must(t, f.scanSubdirs(ctx, nil))
+
+	// Resume just before the erroring entry: the catch-up is a handful of skipped entries,
+	// so a small budget lands deep in the z* stretch - past the error, well short of the
+	// whole tree, and with nothing applied in between. The marker must then be past the
+	// erroring entry: holding errors the way aborts are held would park the marker on the
+	// erroring entry itself (the minimum of nothing applied and the one error report).
+	// How small a budget actually cuts the walk depends on the runner, so halve from 20ms
+	// until the walk does not finish; the a* catch-up and the error take microseconds, so
+	// any real cut lands in the z* stretch.
+	var last string
+	var more bool
+	for budget := 20 * time.Millisecond; ; budget /= 2 {
+		batch := f.newScanBatch()
+		var err error
+		_, last, more, _, err = f.scanSubdirsChangedAndNew(ctx, nil, batch, osutil.NativeFilename("d/a005"), budget)
+		must(t, err)
+		if more {
+			break
+		}
+		if budget < time.Millisecond {
+			t.Fatal("even a sub-millisecond budget walked the whole tree; the test setup is too fast to be meaningful")
+		}
+	}
+	if !scanner.WalkOrderLess(bad, last) {
+		t.Fatalf("the marker did not advance past the erroring entry (last=%q)", last)
+	}
+
+	// The rest of the walk must finish under chunked budgets, doubling on a stall as the
+	// caller does: a chunk can legitimately stall while enumeration catches up to the
+	// resume point.
+	budget := 2 * time.Millisecond
+	for i := range 300 {
+		batch := f.newScanBatch()
+		_, next, more, progressed, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, last, budget)
+		must(t, err)
+		if !more {
+			return
+		}
+		if progressed {
+			last = next
+			continue
+		}
+		if budget *= 2; budget > 256*time.Millisecond {
+			t.Fatalf("chunk %d made no progress even with a %s budget (marker stuck at %q)", i, budget, last)
+		}
+	}
+	t.Fatalf("the walk did not finish within 300 chunks (marker stuck at %q)", last)
+}
+
+// TestScanChunkAppliesChangedFilesBeforeCut checks that changed files found before a budget
+// cut are applied, not aborted. That requires the streaming pipeline (handovers feed the
+// hashers while the walk runs): the buffered pipeline waits for the walk to end before it
+// starts hashing, so a cut during the walk aborts every handover wholesale - and the earliest
+// of them, typically the never-applied resume entry itself, then holds the resume marker
+// where it started. Measured on the Mac: every cut chunk aborted its entire handover list,
+// the marker pinned on the first changed file, and the budget ballooned to the cap.
+func TestScanChunkAppliesChangedFilesBeforeCut(t *testing.T) {
+	_, f := setupSendReceiveFolder(t)
+	ffs := f.Filesystem()
+	ctx := t.Context()
+
+	must(t, ffs.MkdirAll("d", 0o755))
+	for i := range 2000 {
+		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte(fmt.Sprintf("x-%d", i)))
+	}
+	must(t, f.scanSubdirs(ctx, nil))
+
+	// A budget that cuts the walk mid-tree. The changed files were handed over at the very
+	// start, and their results must be applied, not aborted. On a loaded runner the 5ms
+	// budget can expire before the first result arrives, which says nothing about the
+	// property under test - so retry with fresh changes a few times, and require one cut
+	// that happened after results started flowing.
+	batch := f.newScanBatch()
+	for attempt := range 5 {
+		for i := range 30 {
+			writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte(fmt.Sprintf("y-%d-%d", attempt, i)))
+		}
+		changes, _, more, _, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, "", 5*time.Millisecond)
+		must(t, err)
+		if !more {
+			t.Fatal("the 5ms budget walked the whole tree; the test setup is too fast to be meaningful")
+		}
+		if changes > 0 {
+			return
+		}
+	}
+	t.Fatal("a chunk cut mid-walk applied none of the changed files it found, five times in a row: the handovers were buffered until the walk ended and then aborted wholesale")
+}
+
+// TestScanChunkedDeliversEverything forces the walk to yield over and over by shrinking the chunk
+// budget, and checks the two properties that make chunking safe: every file still ends up indexed,
+// and a file deleted between scans is still noticed. It runs at several budgets, from the
+// degenerate zero (every chunk boundary is cut at the first result) up to an hour (never chunks,
+// the control).
+//
+// The deletion half is the one that matters most. An earlier attempt at this, chunking by top-level
+// directory name in the folder instead of resuming the walk, passed a simple add test and then timed
+// out on TestIgnoreDeleteUnignore: entries that vanish at the top level were never scanned, so their
+// deletion was never seen. That is why the checkpoint lives in the scanner's walk and why this test
+// deletes rather than only adds.
+//
+// The tree also puts a directory beside a sibling file with the same prefix ("docNN" containing a
+// file, next to "docNN.txt"), because that is where walk order (lexical, depth first) and string
+// order over full paths disagree: "." (0x2E) sorts before "/" (0x2F), so "docNN.txt" sorts before
+// "docNN/file" as strings but is walked after it. A resume predicate that compares whole path
+// strings then skips the unvisited sibling file for good. The dirNN/fNN names alone cannot catch
+// this: they differ only in digits, and "/" sorts before every digit, so their DFS order and their
+// string order happen to agree.
+func TestScanChunkedDeliversEverything(t *testing.T) {
+	// Not parallel: mutates a package-level budget.
+	old := scanChunkBudget
+	defer func() { scanChunkBudget = old }()
+
+	for _, budget := range []time.Duration{0, time.Millisecond, 5 * time.Millisecond, time.Hour} {
+		t.Run(fmt.Sprintf("budget=%s", budget), func(t *testing.T) {
+			scanChunkBudget = budget
+			defer func() { scanChunkBudget = old }()
+
+			_, f := setupSendReceiveFolder(t)
+			ffs := f.Filesystem()
+			ctx := t.Context()
+
+			var want []string
+			// writeFile does not create parent directories, and these files are deliberately nested.
+			writeIn := func(name string) {
+				if dir := filepath.Dir(name); dir != "." {
+					must(t, ffs.MkdirAll(dir, 0o755))
+				}
+				writeFile(t, ffs, name, []byte("contents"))
+				want = append(want, name)
+			}
+			for i := range 40 {
+				writeIn(fmt.Sprintf("dir%02d/f%02d", i, i))
+			}
+			for i := range 8 {
+				writeIn(fmt.Sprintf("doc%02d/file", i))
+				writeIn(fmt.Sprintf("doc%02d.txt", i))
+			}
+			must(t, f.scanSubdirs(ctx, nil))
+
+			got := liveLocalNames(t, f.model, f.ID)
+			if len(got) != len(want) {
+				var missing []string
+				for _, name := range want {
+					if _, ok := got[name]; !ok {
+						missing = append(missing, name)
+					}
+				}
+				t.Fatalf("after the first scan there are %d live local files, want %d; missing %v", len(got), len(want), missing)
+			}
+
+			// Delete one file and add another in a directory that did not exist, then scan again. Both
+			// changes have to be reflected, however many chunks the walk is cut into.
+			must(t, ffs.Remove("dir00/f00"))
+			writeIn("newdir/fresh")
+			must(t, f.scanSubdirs(ctx, nil))
+
+			got = liveLocalNames(t, f.model, f.ID)
+			if _, ok := got["dir00/f00"]; ok {
+				t.Error("a file deleted from disk is still indexed as live after a chunked scan")
+			}
+			if _, ok := got["newdir/fresh"]; !ok {
+				t.Error("a file added on disk is missing after a chunked scan")
+			}
+			if len(got) != len(want)-1 {
+				t.Errorf("after deleting one file and adding one there are %d live local files, want %d", len(got), len(want)-1)
+			}
+		})
+	}
+}
+
+// TestScanSweepServicesWatch checks that the post-walk deleted/ignored sweep services a
+// queued watch event, not just the walk. On a big tree the sweep is most of the scan's wall
+// time (measured: about 15 of 22 minutes on 2.35M entries), and it holds the serve loop the
+// same way the walk does - a removal watched at the start of the sweep was indexed only when
+// the whole scan ended. The scan here covers only "d", so the watch event naming "d2" can
+// only be serviced from inside the sweep; the unbuffered channel send is the handshake.
+func TestScanSweepServicesWatch(t *testing.T) {
+	// Not parallel: mutates a package-level budget.
+	old := scanChunkBudget
+	defer func() { scanChunkBudget = old }()
+
+	_, f := setupSendReceiveFolder(t)
+	ffs := f.Filesystem()
+	ctx := t.Context()
+
+	// Populate the database under "d"; the sweep then has enough entries to iterate that the
+	// budget expires mid-sweep, long after the (empty) walk has finished.
+	must(t, ffs.MkdirAll("d", 0o755))
+	for i := range 2000 {
+		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte(fmt.Sprintf("x-%d", i)))
+	}
+	must(t, f.scanSubdirs(ctx, nil))
+
+	// The tiny budget applies only from here on; setting it before the initial scan would
+	// chunk the first hashing pass over all files, which is setup cost, not subject.
+	scanChunkBudget = 5 * time.Millisecond
+
+	must(t, ffs.MkdirAll("d2", 0o755))
+	writeFile(t, ffs, "d2/new", []byte("y"))
+
+	f.watchChan = make(chan []string)
+	delivered := make(chan struct{})
+	go func() {
+		select {
+		case f.watchChan <- []string{"d2"}:
+			close(delivered)
+		case <-ctx.Done():
+		}
+	}()
+
+	// Call the sweep directly: going through scanSubdirs would run the walk first, and the
+	// walk's own chunk loop would service the event before the sweep ever starts, passing
+	// the test without exercising it. Take the I/O token the scan would hold, because the
+	// sweep hands it back while servicing.
+	must(t, f.ioLimiter.TakeWithContext(ctx, 1))
+	defer f.ioLimiter.Give(1)
+	batch := f.newScanBatch()
+	_, err := f.scanSubdirsDeletedAndIgnored(ctx, []string{"d"}, batch)
+	must(t, err)
+	must(t, batch.Flush())
+
+	select {
+	case <-delivered:
+	default:
+		t.Fatal("the sweep ran to completion without servicing the queued watch event")
+	}
+
+	got := liveLocalNames(t, f.model, f.ID)
+	if _, ok := got["d2/new"]; !ok {
+		t.Error("d2/new missing: the queued watch event was not serviced inside the sweep")
+	}
+}
+
+// TestNextScanChunkBudget pins the adaptive quantum rule: idle boundaries double the budget up
+// to the cap, serviced work snaps it back to the base quantum, and a chunk without progress
+// grows aggressively toward the hard cap so a slow resume point can still finish.
+func TestNextScanChunkBudget(t *testing.T) {
+	t.Parallel()
+
+	// Idle boundaries double from the base up to the adaptive cap, then hold there.
+	b := scanChunkBudget
+	for range 10 {
+		b = nextScanChunkBudget(b, true, false)
+	}
+	if b != maxAdaptiveScanChunkBudget {
+		t.Errorf("idle growth should reach the adaptive cap, got %v", b)
+	}
+	if got := nextScanChunkBudget(maxAdaptiveScanChunkBudget, true, false); got != maxAdaptiveScanChunkBudget {
+		t.Errorf("idle growth should hold at the cap, got %v", got)
+	}
+
+	// Serviced work snaps back to the base quantum.
+	if got := nextScanChunkBudget(maxAdaptiveScanChunkBudget, true, true); got != scanChunkBudget {
+		t.Errorf("serviced work should snap back to the base quantum, got %v", got)
+	}
+
+	// No progress doubles aggressively, floored at 100ms, capped at 5 minutes, and wins over
+	// the serviced signal: an unprogressable chunk must grow regardless of queue state.
+	if got := nextScanChunkBudget(10*time.Millisecond, false, true); got != 100*time.Millisecond {
+		t.Errorf("no progress should floor at 100ms, got %v", got)
+	}
+	b = scanChunkBudget
+	for range 20 {
+		b = nextScanChunkBudget(b, false, false)
+	}
+	if b != 5*time.Minute {
+		t.Errorf("no-progress growth should reach the 5m hard cap, got %v", b)
+	}
+}

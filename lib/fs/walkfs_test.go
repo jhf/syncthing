@@ -11,10 +11,70 @@ import (
 	"fmt"
 	osexec "os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/syncthing/syncthing/lib/build"
 )
+
+// reverseDirNamesFilesystem returns directory names in reverse lexical order.
+// DirNames does not promise any order, and this is the deterministic stand-in
+// for that: readdir order on a real filesystem is arbitrary, and the fake
+// filesystem's map iteration order is nondeterministic, so neither can pin
+// Walk's documented lexical order in a test.
+type reverseDirNamesFilesystem struct {
+	Filesystem
+}
+
+func (f reverseDirNamesFilesystem) DirNames(path string) ([]string, error) {
+	names, err := f.Filesystem.DirNames(path)
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(names)
+	slices.Reverse(names)
+	return names, nil
+}
+
+// TestWalkVisitsLexically pins the order Walk documents: lexical, depth
+// first. The tree deliberately puts a directory ("documents") beside a
+// sibling file with the same prefix ("documents.txt"), so lexical DFS order
+// visits "documents/z" before "documents.txt" - the shape a string comparison
+// of full paths gets wrong.
+func TestWalkVisitsLexically(t *testing.T) {
+	base := NewFilesystem(FilesystemTypeBasic, t.TempDir())
+	for _, name := range []string{"a", filepath.Join("b", "x"), filepath.Join("documents", "z"), "documents.txt"} {
+		if dir := filepath.Dir(name); dir != "." {
+			if err := base.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fd, err := base.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fd.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	wfs := NewWalkFilesystem(reverseDirNamesFilesystem{base})
+	var visited []string
+	if err := wfs.Walk(".", func(path string, info FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		visited = append(visited, path)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{".", "a", "b", filepath.Join("b", "x"), "documents", filepath.Join("documents", "z"), "documents.txt"}
+	if !slices.Equal(visited, want) {
+		t.Errorf("Walk visited %v, want lexical depth-first order %v", visited, want)
+	}
+}
 
 func testWalkSkipSymlink(t *testing.T, fsType FilesystemType, uri string) {
 	if build.IsWindows {

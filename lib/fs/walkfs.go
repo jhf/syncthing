@@ -13,6 +13,7 @@ package fs
 import (
 	"errors"
 	"path/filepath"
+	"slices"
 )
 
 var ErrInfiniteRecursion = errors.New("infinite filesystem recursion detected")
@@ -113,6 +114,12 @@ func (f *walkFilesystem) walk(path string, info FileInfo, walkFn WalkFunc, ances
 	if err != nil {
 		return walkFn(path, info, err)
 	}
+
+	// DirNames does not promise any particular order (a basic filesystem
+	// returns readdir order), but Walk documents lexical order, and callers
+	// rely on it: a scan that resumes from a marker path needs a stable,
+	// deterministic visit order to know what "before the marker" means.
+	slices.Sort(names)
 
 	for _, name := range names {
 		filename := filepath.Join(path, name)
