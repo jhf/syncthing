@@ -8,6 +8,7 @@ package model
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -60,6 +61,7 @@ type folder struct {
 
 	scanInterval           time.Duration
 	scanTimer              *time.Timer
+	watchScanDepth         int // >0 while servicing a watch-triggered scan between chunks
 	scanDelay              chan time.Duration
 	initialScanFinished    chan struct{}
 	scanScheduled          chan struct{}
@@ -402,8 +404,20 @@ func (f *folder) pull(ctx context.Context) (success bool, err error) {
 	select {
 	case <-f.initialScanFinished:
 	default:
-		// Once the initial scan finished, a pull will be scheduled
-		return true, nil
+		// The initial scan is still running. Pulls are normally held until
+		// it completes, because before the first scan ever completes we
+		// cannot trust the local index: every remote file looks needed,
+		// including files that already exist on disk but have not been
+		// indexed yet. Once a folder has completed an initial scan at any
+		// point (recorded in the database), the local index it holds was
+		// complete when written, and everything the puller is about to
+		// change is first checked against it (scanIfItemChanged), backing
+		// off with errModified where the disk and the index disagree. So
+		// after a restart we pull during the re-scan; during the first scan
+		// ever we wait for it.
+		if done, serr := f.initialScanEverCompleted(); serr != nil || !done {
+			return true, nil
+		}
 	}
 
 	defer func() {
@@ -476,6 +490,94 @@ func (f *folder) pull(ctx context.Context) (success bool, err error) {
 	return false, err
 }
 
+// scanChunkBudget bounds how long one chunk of a walk may run before it yields. It is a var so
+// tests can shrink it to force chunk boundaries; production wants it small enough that a pull is
+// never waiting long, and large enough that the per-chunk overhead stays irrelevant.
+var scanChunkBudget = 250 * time.Millisecond
+
+// maxAdaptiveScanChunkBudget caps how far the chunk budget grows when consecutive chunk
+// boundaries find no queued pull and no queued watch batch. Growth doubles per idle boundary, so
+// an idle machine reaches the cap in a handful of chunks; the cap bounds how long a newly queued
+// pull can wait to one grown chunk.
+var maxAdaptiveScanChunkBudget = 5 * time.Second
+
+// nextScanChunkBudget picks the next chunk's budget. No progress means something at the resume
+// point outlasts the budget (a file still hashing, a directory still enumerating), so grow
+// aggressively toward a hard cap or the same stretch would never finish. Serviced work means the
+// loop is sharing with real traffic, so snap back to the base quantum. An idle boundary doubles
+// the quantum toward the adaptive cap: each walk boundary forces a batch flush, and tiny chunks
+// fragment thousand-entry commits into slivers that each pay durability latency.
+func nextScanChunkBudget(budget time.Duration, progressed, servicedWork bool) time.Duration {
+	if !progressed {
+		return min(max(2*budget, 100*time.Millisecond), 5*time.Minute)
+	}
+	if servicedWork {
+		return scanChunkBudget
+	}
+	return min(2*budget, maxAdaptiveScanChunkBudget)
+}
+
+// initialScanDoneKVPrefix namespaces the per-folder marker recording that this folder once
+// completed an initial scan. The marker is what lets pulls run during the initial scan after a
+// restart (see pull): before the first scan ever completes, every remote file looks needed,
+// including files that exist on disk but are not indexed yet, so pulling then is not safe.
+const initialScanDoneKVPrefix = "model/initialScanDone/"
+
+// initialScanEverCompleted reports whether this folder has ever completed an initial scan, as
+// recorded in the database. A missing marker means no; a database error is reported to the
+// caller, whose conservative answer is also no.
+func (f *folder) initialScanEverCompleted() (bool, error) {
+	_, err := f.db.GetKV(initialScanDoneKVPrefix + f.folderID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// serviceQueuedWatch runs one queued batch of watch events, if any, and returns immediately
+// otherwise. Watch events wait on the serve goroutine like pulls do, so a long scan otherwise
+// delays noticing (and announcing) local changes until it finishes; on a busy machine that delay
+// was measured at a full scan's duration, and the notify backlog can overflow and lose events
+// entirely while it builds up. A watch-triggered scan does not itself service the watch channel:
+// the batches it would find there were generated while it ran, and servicing them inline would
+// never let the outer scan finish.
+//
+// The bool reports whether a batch was dequeued, regardless of what was done with it: a waiting
+// batch means the machine is producing work, which the adaptive scan chunk budget reads as a
+// signal to keep the quantum small.
+func (f *folder) serviceQueuedWatch(ctx context.Context) (bool, error) {
+	if f.watchScanDepth > 0 {
+		return false, nil
+	}
+	select {
+	case fsEvents := <-f.watchChan:
+		f.sl.DebugContext(ctx, "Scan due to watcher (serviced between scan chunks)")
+		f.watchScanDepth++
+		defer func() { f.watchScanDepth-- }()
+		return true, f.scanSubdirs(ctx, fsEvents)
+	default:
+		return false, nil
+	}
+}
+
+// serviceQueuedPull runs one pull iteration if the folder has one queued, and returns immediately
+// otherwise. It exists so that a chunked scan does not starve the puller: the scan and the pull both
+// run in the serve goroutine, so this is the same work the loop would have done between two selects.
+// The bool reports whether a pull ran, which the adaptive scan chunk budget reads as a signal to
+// keep the quantum small.
+func (f *folder) serviceQueuedPull(ctx context.Context) (bool, error) {
+	select {
+	case <-f.pullScheduled:
+		_, err := f.pull(ctx)
+		return true, err
+	default:
+		return false, nil
+	}
+}
+
 func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 	f.sl.DebugContext(ctx, "Scanning")
 
@@ -546,10 +648,56 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 		}
 	}()
 
-	changesHere, err := f.scanSubdirsChangedAndNew(ctx, subDirs, batch)
-	changes += changesHere
-	if err != nil {
-		return err
+	// The walk runs in bounded chunks, and a queued pull is serviced between them. This is the
+	// whole point of the chunking: a scan holds the serve loop for its entire duration, and while
+	// it holds it nothing is pulled. Measured on this folder, that was a 585-second scan with a
+	// 300-file queue frozen behind it. Both the scan and the pull run in the serve goroutine, so
+	// servicing a pull here is the same thing the loop would have done had it not been scanning.
+	resumeFrom := ""
+	budget := scanChunkBudget
+	for {
+		f.setState(FolderScanning)
+
+		changesHere, last, more, progressed, err := f.scanSubdirsChangedAndNew(ctx, subDirs, batch, resumeFrom, budget)
+		changes += changesHere
+		if err != nil {
+			return err
+		}
+		if !more {
+			break
+		}
+		resumeFrom = last
+
+		if err := batch.Flush(); err != nil {
+			return err
+		}
+		// The scan holds an I/O token for its whole duration. Hand it back
+		// while servicing a pull, or the pull's own TakeWithContext would
+		// deadlock against us when maxFolderConcurrency is 1 (or wait out
+		// the rest of the scan when it equals the number of folders).
+		f.ioLimiter.Give(1)
+		pullRan, pullErr := f.serviceQueuedPull(ctx)
+		watchRan, watchErr := f.serviceQueuedWatch(ctx)
+		limitErr := f.ioLimiter.TakeWithContext(ctx, 1)
+		if !progressed {
+			f.sl.DebugContext(ctx, "Scan chunk made no progress, growing the chunk budget", slog.String("resumeFrom", resumeFrom))
+		}
+		budget = nextScanChunkBudget(budget, progressed, pullRan || watchRan)
+		// The next chunk iteration restores the FolderScanning label that a
+		// serviced pull moved; the sweep loop below has no such per-iteration
+		// restore and needs its own.
+		if pullErr != nil {
+			return pullErr
+		}
+		if watchErr != nil {
+			return watchErr
+		}
+		if limitErr != nil {
+			return limitErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
 
 	if err := batch.Flush(); err != nil {
@@ -565,7 +713,7 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 	// Do a scan of the database for each prefix, to check for deleted and
 	// ignored files.
 
-	changesHere, err = f.scanSubdirsDeletedAndIgnored(ctx, subDirs, batch)
+	changesHere, err := f.scanSubdirsDeletedAndIgnored(ctx, subDirs, batch)
 	changes += changesHere
 	if err != nil {
 		return err
@@ -672,9 +820,28 @@ func (b *scanBatch) Update(fi protocol.FileInfo) (bool, error) {
 	return true, nil
 }
 
-func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string, batch *scanBatch) (int, error) {
-	changes := 0
-
+// scanSubdirsChangedAndNew walks the given subs, reporting entries that are new or changed.
+//
+// It runs for at most budget and then returns with more set and lastPath being the resume
+// marker for the next chunk. The marker is the minimum of the last applied path and the first
+// aborted path seen in this chunk: results arrive out of order, so the set of applied entries has
+// holes, and everything the walk handed over but did not apply is reported as an error result by
+// the scanner. Everything strictly below the marker is then known to be applied, and nothing below
+// it was silently dropped, so resuming the walk from the marker loses nothing. The re-walked window
+// is bounded by the hashers in flight at the cut, not by the size of the chunk.
+//
+// The budget is a timer, not a per-result check: the scanner reports nothing at all for unchanged
+// files, so on a re-scan of a mostly unchanged tree results may not arrive for minutes at a time.
+// A deadline checked only when a result arrives then never fires - measured on a 2.35M-file tree,
+// where the first chunk boundary came 2m53s into the scan, when one changed file happened to
+// produce a result. The timer cuts the walk regardless, and the abort reports of whatever was in
+// flight at the cut keep the resume marker honest.
+//
+// progressed reports whether the marker moved forward. A chunk can fail to progress when the walk
+// could not hand anything over within the budget (a file still hashing, a directory still
+// enumerating); the caller responds by giving the next chunk a longer budget rather than
+// restarting the same stretch forever.
+func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string, batch *scanBatch, resumeFrom string, budget time.Duration) (changes int, lastPath string, more, progressed bool, err error) {
 	// If we return early e.g. due to a folder health error, the scan needs
 	// to be cancelled.
 	scanCtx, scanCancel := context.WithCancel(ctx)
@@ -691,14 +858,25 @@ func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string,
 		AutoNormalize:         f.AutoNormalize,
 		Hashers:               f.model.numHashers(f.ID),
 		ShortID:               f.shortID,
-		ProgressTickIntervalS: f.ScanProgressIntervalS,
+		ProgressTickIntervalS: -1, // see below
 		LocalFlags:            f.localFlags,
 		ModTimeWindow:         f.modTimeWindow,
 		EventLogger:           f.evLogger,
 		ScanOwnership:         f.SendOwnership || f.SyncOwnership,
 		ScanXattrs:            f.SendXattrs || f.SyncXattrs,
 		XattrFilter:           f.XattrFilter,
+		ResumeFrom:            resumeFrom,
 	}
+	// ProgressTickIntervalS -1 selects the streaming pipeline: handovers feed the hashers
+	// while the walk runs. The default pipeline instead buffers every handover until the
+	// walk ends - it needs the full list to compute the FolderScanProgress total - and only
+	// then starts hashing, which defeats chunking outright: a budget cut during the walk
+	// aborts every changed file found so far, and the earliest of them (typically the resume
+	// entry itself, which by definition was never applied) holds the marker where it
+	// started. Measured on the Mac: every cut chunk aborted its entire handover list, the
+	// marker pinned on the first changed file, and the budget ballooned to the cap while
+	// the scan crawled. The price is that chunked scans emit no FolderScanProgress events.
+
 	var fchan chan scanner.ScanResult
 	if f.Type == config.FolderTypeReceiveEncrypted {
 		fchan = scanner.WalkWithoutHashing(scanCtx, scanConfig)
@@ -706,48 +884,167 @@ func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string,
 		fchan = scanner.Walk(scanCtx, scanConfig)
 	}
 
-	for res := range fchan {
-		if res.Err != nil {
-			f.newScanError(res.Path, res.Err)
-			continue
-		}
+	// stopped records that the budget cut the walk short. The walk is cancelled there, but results
+	// already in the hashing pipeline are still consumed and applied rather than thrown away. They
+	// have to be: results do not arrive in walk order, so an entry whose result is still in flight
+	// may sort before the resume marker, and resuming would then skip it for good. Draining in
+	// flight work is bounded by the hashers and the queue depth, not by the size of the folder.
+	stopped := false
+	// The marker starts at the resume point and advances over what this chunk applies. Abort
+	// reports are tracked separately in firstAborted and minned in only at the end: they arrive
+	// out of order against applied results, so folding them into the marker directly would let
+	// the next applied result advance past an aborted entry and lose it for good.
+	marker := resumeFrom
+	// firstAborted is the smallest path of any abort report in this chunk. Aborts are the
+	// handed-over files the budget cut cancelled before they could be applied; they are not
+	// recorded anywhere else, so the resume marker must stay behind all of them: an entry the
+	// marker moved past would never be visited again. Real scan errors are not here - they are
+	// surfaced to the user and retried by the next scan, and holding the marker for a
+	// persistently erroring file would wedge the scan at it.
+	firstAborted := ""
+	// walkFrontier is how far the walk enumerated before the budget cut it, reported by the
+	// scanner because unchanged entries produce no result of their own. Every applied result
+	// and every abort sorts at or below it, so it is an upper bound the marker may advance to.
+	walkFrontier := ""
+	// The budget is enforced two ways: the timer covers silence (unchanged files produce no
+	// results, so there is nothing to check against for minutes at a time), and the deadline
+	// check covers bursts (a timer is delivered asynchronously, so a result stream can otherwise
+	// outrun it arbitrarily long, and with a zero budget no cut would be guaranteed at all).
+	deadline := time.Now().Add(budget)
+	budgetTimer := time.NewTimer(budget)
+	defer budgetTimer.Stop()
+	budgetC := budgetTimer.C
 
-		if err := batch.FlushIfFull(); err != nil {
-			// Prevent a race between the scan aborting due to context
-			// cancellation and releasing the snapshot in defer here.
+loop:
+	for {
+		select {
+		case <-budgetC:
+			// The budget expired. Cut the walk here, whether or not any result
+			// has arrived in this chunk - see the function comment.
+			stopped = true
+			budgetC = nil
 			scanCancel()
-			for range fchan {
+		case res, ok := <-fchan:
+			if !ok {
+				break loop
 			}
-			return changes, err
-		}
 
-		if ok, err := batch.Update(res.File); err != nil {
-			return 0, err
-		} else if ok {
-			changes++
-		}
+			if res.WalkFrontier {
+				// The walk's enumeration frontier at the cut: an upper bound
+				// for the marker, not an abort. It does not enter firstAborted,
+				// whose minimum must stay behind unhandled work only.
+				if walkFrontier == "" || scanner.WalkOrderLess(walkFrontier, res.Path) {
+					walkFrontier = res.Path
+				}
+				continue
+			}
 
-		switch f.Type {
-		case config.FolderTypeReceiveOnly, config.FolderTypeReceiveEncrypted:
-		default:
-			// Rename detection is comparatively expensive, so only attempt
-			// it for files that appeared as new on disk during this scan. A
-			// rename that overwrites an existing file (the destination path
-			// already had an entry, so it scans as an update rather than a
-			// new file) is not optimised as a rename.
-			if res.File.New && res.File.Size > 0 {
-				if nf, ok := f.findRename(ctx, res.File, batch); ok {
-					if ok, err := batch.Update(nf); err != nil {
-						return 0, err
-					} else if ok {
-						changes++
+			if res.Err != nil {
+				if !errors.Is(res.Err, context.Canceled) {
+					// A real scan error is user-visible bookkeeping and nothing
+					// more: it must not hold the resume marker. A file that
+					// errors persistently (it is being rewritten faster than it
+					// can be hashed, say) would otherwise pin the marker at
+					// itself forever, and the chunk after would error on it
+					// again - measured on the Mac, where a skills manifest
+					// rewritten every few minutes wedged the scan at itself
+					// while the walk frontier sailed past it. The next scan
+					// retries the file, as it always has.
+					f.newScanError(res.Path, res.Err)
+					continue
+				}
+				// An abort (the chunk budget cancelled the scan under this entry) is
+				// bookkeeping for the resume marker, not a user-visible scan error: the
+				// entry is retried by the next chunk.
+				// The minimum must be in walk order for the same reason as below.
+				if firstAborted == "" || scanner.WalkOrderLess(res.Path, firstAborted) {
+					firstAborted = res.Path
+				}
+				continue
+			}
+
+			if !stopped && !time.Now().Before(deadline) {
+				// The budget expired while results were flowing. Stop walking
+				// here and let the loop finish what is already in flight.
+				stopped = true
+				budgetC = nil
+				scanCancel()
+			}
+
+			if err := batch.FlushIfFull(); err != nil {
+				// Prevent a race between the scan aborting due to context
+				// cancellation and releasing the snapshot in defer here.
+				scanCancel()
+				for range fchan {
+				}
+				return changes, lastPath, false, false, err
+			}
+
+			if ok, err := batch.Update(res.File); err != nil {
+				// The scanner's abort reports cannot be abandoned to a cancelled context,
+				// so the channel must be drained before returning, or the scanner blocks
+				// on a send forever.
+				scanCancel()
+				for range fchan {
+				}
+				return changes, lastPath, false, false, err
+			} else if ok {
+				changes++
+			}
+
+			switch f.Type {
+			case config.FolderTypeReceiveOnly, config.FolderTypeReceiveEncrypted:
+			default:
+				// Rename detection is comparatively expensive, so only attempt
+				// it for files that appeared as new on disk during this scan. A
+				// rename that overwrites an existing file (the destination path
+				// already had an entry, so it scans as an update rather than a
+				// new file) is not optimised as a rename.
+				if res.File.New && res.File.Size > 0 {
+					if nf, ok := f.findRename(ctx, res.File, batch); ok {
+						if ok, err := batch.Update(nf); err != nil {
+							scanCancel()
+							for range fchan {
+							}
+							return changes, lastPath, false, false, err
+						} else if ok {
+							changes++
+						}
 					}
 				}
 			}
+
+			marker = res.File.Name
 		}
 	}
 
-	return changes, nil
+	// The marker stays behind every reported abort: the minimum of what was applied and what was
+	// reported aborted. The minimum is in walk order, not string order, because that is the order
+	// the scanner's resume predicate speaks: "doc01.txt" < "doc01/file" as strings (0x2E < 0x2F),
+	// but the walk visits "doc01/file" first, so a string minimum would let the marker jump past an
+	// aborted file that was never applied. Nothing below the marker is then unaccounted for. An
+	// abort report with nothing applied after it leaves the marker where it started, which the
+	// caller sees as no progress.
+	if walkFrontier != "" && (marker == "" || scanner.WalkOrderLess(marker, walkFrontier)) {
+		// Everything up to the frontier was enumerated this chunk. Unchanged entries produce
+		// no result, so without this a chunk cut in a silent stretch would leave the marker
+		// where it started and rewalk the same ground with an ever-growing budget. Applied
+		// results and aborts all sort at or below the frontier, so advancing to it skips
+		// nothing unhandled. It can only advance the marker, never move it back: the resumed
+		// walk re-enumerates the covered region to reach new ground, and a budget that
+		// expires during that catch-up reports a frontier behind the marker.
+		marker = walkFrontier
+	}
+	if firstAborted != "" && (marker == "" || scanner.WalkOrderLess(firstAborted, marker)) {
+		marker = firstAborted
+	}
+	lastPath = marker
+
+	if stopped {
+		f.sl.DebugContext(ctx, "Scan chunk cut", slog.String("resumeFrom", resumeFrom), slog.String("marker", marker), slog.String("walkFrontier", walkFrontier), slog.String("firstAborted", firstAborted), slog.Int("changes", changes))
+	}
+
+	return changes, lastPath, stopped, marker != resumeFrom, nil
 }
 
 func (f *folder) scanSubdirsDeletedAndIgnored(ctx context.Context, subDirs []string, batch *scanBatch) (int, error) {
@@ -755,9 +1052,30 @@ func (f *folder) scanSubdirsDeletedAndIgnored(ctx context.Context, subDirs []str
 	ignoredParent := ""
 	changes := 0
 
+	// On a full scan this sweep iterates every local database entry, which takes
+	// the majority of a big scan's wall time (measured: about 15 of 22 minutes
+	// on a 2.35M-entry folder). It runs in the serve goroutine like the walk
+	// above, so without servicing it starves queued pulls and watch events just
+	// the same - a removal watched at the start of the sweep was indexed only
+	// when the whole scan ended. The database iterator is a snapshot, so it
+	// stays valid across servicing, and unlike the walk there is nothing to
+	// resume: the loop simply continues after the queued work is done.
+	// The window starts at scanChunkBudget and doubles at each boundary that found no queued
+	// work, capped at maxAdaptiveScanChunkBudget; a boundary that serviced a pull or a watch
+	// batch snaps it back. The accounting below exists because the sweep's per-entry cost was
+	// once observed at ~10ms/entry at 0% CPU with no code path to explain it: each chunk logs
+	// entries, marks, wall time, and boundary servicing time, so the next such observation has
+	// numbers instead of guesses.
+	window := scanChunkBudget
+	budget := time.NewTimer(window)
+	defer budget.Stop()
+	var entries, marks int
+	chunkStart := time.Now()
+
 outer:
 	for _, sub := range subDirs {
 		for fi, err := range itererr.Zip(f.db.AllLocalFilesWithPrefix(f.folderID, protocol.LocalDeviceID, sub)) {
+			entries++
 			if err != nil {
 				return changes, err
 			}
@@ -765,6 +1083,45 @@ outer:
 			select {
 			case <-ctx.Done():
 				break outer
+			default:
+			}
+
+			select {
+			case <-budget.C:
+				// Hand back the scan's I/O token while servicing a pull, for the
+				// same deadlock reason as in the walk loop above.
+				boundaryStart := time.Now()
+				f.ioLimiter.Give(1)
+				pullRan, pullErr := f.serviceQueuedPull(ctx)
+				watchRan, watchErr := f.serviceQueuedWatch(ctx)
+				limitErr := f.ioLimiter.TakeWithContext(ctx, 1)
+				boundaryTime := time.Since(boundaryStart)
+				chunkWall := boundaryStart.Sub(chunkStart)
+				perEntry := time.Duration(0)
+				if entries > 0 {
+					perEntry = (chunkWall - boundaryTime) / time.Duration(entries)
+				}
+				f.sl.DebugContext(ctx, "Sweep chunk", slog.Int("entries", entries), slog.Int("marks", marks), slog.Duration("wall", chunkWall), slog.Duration("boundary", boundaryTime), slog.Duration("perEntry", perEntry), slog.Duration("window", window))
+				entries, marks = 0, 0
+				chunkStart = time.Now()
+				window = nextScanChunkBudget(window, true, pullRan || watchRan)
+				budget.Reset(window)
+				// The serviced pull moved the folder state (sync-preparing
+				// etc.), but this sweep is still running and, unlike the walk
+				// loop, does not set FolderScanning per iteration: restore the
+				// label here or the GUI reports e.g. "Preparing to Sync" for
+				// the rest of the sweep (observed: label stuck for the
+				// remaining 862s of a full sweep while all work was scan work).
+				f.setState(FolderScanning)
+				if pullErr != nil {
+					return changes, pullErr
+				}
+				if watchErr != nil {
+					return changes, watchErr
+				}
+				if limitErr != nil {
+					return changes, limitErr
+				}
 			default:
 			}
 
@@ -847,6 +1204,7 @@ outer:
 					nf.Version = protocol.Vector{}
 				}
 				f.sl.DebugContext(ctx, "Marking file as deleted", slogutil.FilePath(nf.Name))
+				marks++
 				if ok, err := batch.Update(nf); err != nil {
 					return 0, err
 				} else if ok {
@@ -1020,6 +1378,13 @@ func (f *folder) scanTimerFired(ctx context.Context) error {
 		switch {
 		case err == nil:
 			f.sl.InfoContext(ctx, "Completed initial scan")
+			// Record that this folder once completed an initial scan. After a
+			// restart this is what lets pulls run while the re-scan is still
+			// in progress (see pull); a failure to record it costs one more
+			// gated scan, nothing else.
+			if perr := f.db.PutKV(initialScanDoneKVPrefix+f.folderID, []byte{1}); perr != nil {
+				f.sl.WarnContext(ctx, "Failed to record initial scan completion", slogutil.Error(perr))
+			}
 		case errors.Is(err, context.Canceled):
 			// Suppressed: context was canceled (e.g. by user)
 		default:

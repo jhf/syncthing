@@ -67,6 +67,13 @@ type Config struct {
 	ScanXattrs bool
 	// Filter for extended attributes
 	XattrFilter XattrFilter
+	// ResumeFrom, when non-empty, skips everything the walk visits before the named
+	// entry, so a caller that cut a previous walk short can ask for the rest of it
+	// without re-reporting the part it already handled. "Before" is in walk order
+	// (lexical, depth first), which is not string order over full paths - see
+	// pathCoveredByMarker. The comparison is strict, so the entry named is visited
+	// again: reporting one item twice is harmless, missing one is not.
+	ResumeFrom string
 }
 
 type CurrentFiler interface {
@@ -84,6 +91,11 @@ type ScanResult struct {
 	File protocol.FileInfo
 	Err  error
 	Path string // to be set in case Err != nil and File == nil
+	// WalkFrontier marks a report that carries no error of its own but names
+	// how far the walk enumerated before it was cancelled. Everything at or
+	// before Path in walk order was visited; every result and abort in the
+	// same scan sorts at or before it.
+	WalkFrontier bool
 }
 
 func Walk(ctx context.Context, cfg Config) chan ScanResult {
@@ -95,7 +107,7 @@ func WalkWithoutHashing(ctx context.Context, cfg Config) chan ScanResult {
 }
 
 func newWalker(cfg Config) *walker {
-	w := &walker{cfg}
+	w := &walker{Config: cfg}
 
 	if w.CurrentFiler == nil {
 		w.CurrentFiler = noCurrentFiler{}
@@ -119,6 +131,14 @@ var (
 
 type walker struct {
 	Config
+	// lastWalked is the enumeration frontier: the most recent path the walk
+	// visited, whether or not it produced a result. Unchanged entries produce
+	// no result, so a caller that cuts the walk short cannot tell how far it
+	// got from results alone; on cancellation the frontier is reported like an
+	// abort, and the caller's resume marker can advance across silent stretches.
+	// The walk callback and the reporting both run on the scan goroutine, so a
+	// plain string is enough.
+	lastWalked string
 }
 
 // Walk returns the list of files found in the local folder by scanning the
@@ -206,11 +226,18 @@ func (w *walker) walk(ctx context.Context) chan ScanResult {
 		}()
 
 	loop:
-		for _, file := range filesToHash {
+		for i, file := range filesToHash {
 			l.Debugln(w, "real to hash:", file.Name)
 			select {
 			case realToHashChan <- file:
 			case <-ctx.Done():
+				// The scan was cut short with part of the list unhashed. Those files
+				// were counted as handed over when the walk sent them, so they must be
+				// reported as aborted, not dropped: a caller resuming the scan from a
+				// marker relies on it to know they were not handled.
+				for _, f := range filesToHash[i:] {
+					handleError(ctx, "hashing", f.Name, ctx.Err(), finishedChan)
+				}
 				break loop
 			}
 		}
@@ -242,6 +269,55 @@ func (w *walker) walkWithoutHashing(ctx context.Context) chan ScanResult {
 
 const walkFailureEventDesc = "Unexpected error while walking the filesystem during scan"
 
+// WalkOrderLess reports whether path a precedes path b in walk order - lexical, depth
+// first. It defines the order the resume marker speaks in: a walk resuming from marker m
+// skips exactly the paths p with WalkOrderLess(p, m), and a caller deriving a marker from
+// several candidate paths must take the minimum in this same order.
+//
+// The comparison is component-wise because walk order is not string order over full
+// paths: name characters such as "-" (0x2D) and "." (0x2E) sort before the path
+// separator "/" (0x2F), so "documents.txt" sorts before "documents/z" as strings but
+// is walked after it, and "a-b/x" sorts before "a/c" as strings but is walked after
+// it. Truncating the longer path to the shorter's depth and comparing the strings
+// would still get those cases wrong; the components must be compared one by one.
+//
+// Strictly a strict order: WalkOrderLess(p, p) is false.
+func WalkOrderLess(a, b string) bool {
+	ac := fs.PathComponents(a)
+	bc := fs.PathComponents(b)
+	for i := 0; i < len(ac) && i < len(bc); i++ {
+		if ac[i] != bc[i] {
+			return ac[i] < bc[i]
+		}
+	}
+	// One path is a prefix of the other: the ancestor is walked first.
+	return len(ac) < len(bc)
+}
+
+// pathCoveredByMarker reports whether path precedes marker in walk order and so was
+// already visited by the walk that produced the marker. The marker itself is not
+// covered: a walk resumes inclusive of the marker.
+func pathCoveredByMarker(path, marker string) bool {
+	return WalkOrderLess(path, marker)
+}
+
+// isStrictParentOfMarker reports whether path is a strict ancestor directory of
+// marker, i.e. a directory on the way to the marker that a resumed walk must descend
+// into but not process again.
+func isStrictParentOfMarker(path, marker string) bool {
+	pc := fs.PathComponents(path)
+	mc := fs.PathComponents(marker)
+	if len(pc) >= len(mc) {
+		return false
+	}
+	for i := range pc {
+		if pc[i] != mc[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (w *walker) scan(ctx context.Context, toHashChan chan<- protocol.FileInfo, finishedChan chan<- ScanResult) {
 	hashFiles := w.walkAndHashFiles(ctx, toHashChan, finishedChan)
 	if len(w.Subs) == 0 {
@@ -258,6 +334,25 @@ func (w *walker) scan(ctx context.Context, toHashChan chan<- protocol.FileInfo, 
 			if err := w.Filesystem.Walk(sub, hashFiles); isWarnableError(err) {
 				w.EventLogger.Log(events.Failure, walkFailureEventDesc)
 				slog.ErrorContext(ctx, "Aborted scan due to an unexpected error", slogutil.FilePath(sub), slogutil.Error(err))
+			}
+		}
+	}
+	if ctx.Err() != nil {
+		if last := w.lastWalked; last != "" {
+			// The walk was cut short. Report how far it got: entries that were
+			// enumerated and found unchanged produce no result of their own, so
+			// without this a caller resuming from a marker cannot advance the
+			// marker across a silent stretch and the next chunk would restart
+			// from the same place. This is not an abort: aborts sort at or
+			// below it and must keep the marker behind them, while the frontier
+			// itself is how far the marker may advance. The walk resumes
+			// inclusive of it. The send must not be abandoned to the cancelled
+			// context: the receiver drains the channel until it is closed.
+			res := ScanResult{Path: last, Err: ctx.Err(), WalkFrontier: true}
+			select {
+			case finishedChan <- res:
+			case <-ctx.Done():
+				finishedChan <- res
 			}
 		}
 	}
@@ -297,6 +392,7 @@ func (w *walker) walkAndHashFiles(ctx context.Context, toHashChan chan<- protoco
 		}
 
 		metricScannedItems.WithLabelValues(w.Folder).Inc()
+		w.lastWalked = path
 
 		// Return value used when we are returning early and don't want to
 		// process the item. For directories, this means do-not-descend.
@@ -304,6 +400,23 @@ func (w *walker) walkAndHashFiles(ctx context.Context, toHashChan chan<- protoco
 		// info nil when error is not nil
 		if info != nil && info.IsDir() {
 			skip = fs.SkipDir
+		}
+
+		// A resumed walk skips what a previous one already handled: every path that
+		// precedes the marker in walk order. The comparison is strict, so the entry the
+		// marker names is visited again: re-reporting one item is harmless, missing one
+		// is not.
+		if w.ResumeFrom != "" && pathCoveredByMarker(path, w.ResumeFrom) {
+			// A directory on the way to the marker was already reported, but it can
+			// still contain entries at or after the marker, so descend into it without
+			// processing it again. The walk root always qualifies: it is "." for a
+			// whole-folder walk, or the sub path for a sub walk, and everything to be
+			// resumed is inside it. Missing that case skips the entire walk, which a
+			// test pins.
+			if info != nil && info.IsDir() && (path == "." || isStrictParentOfMarker(path, w.ResumeFrom)) {
+				return nil
+			}
+			return skip
 		}
 
 		if !utf8.ValidString(path) {
@@ -500,6 +613,14 @@ func (w *walker) walkRegular(ctx context.Context, relPath string, info fs.FileIn
 
 	l.Debugln(w, "to hash:", relPath, f)
 
+	// Do not hand over new work once the walk is cancelled. Checked explicitly so that a
+	// ready receiver (the hasher cleanup drain) does not win the race against cancellation
+	// in the select below; prompt cancellation keeps the set of files aborted at a chunk
+	// boundary bounded by the number of hashers.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	select {
 	case toHashChan <- f:
 	case <-ctx.Done():
@@ -684,12 +805,18 @@ func (w *walker) updateFileInfo(dst, src protocol.FileInfo) protocol.FileInfo {
 
 func handleError(ctx context.Context, context, path string, err error, finishedChan chan<- ScanResult) {
 	l.Debugf("handle error on '%v': %v: %v", path, context, err)
-	select {
-	case finishedChan <- ScanResult{
+	res := ScanResult{
 		Err:  fmt.Errorf("%s: %w", context, err),
 		Path: path,
-	}:
+	}
+	select {
+	case finishedChan <- res:
 	case <-ctx.Done():
+		// The context is cancelled, but the result must still be delivered: the
+		// receiver drains the channel until it is closed, and a scan that resumes
+		// from a marker relies on every file the walker handed over being either
+		// applied or reported, never dropped silently.
+		finishedChan <- res
 	}
 }
 
