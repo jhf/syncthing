@@ -170,11 +170,8 @@ func newSendReceiveFolder(model *model, ignores *ignore.Matcher, cfg config.Fold
 func (f *sendReceiveFolder) pull(ctx context.Context) (bool, error) {
 	f.sl.DebugContext(ctx, "Pulling")
 
-	scanChan := make(chan string)
-	go f.pullScannerRoutine(ctx, scanChan)
-	defer func() {
-		close(scanChan)
-	}()
+	scanChan, finishRescans := f.pullRescanCollector()
+	defer finishRescans()
 
 	metricFolderPulls.WithLabelValues(f.ID).Inc()
 	pullCtx, cancel := context.WithCancel(ctx)
@@ -1896,25 +1893,6 @@ func (f *sendReceiveFolder) fsyncDirs(changedDirs map[string]struct{}) {
 		})
 	}
 	wg.Wait()
-}
-
-// pullScannerRoutine aggregates paths to be scanned after pulling. The scan is
-// scheduled once when scanChan is closed (scanning can not happen during pulling).
-func (f *sendReceiveFolder) pullScannerRoutine(ctx context.Context, scanChan <-chan string) {
-	toBeScanned := make(map[string]struct{})
-
-	for path := range scanChan {
-		toBeScanned[path] = struct{}{}
-	}
-
-	if len(toBeScanned) != 0 {
-		scanList := make([]string, 0, len(toBeScanned))
-		for path := range toBeScanned {
-			slog.DebugContext(ctx, "Scheduling scan after pulling", slogutil.FilePath(path))
-			scanList = append(scanList, path)
-		}
-		f.Scan(scanList)
-	}
 }
 
 func (f *sendReceiveFolder) moveForConflict(name, lastModBy string, scanChan chan<- string) error {
