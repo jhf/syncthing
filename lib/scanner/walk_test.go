@@ -1007,13 +1007,21 @@ func BenchmarkWalk(b *testing.B) {
 // everything from that path onwards, must not report what came before, and must descend into a
 // directory whose own name sorts before the marker when that directory can still contain entries
 // after it - or the resume silently loses a subtree.
+//
+// The tree contains two shapes where walk order (lexical, depth first) and string order over full
+// paths disagree, because "-" (0x2D) and "." (0x2E) sort before the path separator "/" (0x2F):
+// "documents.txt" sorts before "documents/z" as strings but is walked after it, and likewise
+// "n-old" before "n/1". A plain path < marker string comparison skips both on resume even though
+// the walk may never have visited them. These cases are the deterministic teeth for that flaw; the
+// model-level chunking test cannot provide them reliably because where a chunk boundary lands is
+// timing dependent.
 func TestWalkResumeFrom(t *testing.T) {
 	fsys := fs.NewFilesystem(fs.FilesystemTypeBasic, t.TempDir())
 
 	// Lexical order and nesting disagree here on purpose: "d" sorts before the marker "d/5", but
 	// "d/9" sorts after it, so a correct resume descends into "d". "b/x" sorts entirely before
 	// the marker and must not be reported at all.
-	for _, name := range []string{"a", "b/x", "d/1", "d/5", "d/9", "m", "z"} {
+	for _, name := range []string{"a", "b/x", "d/1", "d/5", "d/9", "documents/z", "documents.txt", "m", "n/1", "n-old", "z"} {
 		if dir := filepath.Dir(name); dir != "." {
 			if err := fsys.MkdirAll(dir, 0o755); err != nil {
 				t.Fatal(err)
@@ -1050,18 +1058,31 @@ func TestWalkResumeFrom(t *testing.T) {
 	}
 
 	// The control: with no marker, everything is reported.
-	if got, want := walkNames(""), []string{"a", "b/x", "d/1", "d/5", "d/9", "m", "z"}; !slices.Equal(got, want) {
+	if got, want := walkNames(""), []string{"a", "b/x", "d/1", "d/5", "d/9", "documents.txt", "documents/z", "m", "n-old", "n/1", "z"}; !slices.Equal(got, want) {
 		t.Errorf("unresumed walk reported %v, want %v", got, want)
 	}
 
 	// The resume: from "d/5" onwards, including the marker itself.
-	if got, want := walkNames("d/5"), []string{"d/5", "d/9", "m", "z"}; !slices.Equal(got, want) {
+	if got, want := walkNames("d/5"), []string{"d/5", "d/9", "documents.txt", "documents/z", "m", "n-old", "n/1", "z"}; !slices.Equal(got, want) {
 		t.Errorf("walk resumed from d/5 reported %v, want %v", got, want)
 	}
 
 	// A marker deep inside a directory whose own name sorts before it still descends.
-	if got, want := walkNames("d/9"), []string{"d/9", "m", "z"}; !slices.Equal(got, want) {
+	if got, want := walkNames("d/9"), []string{"d/9", "documents.txt", "documents/z", "m", "n-old", "n/1", "z"}; !slices.Equal(got, want) {
 		t.Errorf("walk resumed from d/9 reported %v, want %v", got, want)
+	}
+
+	// A marker inside "documents" must not skip the sibling file "documents.txt": as strings
+	// "documents.txt" < "documents/z", but the walk visits the directory's contents first, so
+	// the file may be unvisited when the walk is cut at the marker.
+	if got, want := walkNames("documents/z"), []string{"documents.txt", "documents/z", "m", "n-old", "n/1", "z"}; !slices.Equal(got, want) {
+		t.Errorf("walk resumed from documents/z reported %v, want %v", got, want)
+	}
+
+	// Same disagreement one character earlier: "-" sorts before "/", so "n-old" < "n/1" as
+	// strings while the walk visits "n/1" first.
+	if got, want := walkNames("n/1"), []string{"n-old", "n/1", "z"}; !slices.Equal(got, want) {
+		t.Errorf("walk resumed from n/1 reported %v, want %v", got, want)
 	}
 
 	// A marker after everything reports nothing new, which is the end condition a caller sees

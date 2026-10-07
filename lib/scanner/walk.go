@@ -67,10 +67,12 @@ type Config struct {
 	ScanXattrs bool
 	// Filter for extended attributes
 	XattrFilter XattrFilter
-	// ResumeFrom, when non-empty, skips everything that sorts before it, so a caller that cut a
-	// previous walk short can ask for the rest of it without re-reporting the part it already
-	// handled. The comparison is strictly less-than, so the entry named is visited again:
-	// reporting one item twice is harmless, missing one is not.
+	// ResumeFrom, when non-empty, skips everything the walk visits before the named
+	// entry, so a caller that cut a previous walk short can ask for the rest of it
+	// without re-reporting the part it already handled. "Before" is in walk order
+	// (lexical, depth first), which is not string order over full paths - see
+	// pathCoveredByMarker. The comparison is strict, so the entry named is visited
+	// again: reporting one item twice is harmless, missing one is not.
 	ResumeFrom string
 }
 
@@ -254,6 +256,55 @@ func (w *walker) walkWithoutHashing(ctx context.Context) chan ScanResult {
 
 const walkFailureEventDesc = "Unexpected error while walking the filesystem during scan"
 
+// WalkOrderLess reports whether path a precedes path b in walk order - lexical, depth
+// first. It defines the order the resume marker speaks in: a walk resuming from marker m
+// skips exactly the paths p with WalkOrderLess(p, m), and a caller deriving a marker from
+// several candidate paths must take the minimum in this same order.
+//
+// The comparison is component-wise because walk order is not string order over full
+// paths: name characters such as "-" (0x2D) and "." (0x2E) sort before the path
+// separator "/" (0x2F), so "documents.txt" sorts before "documents/z" as strings but
+// is walked after it, and "a-b/x" sorts before "a/c" as strings but is walked after
+// it. Truncating the longer path to the shorter's depth and comparing the strings
+// would still get those cases wrong; the components must be compared one by one.
+//
+// Strictly a strict order: WalkOrderLess(p, p) is false.
+func WalkOrderLess(a, b string) bool {
+	ac := fs.PathComponents(a)
+	bc := fs.PathComponents(b)
+	for i := 0; i < len(ac) && i < len(bc); i++ {
+		if ac[i] != bc[i] {
+			return ac[i] < bc[i]
+		}
+	}
+	// One path is a prefix of the other: the ancestor is walked first.
+	return len(ac) < len(bc)
+}
+
+// pathCoveredByMarker reports whether path precedes marker in walk order and so was
+// already visited by the walk that produced the marker. The marker itself is not
+// covered: a walk resumes inclusive of the marker.
+func pathCoveredByMarker(path, marker string) bool {
+	return WalkOrderLess(path, marker)
+}
+
+// isStrictParentOfMarker reports whether path is a strict ancestor directory of
+// marker, i.e. a directory on the way to the marker that a resumed walk must descend
+// into but not process again.
+func isStrictParentOfMarker(path, marker string) bool {
+	pc := fs.PathComponents(path)
+	mc := fs.PathComponents(marker)
+	if len(pc) >= len(mc) {
+		return false
+	}
+	for i := range pc {
+		if pc[i] != mc[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (w *walker) scan(ctx context.Context, toHashChan chan<- protocol.FileInfo, finishedChan chan<- ScanResult) {
 	hashFiles := w.walkAndHashFiles(ctx, toHashChan, finishedChan)
 	if len(w.Subs) == 0 {
@@ -318,16 +369,18 @@ func (w *walker) walkAndHashFiles(ctx context.Context, toHashChan chan<- protoco
 			skip = fs.SkipDir
 		}
 
-		// A resumed walk skips what a previous one already handled. The comparison is strictly
-		// less-than, so the entry the marker names is visited again: re-reporting one item is
-		// harmless, missing one is not.
-		if w.ResumeFrom != "" && path < w.ResumeFrom {
-			// A directory that can still contain entries at or after the marker must be
-			// descended into even though its own name sorts before the marker, or the resume
-			// silently loses that whole subtree. The walk root always qualifies: it is "." for a
-			// whole-folder walk, or the sub path for a sub walk, and everything to be resumed is
-			// inside it. Missing that case skips the entire walk, which a test pins.
-			if info != nil && info.IsDir() && (path == "." || strings.HasPrefix(w.ResumeFrom, path+"/")) {
+		// A resumed walk skips what a previous one already handled: every path that
+		// precedes the marker in walk order. The comparison is strict, so the entry the
+		// marker names is visited again: re-reporting one item is harmless, missing one
+		// is not.
+		if w.ResumeFrom != "" && pathCoveredByMarker(path, w.ResumeFrom) {
+			// A directory on the way to the marker was already reported, but it can
+			// still contain entries at or after the marker, so descend into it without
+			// processing it again. The walk root always qualifies: it is "." for a
+			// whole-folder walk, or the sub path for a sub walk, and everything to be
+			// resumed is inside it. Missing that case skips the entire walk, which a
+			// test pins.
+			if info != nil && info.IsDir() && (path == "." || isStrictParentOfMarker(path, w.ResumeFrom)) {
 				return nil
 			}
 			return skip
