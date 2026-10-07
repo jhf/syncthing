@@ -75,9 +75,8 @@ func (f *receiveOnlyFolder) revert(ctx context.Context) error {
 
 	f.setState(FolderScanning)
 
-	scanChan := make(chan string)
-	go f.pullScannerRoutine(ctx, scanChan)
-	defer close(scanChan)
+	scanChan, finishRescans := f.pullRescanCollector()
+	defer finishRescans()
 
 	delQueue := &deleteQueue{
 		handler:  f, // for the deleteItemOnDisk and deleteDirOnDisk methods

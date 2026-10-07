@@ -101,9 +101,8 @@ func (f *receiveEncryptedFolder) revertHandleDirs(ctx context.Context, dirs []st
 		return
 	}
 
-	scanChan := make(chan string)
-	go f.pullScannerRoutine(ctx, scanChan)
-	defer close(scanChan)
+	scanChan, finishRescans := f.pullRescanCollector()
+	defer finishRescans()
 
 	slices.SortFunc(dirs, func(a, b string) int {
 		return strings.Compare(b, a)
