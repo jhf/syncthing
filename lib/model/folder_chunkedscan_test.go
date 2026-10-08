@@ -304,6 +304,42 @@ func TestScanChunkMarkerPassesErroringEntry(t *testing.T) {
 	t.Fatalf("the walk did not finish within 300 chunks (marker stuck at %q)", last)
 }
 
+// TestScanChunkAppliesChangedFilesBeforeCut checks that changed files found before a budget
+// cut are applied, not aborted. That requires the streaming pipeline (handovers feed the
+// hashers while the walk runs): the buffered pipeline waits for the walk to end before it
+// starts hashing, so a cut during the walk aborts every handover wholesale - and the earliest
+// of them, typically the never-applied resume entry itself, then holds the resume marker
+// where it started. Measured on the Mac: every cut chunk aborted its entire handover list,
+// the marker pinned on the first changed file, and the budget ballooned to the cap.
+func TestScanChunkAppliesChangedFilesBeforeCut(t *testing.T) {
+	_, f := setupSendReceiveFolder(t)
+	ffs := f.Filesystem()
+	ctx := t.Context()
+
+	must(t, ffs.MkdirAll("d", 0o755))
+	for i := range 2000 {
+		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte("x"))
+	}
+	must(t, f.scanSubdirs(ctx, nil))
+
+	// Change a handful of files at the start of the walk.
+	for i := range 30 {
+		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte("y"))
+	}
+
+	// A budget that cuts the walk mid-tree. The changed files were handed over at the very
+	// start, and their results must be applied, not aborted.
+	batch := f.newScanBatch()
+	changes, _, more, _, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, "", 5*time.Millisecond)
+	must(t, err)
+	if !more {
+		t.Fatal("the 5ms budget walked the whole tree; the test setup is too fast to be meaningful")
+	}
+	if changes == 0 {
+		t.Fatal("a chunk cut mid-walk applied none of the changed files it found: the handovers were buffered until the walk ended and then aborted wholesale")
+	}
+}
+
 // TestScanChunkedDeliversEverything forces the walk to yield over and over by shrinking the chunk
 // budget, and checks the two properties that make chunking safe: every file still ends up indexed,
 // and a file deleted between scans is still noticed. It runs at several budgets, from the
