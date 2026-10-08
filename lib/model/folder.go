@@ -864,6 +864,10 @@ func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string,
 	// scanner reports every handed-over file it could not apply, so the resume marker must stay
 	// behind all of them: an entry the marker moved past would never be visited again.
 	firstAborted := ""
+	// walkFrontier is how far the walk enumerated before the budget cut it, reported by the
+	// scanner because unchanged entries produce no result of their own. Every applied result
+	// and every abort sorts at or below it, so it is an upper bound the marker may advance to.
+	walkFrontier := ""
 	// The budget is enforced two ways: the timer covers silence (unchanged files produce no
 	// results, so there is nothing to check against for minutes at a time), and the deadline
 	// check covers bursts (a timer is delivered asynchronously, so a result stream can otherwise
@@ -885,6 +889,16 @@ loop:
 		case res, ok := <-fchan:
 			if !ok {
 				break loop
+			}
+
+			if res.WalkFrontier {
+				// The walk's enumeration frontier at the cut: an upper bound
+				// for the marker, not an abort. It does not enter firstAborted,
+				// whose minimum must stay behind unhandled work only.
+				if walkFrontier == "" || scanner.WalkOrderLess(walkFrontier, res.Path) {
+					walkFrontier = res.Path
+				}
+				continue
 			}
 
 			if res.Err != nil {
@@ -963,6 +977,16 @@ loop:
 	// aborted file that was never applied. Nothing below the marker is then unaccounted for. An
 	// abort report with nothing applied after it leaves the marker where it started, which the
 	// caller sees as no progress.
+	if walkFrontier != "" && (marker == "" || scanner.WalkOrderLess(marker, walkFrontier)) {
+		// Everything up to the frontier was enumerated this chunk. Unchanged entries produce
+		// no result, so without this a chunk cut in a silent stretch would leave the marker
+		// where it started and rewalk the same ground with an ever-growing budget. Applied
+		// results and aborts all sort at or below the frontier, so advancing to it skips
+		// nothing unhandled. It can only advance the marker, never move it back: the resumed
+		// walk re-enumerates the covered region to reach new ground, and a budget that
+		// expires during that catch-up reports a frontier behind the marker.
+		marker = walkFrontier
+	}
 	if firstAborted != "" && (marker == "" || scanner.WalkOrderLess(firstAborted, marker)) {
 		marker = firstAborted
 	}
