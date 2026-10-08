@@ -833,7 +833,7 @@ func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string,
 		AutoNormalize:         f.AutoNormalize,
 		Hashers:               f.model.numHashers(f.ID),
 		ShortID:               f.shortID,
-		ProgressTickIntervalS: f.ScanProgressIntervalS,
+		ProgressTickIntervalS: -1, // see below
 		LocalFlags:            f.localFlags,
 		ModTimeWindow:         f.modTimeWindow,
 		EventLogger:           f.evLogger,
@@ -842,6 +842,16 @@ func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string,
 		XattrFilter:           f.XattrFilter,
 		ResumeFrom:            resumeFrom,
 	}
+	// ProgressTickIntervalS -1 selects the streaming pipeline: handovers feed the hashers
+	// while the walk runs. The default pipeline instead buffers every handover until the
+	// walk ends - it needs the full list to compute the FolderScanProgress total - and only
+	// then starts hashing, which defeats chunking outright: a budget cut during the walk
+	// aborts every changed file found so far, and the earliest of them (typically the resume
+	// entry itself, which by definition was never applied) holds the marker where it
+	// started. Measured on the Mac: every cut chunk aborted its entire handover list, the
+	// marker pinned on the first changed file, and the budget ballooned to the cap while
+	// the scan crawled. The price is that chunked scans emit no FolderScanProgress events.
+
 	var fchan chan scanner.ScanResult
 	if f.Type == config.FolderTypeReceiveEncrypted {
 		fchan = scanner.WalkWithoutHashing(scanCtx, scanConfig)
