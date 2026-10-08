@@ -61,6 +61,7 @@ type folder struct {
 
 	scanInterval           time.Duration
 	scanTimer              *time.Timer
+	watchScanDepth         int // >0 while servicing a watch-triggered scan between chunks
 	scanDelay              chan time.Duration
 	initialScanFinished    chan struct{}
 	scanScheduled          chan struct{}
@@ -514,6 +515,28 @@ func (f *folder) initialScanEverCompleted() (bool, error) {
 	return true, nil
 }
 
+// serviceQueuedWatch runs one queued batch of watch events, if any, and returns immediately
+// otherwise. Watch events wait on the serve goroutine like pulls do, so a long scan otherwise
+// delays noticing (and announcing) local changes until it finishes; on a busy machine that delay
+// was measured at a full scan's duration, and the notify backlog can overflow and lose events
+// entirely while it builds up. A watch-triggered scan does not itself service the watch channel:
+// the batches it would find there were generated while it ran, and servicing them inline would
+// never let the outer scan finish.
+func (f *folder) serviceQueuedWatch(ctx context.Context) error {
+	if f.watchScanDepth > 0 {
+		return nil
+	}
+	select {
+	case fsEvents := <-f.watchChan:
+		f.sl.DebugContext(ctx, "Scan due to watcher (serviced between scan chunks)")
+		f.watchScanDepth++
+		defer func() { f.watchScanDepth-- }()
+		return f.scanSubdirs(ctx, fsEvents)
+	default:
+		return nil
+	}
+}
+
 // serviceQueuedPull runs one pull iteration if the folder has one queued, and returns immediately
 // otherwise. It exists so that a chunked scan does not starve the puller: the scan and the pull both
 // run in the serve goroutine, so this is the same work the loop would have done between two selects.
@@ -625,9 +648,13 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 		// the rest of the scan when it equals the number of folders).
 		f.ioLimiter.Give(1)
 		pullErr := f.serviceQueuedPull(ctx)
+		watchErr := f.serviceQueuedWatch(ctx)
 		limitErr := f.ioLimiter.TakeWithContext(ctx, 1)
 		if pullErr != nil {
 			return pullErr
+		}
+		if watchErr != nil {
+			return watchErr
 		}
 		if limitErr != nil {
 			return limitErr
