@@ -91,6 +91,11 @@ type ScanResult struct {
 	File protocol.FileInfo
 	Err  error
 	Path string // to be set in case Err != nil and File == nil
+	// WalkFrontier marks a report that carries no error of its own but names
+	// how far the walk enumerated before it was cancelled. Everything at or
+	// before Path in walk order was visited; every result and abort in the
+	// same scan sorts at or before it.
+	WalkFrontier bool
 }
 
 func Walk(ctx context.Context, cfg Config) chan ScanResult {
@@ -338,10 +343,17 @@ func (w *walker) scan(ctx context.Context, toHashChan chan<- protocol.FileInfo, 
 			// enumerated and found unchanged produce no result of their own, so
 			// without this a caller resuming from a marker cannot advance the
 			// marker across a silent stretch and the next chunk would restart
-			// from the same place. It is reported like an abort, so the caller
-			// mins it against anything still in flight below it, and the walk
-			// resumes inclusive of it.
-			handleError(ctx, "walking", last, ctx.Err(), finishedChan)
+			// from the same place. This is not an abort: aborts sort at or
+			// below it and must keep the marker behind them, while the frontier
+			// itself is how far the marker may advance. The walk resumes
+			// inclusive of it. The send must not be abandoned to the cancelled
+			// context: the receiver drains the channel until it is closed.
+			res := ScanResult{Path: last, Err: ctx.Err(), WalkFrontier: true}
+			select {
+			case finishedChan <- res:
+			case <-ctx.Done():
+				finishedChan <- res
+			}
 		}
 	}
 	close(toHashChan)
