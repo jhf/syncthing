@@ -14,6 +14,7 @@ import (
 
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/scanner"
+	"github.com/syncthing/syncthing/lib/watchaggregator"
 )
 
 // liveLocalNames returns the names of the local files that are present and not deleted, which is
@@ -60,11 +61,11 @@ func TestScanChunkedServicesWatchEvents(t *testing.T) {
 	writeFile(t, ffs, "b/file2", []byte("b"))
 
 	// The watch channel is normally created by startWatch, which is not running here.
-	f.watchChan = make(chan []string)
+	f.watchChan = make(chan watchaggregator.Batch)
 	delivered := make(chan struct{})
 	go func() {
 		select {
-		case f.watchChan <- []string{"b"}:
+		case f.watchChan <- watchaggregator.Batch{Paths: []string{"b"}}:
 			close(delivered)
 		case <-ctx.Done():
 		}
@@ -118,11 +119,11 @@ func TestScanChunkedBoundaryWithoutResults(t *testing.T) {
 	must(t, ffs.MkdirAll("d2", 0o755))
 	writeFile(t, ffs, "d2/new", []byte("y"))
 
-	f.watchChan = make(chan []string)
+	f.watchChan = make(chan watchaggregator.Batch)
 	delivered := make(chan struct{})
 	go func() {
 		select {
-		case f.watchChan <- []string{"d2"}:
+		case f.watchChan <- watchaggregator.Batch{Paths: []string{"d2"}}:
 			close(delivered)
 		case <-ctx.Done():
 		}
@@ -426,11 +427,11 @@ func TestScanSweepServicesWatch(t *testing.T) {
 	must(t, ffs.MkdirAll("d2", 0o755))
 	writeFile(t, ffs, "d2/new", []byte("y"))
 
-	f.watchChan = make(chan []string)
+	f.watchChan = make(chan watchaggregator.Batch)
 	delivered := make(chan struct{})
 	go func() {
 		select {
-		case f.watchChan <- []string{"d2"}:
+		case f.watchChan <- watchaggregator.Batch{Paths: []string{"d2"}}:
 			close(delivered)
 		case <-ctx.Done():
 		}
