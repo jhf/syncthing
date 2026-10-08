@@ -860,9 +860,12 @@ func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string,
 	// out of order against applied results, so folding them into the marker directly would let
 	// the next applied result advance past an aborted entry and lose it for good.
 	marker := resumeFrom
-	// firstAborted is the smallest path of any error result in this chunk, aborts included. The
-	// scanner reports every handed-over file it could not apply, so the resume marker must stay
-	// behind all of them: an entry the marker moved past would never be visited again.
+	// firstAborted is the smallest path of any abort report in this chunk. Aborts are the
+	// handed-over files the budget cut cancelled before they could be applied; they are not
+	// recorded anywhere else, so the resume marker must stay behind all of them: an entry the
+	// marker moved past would never be visited again. Real scan errors are not here - they are
+	// surfaced to the user and retried by the next scan, and holding the marker for a
+	// persistently erroring file would wedge the scan at it.
 	firstAborted := ""
 	// walkFrontier is how far the walk enumerated before the budget cut it, reported by the
 	// scanner because unchanged entries produce no result of their own. Every applied result
@@ -902,12 +905,22 @@ loop:
 			}
 
 			if res.Err != nil {
+				if !errors.Is(res.Err, context.Canceled) {
+					// A real scan error is user-visible bookkeeping and nothing
+					// more: it must not hold the resume marker. A file that
+					// errors persistently (it is being rewritten faster than it
+					// can be hashed, say) would otherwise pin the marker at
+					// itself forever, and the chunk after would error on it
+					// again - measured on the Mac, where a skills manifest
+					// rewritten every few minutes wedged the scan at itself
+					// while the walk frontier sailed past it. The next scan
+					// retries the file, as it always has.
+					f.newScanError(res.Path, res.Err)
+					continue
+				}
 				// An abort (the chunk budget cancelled the scan under this entry) is
 				// bookkeeping for the resume marker, not a user-visible scan error: the
-				// entry is retried by the next chunk. Anything else is a real error.
-				if !errors.Is(res.Err, context.Canceled) {
-					f.newScanError(res.Path, res.Err)
-				}
+				// entry is retried by the next chunk.
 				// The minimum must be in walk order for the same reason as below.
 				if firstAborted == "" || scanner.WalkOrderLess(res.Path, firstAborted) {
 					firstAborted = res.Path
