@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/scanner"
 )
 
 // liveLocalNames returns the names of the local files that are present and not deleted, which is
@@ -210,6 +211,71 @@ func TestScanChunkMarkerAdvancesThroughSilence(t *testing.T) {
 		}
 		if budget *= 2; budget > 256*time.Millisecond {
 			t.Fatalf("chunk %d made no progress even with a %s budget (marker stuck at %q): the frontier does not advance the resume marker", i, budget, last)
+		}
+	}
+	t.Fatalf("the walk did not finish within 300 chunks (marker stuck at %q)", last)
+}
+
+// TestScanChunkMarkerPassesErroringEntry checks that a scan error does not hold the resume
+// marker. The walk reports an unreadable directory as an error result on every chunk, and the
+// error is surfaced to the user - but the entry is retried by the next scan, not by this one,
+// so the marker must advance past it all the same. If error results were allowed to hold the
+// marker the way abort reports do, a persistently erroring entry (a file rewritten faster than
+// it can be hashed, an unreadable directory) would pin the marker at itself forever: measured
+// on the Mac, where a skills manifest that something rewrites every few minutes wedged the
+// whole scan while the walk frontier sailed past it.
+func TestScanChunkMarkerPassesErroringEntry(t *testing.T) {
+	_, f := setupSendReceiveFolder(t)
+	ffs := f.Filesystem()
+	ctx := t.Context()
+
+	// An entry whose name is not valid UTF-8 produces a real scan error every time the walk
+	// visits it - it can never be indexed, so it errors persistently. It sorts between the
+	// a* and z* files. (The folder filesystem in these tests is the in-memory fakefs, where
+	// permission bits are not enforced, so an unreadable directory would not error.)
+	bad := "d/b\xad"
+	must(t, ffs.MkdirAll("d", 0o755))
+	for i := range 10 {
+		writeFile(t, ffs, fmt.Sprintf("d/a%03d", i), []byte("x"))
+	}
+	writeFile(t, ffs, bad, []byte("x"))
+	for i := range 2000 {
+		writeFile(t, ffs, fmt.Sprintf("d/z%04d", i), []byte("x"))
+	}
+	must(t, f.scanSubdirs(ctx, nil))
+
+	// Resume just before the erroring entry: the catch-up is a handful of skipped entries,
+	// so a 20ms budget lands deep in the z* stretch - past the error, well short of the
+	// whole tree, and with nothing applied in between. The marker must then be past the
+	// erroring entry: holding errors the way aborts are held would park the marker on the
+	// erroring entry itself (the minimum of nothing applied and the one error report).
+	batch := f.newScanBatch()
+	_, last, more, _, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, "d/a005", 20*time.Millisecond)
+	must(t, err)
+	if !more {
+		t.Fatal("the 20ms budget walked the whole tree; the test setup is too fast to be meaningful")
+	}
+	if !scanner.WalkOrderLess(bad, last) {
+		t.Fatalf("the marker did not advance past the erroring entry (last=%q)", last)
+	}
+
+	// The rest of the walk must finish under chunked budgets, doubling on a stall as the
+	// caller does: a chunk can legitimately stall while enumeration catches up to the
+	// resume point.
+	budget := 2 * time.Millisecond
+	for i := range 300 {
+		batch := f.newScanBatch()
+		_, next, more, progressed, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, last, budget)
+		must(t, err)
+		if !more {
+			return
+		}
+		if progressed {
+			last = next
+			continue
+		}
+		if budget *= 2; budget > 256*time.Millisecond {
+			t.Fatalf("chunk %d made no progress even with a %s budget (marker stuck at %q)", i, budget, last)
 		}
 	}
 	t.Fatalf("the walk did not finish within 300 chunks (marker stuck at %q)", last)
