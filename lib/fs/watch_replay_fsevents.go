@@ -16,10 +16,11 @@ import (
 )
 
 // errWatchJournalIncomplete is delivered on the watch error channel when
-// FSEvents reports that its journal cannot account for every change (the
-// seeded position was trimmed, events were dropped, IDs wrapped, or the
-// watched root changed). The watch is torn down; the consumer must do a full
-// scan to re-establish a complete picture.
+// FSEvents reports the stream itself is broken (the watched root changed
+// identity or journal IDs wrapped). Dropped-event flags do not arrive here:
+// they are healed in place by a full-scan event (see watchOverflowMask). The
+// watch is torn down; the consumer must do a full scan to re-establish a
+// complete picture.
 var errWatchJournalIncomplete = errors.New("filesystem journal does not cover all changes, full scan required")
 
 // watchEventClass is the watch loop's verdict for a backend failure-flag
@@ -38,16 +39,25 @@ const (
 )
 
 // watchOverflowMask are FSEvents flags meaning "some events were dropped,
-// stream continues". Apple documents the stream as usable afterwards; the
-// missed changes are healed by a full scan.
-const watchOverflowMask = notify.FSEventsUserDropped |
+// rescan, the stream continues". Per Apple's documentation the stream keeps
+// delivering after all of these; the missed changes are healed by a full
+// scan. MustScanSubDirs is in this group: it means "events were dropped,
+// rescan everything below this path", both when a seeded journal position is
+// not fully covered and when a live stream's delivery overflows (observed on
+// a busy volume, 2026-10-08: an unseeded stream flagged it minutes into
+// watching while fseventsd was overloaded). A full scan covers the gap in
+// both cases, and watermarks only advance across scanned batches, so no
+// persisted position can skip the gap afterwards.
+const watchOverflowMask = notify.FSEventsMustScanSubDirs |
+	notify.FSEventsUserDropped |
 	notify.FSEventsKernelDropped
 
 // watchFatalMask are FSEvents flags meaning the stream itself is
-// untrustworthy: the seeded journal position is not covered, the watched
-// root changed identity, or journal IDs are no longer comparable.
-const watchFatalMask = notify.FSEventsMustScanSubDirs |
-	notify.FSEventsEventIdsWrapped |
+// untrustworthy: the watched root changed identity, or journal IDs are no
+// longer comparable. (After an ID wrap the arming check in the model -
+// persisted position <= current journal position - can never pass, so no
+// stale watermark survives it either.)
+const watchFatalMask = notify.FSEventsEventIdsWrapped |
 	notify.FSEventsRootChanged
 
 // watchEventClassify classifies a backend event. On a fatal verdict the
