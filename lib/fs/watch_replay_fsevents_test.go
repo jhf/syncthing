@@ -152,19 +152,20 @@ func TestFSEventsNoReplayWithoutSeed(t *testing.T) {
 // TestWatchEventClassify unit-tests the journal-failure classifier. Probing
 // on macOS 26 showed that seeding a stream with a journal position the log
 // no longer covers is sometimes silently clamped WITHOUT the documented
-// MustScanSubDirs flag (and sometimes flagged, as the live serve
-// demonstrated), so an OS-level gap test is not deterministic; the
+// MustScanSubDirs flag, so an OS-level gap test is not deterministic; the
 // over-old-watermark case is handled by the age gate in the model
-// (maxWatchReplayAge), and overflow flags are healed by a full scan without
-// killing the watch.
+// (maxWatchReplayAge). MustScanSubDirs is an overflow, not fatal: it fires
+// both for an uncovered seed and for live-delivery overload on a busy volume
+// (observed on an unseeded live stream, 2026-10-08), and the stream keeps
+// delivering afterwards, so a full-scan event is the right heal for all of
+// it.
 func TestWatchEventClassify(t *testing.T) {
 	defer ResetWatchReplay()
 
 	fatal := []notify.Event{
-		notify.FSEventsMustScanSubDirs,
 		notify.FSEventsEventIdsWrapped,
 		notify.FSEventsRootChanged,
-		notify.FSEventsCreated | notify.FSEventsMustScanSubDirs, // combined
+		notify.FSEventsCreated | notify.FSEventsRootChanged, // combined
 	}
 	for _, e := range fatal {
 		if class := watchEventClassify(fakeNotifyEventInfo{e}); class != watchEventFatalClass {
@@ -172,9 +173,11 @@ func TestWatchEventClassify(t *testing.T) {
 		}
 	}
 	overflow := []notify.Event{
+		notify.FSEventsMustScanSubDirs,
 		notify.FSEventsUserDropped,
 		notify.FSEventsKernelDropped,
-		notify.FSEventsModified | notify.FSEventsUserDropped, // combined
+		notify.FSEventsModified | notify.FSEventsMustScanSubDirs, // combined
+		notify.FSEventsModified | notify.FSEventsUserDropped,    // combined
 	}
 	for _, e := range overflow {
 		if class := watchEventClassify(fakeNotifyEventInfo{e}); class != watchEventOverflow {
