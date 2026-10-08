@@ -91,6 +91,19 @@ func (dir *eventDir) eventType() fs.EventType {
 	return evType
 }
 
+// Batch is one flushed set of watched paths scheduled for scanning.
+type Batch struct {
+	Paths []string
+	// MaxEventID is the highest backend journal ID among all events seen
+	// up to this flush (zero when the backend has no journal concept). It
+	// is attached only to the last sub-batch of a flush - a flush is split
+	// into up to three batches (non-removes, mixed, removes, in that
+	// order) - so persisting it after that batch's scan implies every
+	// event it covers has been scanned. Monotonic for the lifetime of the
+	// aggregator.
+	MaxEventID uint64
+}
+
 type aggregator struct {
 	// folderID never changes and is accessed in CommitConfiguration, which
 	// asynchronously updates folderCfg -> can't use folderCfg.ID (racy)
@@ -107,6 +120,11 @@ type aggregator struct {
 	counts                eventCounter
 	root                  *eventDir
 	ctx                   context.Context
+	// maxEventID tracks the highest backend journal ID seen, including
+	// events that are later dropped from batches: drops happen because the
+	// change is covered anyway (a parent or "." is scheduled, or we made
+	// the change ourselves), so the watermark may advance over them.
+	maxEventID uint64
 }
 
 type eventCounter struct {
@@ -139,14 +157,14 @@ func newAggregator(ctx context.Context, folderCfg config.FolderConfiguration) *a
 	return a
 }
 
-func Aggregate(ctx context.Context, in <-chan fs.Event, out chan<- []string, folderCfg config.FolderConfiguration, cfg config.Wrapper, evLogger events.Logger) {
+func Aggregate(ctx context.Context, in <-chan fs.Event, out chan<- Batch, folderCfg config.FolderConfiguration, cfg config.Wrapper, evLogger events.Logger) {
 	a := newAggregator(ctx, folderCfg)
 
 	// Necessary for unit tests where the backend is mocked
 	go a.mainLoop(in, out, cfg, evLogger)
 }
 
-func (a *aggregator) mainLoop(in <-chan fs.Event, out chan<- []string, cfg config.Wrapper, evLogger events.Logger) {
+func (a *aggregator) mainLoop(in <-chan fs.Event, out chan<- Batch, cfg config.Wrapper, evLogger events.Logger) {
 	a.notifyTimer = time.NewTimer(a.notifyDelay)
 	defer a.notifyTimer.Stop()
 
@@ -180,6 +198,9 @@ func (a *aggregator) mainLoop(in <-chan fs.Event, out chan<- []string, cfg confi
 }
 
 func (a *aggregator) newEvent(event fs.Event, inProgress map[string]struct{}) {
+	if event.ID > a.maxEventID {
+		a.maxEventID = event.ID
+	}
 	if _, ok := a.root.events["."]; ok {
 		l.Debugln(a, "Will scan entire folder anyway; dropping:", event.Name)
 		return
@@ -317,7 +338,7 @@ func (a *aggregator) resetNotifyTimer(duration time.Duration) {
 	a.notifyTimer.Reset(duration)
 }
 
-func (a *aggregator) actOnTimer(out chan<- []string) {
+func (a *aggregator) actOnTimer(out chan<- Batch) {
 	c := a.counts.total()
 	if c == 0 {
 		l.Debugln(a, "No tracked events, waiting for new event.")
@@ -342,18 +363,33 @@ func (a *aggregator) actOnTimer(out chan<- []string) {
 
 // Schedule scan for given events dispatching deletes last and reset notification
 // afterwards to set up for the next scan scheduling.
-func (a *aggregator) notify(oldEvents map[string]*aggregatedEvent, out chan<- []string) {
+func (a *aggregator) notify(oldEvents map[string]*aggregatedEvent, out chan<- Batch) {
 	timeBeforeSending := time.Now()
 	l.Debugf("%v Notifying about %d fs events", a, len(oldEvents))
 	separatedBatches := make(map[fs.EventType][]string)
 	for path, event := range oldEvents {
 		separatedBatches[event.evType] = append(separatedBatches[event.evType], path)
 	}
-	for _, evType := range [3]fs.EventType{fs.NonRemove, fs.Mixed, fs.Remove} {
+	batchTypes := [3]fs.EventType{fs.NonRemove, fs.Mixed, fs.Remove}
+	// The watermark rides only on the last non-empty sub-batch: the
+	// consumer persists it after that batch's scan, which implies the
+	// earlier sub-batches of this flush were already scanned (they are
+	// processed in order).
+	lastNonEmpty := -1
+	for i, evType := range batchTypes {
+		if len(separatedBatches[evType]) != 0 {
+			lastNonEmpty = i
+		}
+	}
+	for i, evType := range batchTypes {
 		currBatch := separatedBatches[evType]
 		if len(currBatch) != 0 {
+			b := Batch{Paths: currBatch}
+			if i == lastNonEmpty {
+				b.MaxEventID = a.maxEventID
+			}
 			select {
-			case out <- currBatch:
+			case out <- b:
 			case <-a.ctx.Done():
 				return
 			}
