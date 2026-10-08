@@ -83,6 +83,21 @@ func (f *BasicFilesystem) watchLoop(ctx context.Context, name string, roots []st
 
 		select {
 		case ev := <-backendChan:
+			// A fatal backend event (e.g. FSEvents journal gap) means the
+			// stream is no longer a complete account of changes: report it
+			// as an error and tear the watch down. This must happen before
+			// the path checks below - such events can carry the watched
+			// root or an otherwise ignorable path.
+			if fatalErr := watchEventFatal(ev); fatalErr != nil {
+				select {
+				case errChan <- fatalErr:
+					l.Debugln(f.Type(), f.URI(), "Watch: Sending fatal error", fatalErr)
+				case <-ctx.Done():
+				}
+				notify.Stop(backendChan)
+				return
+			}
+
 			evPath := ev.Path()
 
 			if !utf8.ValidString(evPath) {
@@ -107,8 +122,15 @@ func (f *BasicFilesystem) watchLoop(ctx context.Context, name string, roots []st
 				continue
 			}
 			evType := f.eventType(ev.Event())
+			// Journal position, when the backend has one (FSEvents). Probed
+			// via an anonymous interface so this shared file builds for
+			// backends whose Sys() has no such concept.
+			var evID uint64
+			if withID, ok := ev.Sys().(interface{ EventID() uint64 }); ok {
+				evID = withID.EventID()
+			}
 			select {
-			case outChan <- Event{Name: relPath, Type: evType}:
+			case outChan <- Event{Name: relPath, Type: evType, ID: evID}:
 				l.Debugln(f.Type(), f.URI(), "Watch: Sending", relPath, evType)
 			case <-ctx.Done():
 				notify.Stop(backendChan)
