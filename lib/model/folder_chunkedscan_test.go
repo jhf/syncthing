@@ -421,3 +421,63 @@ func TestScanChunkedDeliversEverything(t *testing.T) {
 		})
 	}
 }
+
+// TestScanSweepServicesWatch checks that the post-walk deleted/ignored sweep services a
+// queued watch event, not just the walk. On a big tree the sweep is most of the scan's wall
+// time (measured: about 15 of 22 minutes on 2.35M entries), and it holds the serve loop the
+// same way the walk does - a removal watched at the start of the sweep was indexed only when
+// the whole scan ended. The scan here covers only "d", so the watch event naming "d2" can
+// only be serviced from inside the sweep; the unbuffered channel send is the handshake.
+func TestScanSweepServicesWatch(t *testing.T) {
+	// Not parallel: mutates a package-level budget.
+	old := scanChunkBudget
+	defer func() { scanChunkBudget = old }()
+	scanChunkBudget = 5 * time.Millisecond
+
+	_, f := setupSendReceiveFolder(t)
+	ffs := f.Filesystem()
+	ctx := t.Context()
+
+	// Populate the database under "d"; the sweep then has enough entries to iterate that the
+	// budget expires mid-sweep, long after the (empty) walk has finished.
+	must(t, ffs.MkdirAll("d", 0o755))
+	for i := range 2000 {
+		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte("x"))
+	}
+	must(t, f.scanSubdirs(ctx, nil))
+
+	must(t, ffs.MkdirAll("d2", 0o755))
+	writeFile(t, ffs, "d2/new", []byte("y"))
+
+	f.watchChan = make(chan []string)
+	delivered := make(chan struct{})
+	go func() {
+		select {
+		case f.watchChan <- []string{"d2"}:
+			close(delivered)
+		case <-ctx.Done():
+		}
+	}()
+
+	// Call the sweep directly: going through scanSubdirs would run the walk first, and the
+	// walk's own chunk loop would service the event before the sweep ever starts, passing
+	// the test without exercising it. Take the I/O token the scan would hold, because the
+	// sweep hands it back while servicing.
+	must(t, f.ioLimiter.TakeWithContext(ctx, 1))
+	defer f.ioLimiter.Give(1)
+	batch := f.newScanBatch()
+	_, err := f.scanSubdirsDeletedAndIgnored(ctx, []string{"d"}, batch)
+	must(t, err)
+	must(t, batch.Flush())
+
+	select {
+	case <-delivered:
+	default:
+		t.Fatal("the sweep ran to completion without servicing the queued watch event")
+	}
+
+	got := liveLocalNames(t, f.model, f.ID)
+	if _, ok := got["d2/new"]; !ok {
+		t.Error("d2/new missing: the queued watch event was not serviced inside the sweep")
+	}
+}
