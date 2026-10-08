@@ -154,33 +154,88 @@ func TestScanChunkMarkerAdvancesThroughSilence(t *testing.T) {
 	ctx := t.Context()
 
 	must(t, ffs.MkdirAll("d", 0o755))
-	for i := range 200 {
-		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte("x"))
+	// The tree must be large enough that one small budget cannot walk it, or the loop below
+	// passes by finishing rather than by advancing through the silent stretch - which is
+	// exactly the case that regressed. It must also be small enough to set up quickly,
+	// because hashing the initial scan dominates the test time.
+	for i := range 2000 {
+		writeFile(t, ffs, fmt.Sprintf("d/f%05d", i), []byte("x"))
 	}
 	must(t, f.scanSubdirs(ctx, nil))
 
 	// A 1ms budget cuts the unchanged re-walk long before it finishes. The marker must still
-	// advance, or the next chunk restarts from the beginning.
-	batch := f.newScanBatch()
-	_, last, more, progressed, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, "", time.Millisecond)
-	must(t, err)
-	if !more {
-		t.Fatal("the 1ms budget did not cut the walk; the test setup is too fast to be meaningful")
-	}
-	if !progressed || last == "" {
-		t.Fatalf("a chunk cut in a silent stretch made no progress (last=%q): the walk frontier was not reported", last)
+	// advance, or the next chunk restarts from the beginning. On a loaded runner the budget
+	// can expire before the walk enumerates its first entry, which says nothing about the
+	// property under test - so retry a few times and require one cut with a frontier report.
+	var last string
+	for attempt := range 5 {
+		batch := f.newScanBatch()
+		_, l, more, progressed, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, "", time.Millisecond)
+		must(t, err)
+		if !more {
+			t.Fatal("the 1ms budget did not cut the walk; the test setup is too fast to be meaningful")
+		}
+		if progressed && l != "" {
+			last = l
+			break
+		}
+		if attempt == 4 {
+			t.Fatalf("a chunk cut in a silent stretch made no progress (last=%q), five times in a row: the walk frontier was not reported", l)
+		}
 	}
 
-	// The next chunk resumes from the marker. A 1ms chunk can legitimately stall at the resume
-	// point (enumeration has to catch up before the frontier moves), so give this one room to run:
-	// it must either advance the marker or simply finish the walk (a walk that completes without
-	// being cut reports no frontier, and does not need one).
-	batch2 := f.newScanBatch()
-	_, last2, more2, progressed2, err := f.scanSubdirsChangedAndNew(ctx, nil, batch2, last, 50*time.Millisecond)
-	must(t, err)
-	if more2 && !progressed2 {
-		t.Fatalf("the resumed chunk neither progressed nor finished (marker still %q)", last2)
+	// The production failure, pinned directly: resume from that marker with a budget that
+	// is past walk startup but far short of the remaining walk (a full re-walk takes tens
+	// of milliseconds here). The walk gets well beyond the resume point, the budget cuts it
+	// in silence, and the marker must advance all the same. With the frontier merely minned
+	// into the marker like an abort this never advances - the frontier sorts after the
+	// resume point and the minimum keeps the marker where it started.
+	// How small a budget actually cuts the walk depends on the runner, so halve from 8ms
+	// until it does. A cut can also legitimately land during catch-up to the resume point
+	// (no new ground covered), which says nothing about the property under test - retry
+	// those, and require one cut that advanced past the resume point.
+	var next string
+	for budget, attempt := 8*time.Millisecond, 0; ; attempt++ {
+		batch := f.newScanBatch()
+		_, n, more, progressed, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, last, budget)
+		must(t, err)
+		if !more {
+			if budget /= 2; budget < time.Millisecond {
+				t.Fatal("even a sub-millisecond budget walked the whole tree; the test setup is too fast to be meaningful")
+			}
+			continue
+		}
+		if progressed {
+			next = n
+			break
+		}
+		if attempt == 19 {
+			t.Fatalf("a resumed chunk cut in a silent stretch made no progress (marker stuck at %q), twenty times in a row: the frontier does not advance the resume marker", n)
+		}
 	}
+	last = next
+
+	// Then the whole walk must finish under chunked budgets. A chunk legitimately stalls
+	// when the budget expires while the walk is still catching up to the resume point - the
+	// covered region is re-enumerated before new ground is reached - so do what the caller
+	// does and double the budget on a stall.
+	budget := 2 * time.Millisecond
+	for i := range 300 {
+		batch := f.newScanBatch()
+		_, next, more, progressed, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, last, budget)
+		must(t, err)
+		if !more {
+			return // the walk finished; the marker chain reached the end
+		}
+		if progressed {
+			last = next
+			continue
+		}
+		if budget *= 2; budget > 256*time.Millisecond {
+			t.Fatalf("chunk %d made no progress even with a %s budget (marker stuck at %q): the frontier does not advance the resume marker", i, budget, last)
+		}
+	}
+	t.Fatalf("the walk did not finish within 300 chunks (marker stuck at %q)", last)
 }
 
 // TestScanChunkedDeliversEverything forces the walk to yield over and over by shrinking the chunk
