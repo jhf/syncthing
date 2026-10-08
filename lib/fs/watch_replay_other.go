@@ -10,10 +10,24 @@ package fs
 
 import "github.com/syncthing/notify"
 
-// watchEventFatal on platforms without a persistent journal never classifies
-// an event as fatal; completeness gaps are handled by platform-specific
-// means (e.g. the inotify queue overflow path injects a "." event).
-func watchEventFatal(notify.EventInfo) error { return nil }
+// watchEventClass is the watch loop's verdict for a backend failure-flag
+// event; only the FSEvents backend produces non-OK classes.
+type watchEventClass int
+
+const (
+	watchEventOK watchEventClass = iota
+	watchEventOverflow
+	watchEventFatalClass
+)
+
+// watchEventClassify on platforms without a persistent journal never
+// classifies an event as noteworthy; completeness gaps are handled by
+// platform-specific means (e.g. the inotify queue overflow path injects a
+// "." event).
+func watchEventClassify(notify.EventInfo) watchEventClass { return watchEventOK }
+
+// fatalEventError is never reached without journal support.
+func fatalEventError(notify.EventInfo) error { return nil }
 
 // WatchReplaySupported is false: only the FSEvents backend has a persistent
 // journal to resume from.
