@@ -1005,6 +1005,10 @@ loop:
 	}
 	lastPath = marker
 
+	if stopped {
+		f.sl.DebugContext(ctx, "Scan chunk cut", slog.String("resumeFrom", resumeFrom), slog.String("marker", marker), slog.String("walkFrontier", walkFrontier), slog.String("firstAborted", firstAborted), slog.Int("changes", changes))
+	}
+
 	return changes, lastPath, stopped, marker != resumeFrom, nil
 }
 
