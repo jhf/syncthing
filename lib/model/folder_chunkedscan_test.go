@@ -33,6 +33,59 @@ func liveLocalNames(t *testing.T, m *model, folder string) map[string]struct{} {
 	return names
 }
 
+// TestScanChunkedServicesWatchEvents checks that a watch event queued while a chunked scan runs
+// is serviced between chunks, instead of waiting for the whole scan to finish. The Mac showed why
+// this matters: it scanned back to back for hours on a busy tree, and a directory created on disk
+// was never announced to the peer at all - the watch events waited behind every scan and were
+// lost before they were processed.
+//
+// The outer scan only covers "a"; the watch event names "b", which that walk can never reach, so
+// "b/file2" being indexed afterwards proves the event was serviced mid-scan. The send on the
+// unbuffered watch channel doubles as the handshake: it completes exactly when the chunk loop
+// accepts the event.
+func TestScanChunkedServicesWatchEvents(t *testing.T) {
+	// Not parallel: mutates a package-level budget.
+	old := scanChunkBudget
+	defer func() { scanChunkBudget = old }()
+	scanChunkBudget = 0
+
+	_, f := setupSendReceiveFolder(t)
+	ffs := f.Filesystem()
+	ctx := t.Context()
+
+	must(t, ffs.MkdirAll("a", 0o755))
+	writeFile(t, ffs, "a/file1", []byte("a"))
+	must(t, ffs.MkdirAll("b", 0o755))
+	writeFile(t, ffs, "b/file2", []byte("b"))
+
+	// The watch channel is normally created by startWatch, which is not running here.
+	f.watchChan = make(chan []string)
+	delivered := make(chan struct{})
+	go func() {
+		select {
+		case f.watchChan <- []string{"b"}:
+			close(delivered)
+		case <-ctx.Done():
+		}
+	}()
+
+	must(t, f.scanSubdirs(ctx, []string{"a"}))
+
+	select {
+	case <-delivered:
+	default:
+		t.Fatal("the watch event was never serviced during the chunked scan")
+	}
+
+	got := liveLocalNames(t, f.model, f.ID)
+	if _, ok := got["a/file1"]; !ok {
+		t.Error("a/file1 missing after scanning a")
+	}
+	if _, ok := got["b/file2"]; !ok {
+		t.Error("b/file2 missing: the queued watch event was not serviced between chunks")
+	}
+}
+
 // TestScanChunkedDeliversEverything forces the walk to yield over and over by shrinking the chunk
 // budget, and checks the two properties that make chunking safe: every file still ends up indexed,
 // and a file deleted between scans is still noticed. It runs at several budgets, from the
