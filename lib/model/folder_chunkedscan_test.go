@@ -141,6 +141,48 @@ func TestScanChunkedBoundaryWithoutResults(t *testing.T) {
 	}
 }
 
+// TestScanChunkMarkerAdvancesThroughSilence checks that the resume marker advances when a chunk
+// is cut in the middle of a silent stretch. Unchanged files produce no walk result, and on a quiet
+// tree the hashing pipeline is usually empty at the cut, so abort reports alone cannot tell the
+// next chunk how far the walk got: the walker reports its enumeration frontier on cancellation
+// instead. Without that report a silent chunk makes no progress, and the scan degrades into
+// re-walking the same stretch with an ever-growing budget - seen on the Mac, where the budget
+// ballooned to 32s while the scan crawled.
+func TestScanChunkMarkerAdvancesThroughSilence(t *testing.T) {
+	_, f := setupSendReceiveFolder(t)
+	ffs := f.Filesystem()
+	ctx := t.Context()
+
+	must(t, ffs.MkdirAll("d", 0o755))
+	for i := range 200 {
+		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte("x"))
+	}
+	must(t, f.scanSubdirs(ctx, nil))
+
+	// A 1ms budget cuts the unchanged re-walk long before it finishes. The marker must still
+	// advance, or the next chunk restarts from the beginning.
+	batch := f.newScanBatch()
+	_, last, more, progressed, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, "", time.Millisecond)
+	must(t, err)
+	if !more {
+		t.Fatal("the 1ms budget did not cut the walk; the test setup is too fast to be meaningful")
+	}
+	if !progressed || last == "" {
+		t.Fatalf("a chunk cut in a silent stretch made no progress (last=%q): the walk frontier was not reported", last)
+	}
+
+	// The next chunk resumes from the marker. A 1ms chunk can legitimately stall at the resume
+	// point (enumeration has to catch up before the frontier moves), so give this one room to run:
+	// it must either advance the marker or simply finish the walk (a walk that completes without
+	// being cut reports no frontier, and does not need one).
+	batch2 := f.newScanBatch()
+	_, last2, more2, progressed2, err := f.scanSubdirsChangedAndNew(ctx, nil, batch2, last, 50*time.Millisecond)
+	must(t, err)
+	if more2 && !progressed2 {
+		t.Fatalf("the resumed chunk neither progressed nor finished (marker still %q)", last2)
+	}
+}
+
 // TestScanChunkedDeliversEverything forces the walk to yield over and over by shrinking the chunk
 // budget, and checks the two properties that make chunking safe: every file still ends up indexed,
 // and a file deleted between scans is still noticed. It runs at several budgets, from the
