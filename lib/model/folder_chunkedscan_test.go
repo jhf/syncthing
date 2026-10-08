@@ -86,6 +86,61 @@ func TestScanChunkedServicesWatchEvents(t *testing.T) {
 	}
 }
 
+// TestScanChunkedBoundaryWithoutResults checks that a chunk boundary still happens when the walk
+// produces nothing at all. The scanner reports no result for an unchanged file, so a re-scan of an
+// unchanged tree can walk for minutes without a single result - and a budget check that runs only
+// when a result arrives then never fires. Measured on the Mac's 2.35M-file tree: the first chunk
+// boundary came 2m53s into the scan, when one changed file happened to produce a result, and a
+// directory created on disk in the meantime was never announced.
+//
+// The second scan here covers only "d", which is unchanged, so its walk produces no results. The
+// watch event naming "d2" is outside that walk, so "d2/new" can only be indexed if the budget cuts
+// the silent walk and the event is serviced between chunks. The send on the unbuffered watch
+// channel doubles as the handshake: it completes exactly when the chunk loop accepts the event.
+func TestScanChunkedBoundaryWithoutResults(t *testing.T) {
+	// Not parallel: mutates a package-level budget.
+	old := scanChunkBudget
+	defer func() { scanChunkBudget = old }()
+	scanChunkBudget = 5 * time.Millisecond
+
+	_, f := setupSendReceiveFolder(t)
+	ffs := f.Filesystem()
+	ctx := t.Context()
+
+	// Enough files that walking them unchanged takes clearly longer than the budget.
+	must(t, ffs.MkdirAll("d", 0o755))
+	for i := range 2000 {
+		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte("x"))
+	}
+	must(t, f.scanSubdirs(ctx, nil))
+
+	must(t, ffs.MkdirAll("d2", 0o755))
+	writeFile(t, ffs, "d2/new", []byte("y"))
+
+	f.watchChan = make(chan []string)
+	delivered := make(chan struct{})
+	go func() {
+		select {
+		case f.watchChan <- []string{"d2"}:
+			close(delivered)
+		case <-ctx.Done():
+		}
+	}()
+
+	must(t, f.scanSubdirs(ctx, []string{"d"}))
+
+	select {
+	case <-delivered:
+	default:
+		t.Fatal("no chunk boundary happened during a walk without results; the watch event was not serviced")
+	}
+
+	got := liveLocalNames(t, f.model, f.ID)
+	if _, ok := got["d2/new"]; !ok {
+		t.Error("d2/new missing: the queued watch event was not serviced between chunks")
+	}
+}
+
 // TestScanChunkedDeliversEverything forces the walk to yield over and over by shrinking the chunk
 // budget, and checks the two properties that make chunking safe: every file still ends up indexed,
 // and a file deleted between scans is still noticed. It runs at several budgets, from the
