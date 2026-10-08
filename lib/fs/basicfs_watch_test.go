@@ -82,10 +82,10 @@ func TestWatchIgnore(t *testing.T) {
 	}
 
 	expectedEvents := []Event{
-		{file, NonRemove},
+		{file, NonRemove, 0},
 	}
 	allowedEvents := []Event{
-		{name, NonRemove},
+		{name, NonRemove, 0},
 	}
 
 	testScenario(t, name, testCase, expectedEvents, allowedEvents, fakeMatcher{ignore: filepath.Join(name, ignored), skipIgnoredDirs: true}, false)
@@ -108,11 +108,11 @@ func TestWatchInclude(t *testing.T) {
 	}
 
 	expectedEvents := []Event{
-		{file, NonRemove},
-		{included, NonRemove},
+		{file, NonRemove, 0},
+		{included, NonRemove, 0},
 	}
 	allowedEvents := []Event{
-		{name, NonRemove},
+		{name, NonRemove, 0},
 	}
 
 	testScenario(t, name, testCase, expectedEvents, allowedEvents, fakeMatcher{ignore: filepath.Join(name, ignored), include: filepath.Join(name, included)}, false)
@@ -131,18 +131,18 @@ func TestWatchRename(t *testing.T) {
 		renameTestFile(name, old, new)
 	}
 
-	destEvent := Event{new, Remove}
+	destEvent := Event{new, Remove, 0}
 	// Only on these platforms the removed file can be differentiated from
 	// the created file during renaming
 	if build.IsWindows || build.IsLinux || build.IsSolaris || build.IsIllumos || build.IsFreeBSD {
-		destEvent = Event{new, NonRemove}
+		destEvent = Event{new, NonRemove, 0}
 	}
 	expectedEvents := []Event{
-		{old, Remove},
+		{old, Remove, 0},
 		destEvent,
 	}
 	allowedEvents := []Event{
-		{name, NonRemove},
+		{name, NonRemove, 0},
 	}
 
 	// set the "allow others" flag because we might get the create of
@@ -294,18 +294,18 @@ func TestWatchOverflow(t *testing.T) {
 	name := "overflow"
 
 	expectedEvents := []Event{
-		{".", NonRemove},
+		{".", NonRemove, 0},
 	}
 
 	allowedEvents := []Event{
-		{name, NonRemove},
+		{name, NonRemove, 0},
 	}
 
 	testCase := func() {
 		for i := 0; i < 5*backendBuffer; i++ {
 			file := "file" + strconv.Itoa(i)
 			createTestFile(name, file)
-			allowedEvents = append(allowedEvents, Event{file, NonRemove})
+			allowedEvents = append(allowedEvents, Event{file, NonRemove, 0})
 		}
 	}
 
@@ -397,10 +397,10 @@ func TestWatchIssue4877(t *testing.T) {
 	}
 
 	expectedEvents := []Event{
-		{file, NonRemove},
+		{file, NonRemove, 0},
 	}
 	allowedEvents := []Event{
-		{name, NonRemove},
+		{name, NonRemove, 0},
 	}
 
 	volName := filepath.VolumeName(testDirAbs)
@@ -434,14 +434,14 @@ func TestWatchModTime(t *testing.T) {
 	}
 
 	expectedEvents := []Event{
-		{file, NonRemove},
+		{file, NonRemove, 0},
 	}
 
 	var allowedEvents []Event
 	// Apparently an event for the parent is also sent on mac
 	if build.IsDarwin {
 		allowedEvents = []Event{
-			{name, NonRemove},
+			{name, NonRemove, 0},
 		}
 	}
 
@@ -459,10 +459,10 @@ func TestModifyFile(t *testing.T) {
 	}
 
 	expectedEvents := []Event{
-		{old, NonRemove},
+		{old, NonRemove, 0},
 	}
 	allowedEvents := []Event{
-		{name, NonRemove},
+		{name, NonRemove, 0},
 	}
 
 	sleepMs(1000)
@@ -493,10 +493,10 @@ func TestTruncateFileOnly(t *testing.T) {
 	}
 
 	expectedEvents := []Event{
-		{file, NonRemove},
+		{file, NonRemove, 0},
 	}
 	allowedEvents := []Event{
-		{file, NonRemove},
+		{file, NonRemove, 0},
 	}
 
 	sleepMs(1000)
@@ -585,6 +585,9 @@ func testWatchOutput(t *testing.T, name string, in <-chan Event, expectedEvents,
 			return
 		case received = <-in:
 		}
+
+		// The backend journal ID is not part of what the tests compare.
+		received.ID = 0
 
 		// apparently the backend sometimes sends repeat events
 		if last == received {
