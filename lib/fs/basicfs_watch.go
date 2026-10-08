@@ -83,12 +83,25 @@ func (f *BasicFilesystem) watchLoop(ctx context.Context, name string, roots []st
 
 		select {
 		case ev := <-backendChan:
-			// A fatal backend event (e.g. FSEvents journal gap) means the
-			// stream is no longer a complete account of changes: report it
-			// as an error and tear the watch down. This must happen before
-			// the path checks below - such events can carry the watched
-			// root or an otherwise ignorable path.
-			if fatalErr := watchEventFatal(ev); fatalErr != nil {
+			// Backend failure-flag events (e.g. FSEvents journal problems)
+			// are intercepted before the path checks below - they can
+			// carry the watched root or an otherwise ignorable path.
+			// Overflow means events were lost but the stream is alive:
+			// heal with a full folder scan and keep watching, like the
+			// inotify queue overflow path. Fatal means the stream cannot
+			// be trusted: report an error and tear the watch down.
+			switch class := watchEventClassify(ev); class {
+			case watchEventOverflow:
+				l.Debugln(f.Type(), f.URI(), "Watch: Backend dropped events, sending", name)
+				select {
+				case outChan <- Event{Name: name, Type: NonRemove}:
+				case <-ctx.Done():
+					notify.Stop(backendChan)
+					return
+				}
+				continue
+			case watchEventFatalClass:
+				fatalErr := fatalEventError(ev)
 				select {
 				case errChan <- fatalErr:
 					l.Debugln(f.Type(), f.URI(), "Watch: Sending fatal error", fatalErr)
