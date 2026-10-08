@@ -626,16 +626,27 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 	// 300-file queue frozen behind it. Both the scan and the pull run in the serve goroutine, so
 	// servicing a pull here is the same thing the loop would have done had it not been scanning.
 	resumeFrom := ""
+	budget := scanChunkBudget
 	for {
 		f.setState(FolderScanning)
 
-		changesHere, last, more, err := f.scanSubdirsChangedAndNew(ctx, subDirs, batch, resumeFrom)
+		changesHere, last, more, progressed, err := f.scanSubdirsChangedAndNew(ctx, subDirs, batch, resumeFrom, budget)
 		changes += changesHere
 		if err != nil {
 			return err
 		}
 		if !more {
 			break
+		}
+		if progressed {
+			budget = scanChunkBudget
+		} else {
+			// The walk could not show any progress within the budget - something at
+			// the resume point takes longer than the budget (a file still hashing, a
+			// directory still enumerating). Restarting the same stretch with the same
+			// budget would never finish, so give the next chunk longer, up to a cap.
+			budget = min(max(2*budget, 100*time.Millisecond), 5*time.Minute)
+			f.sl.DebugContext(ctx, "Scan chunk made no progress, growing the chunk budget", slog.Duration("budget", budget), slog.String("resumeFrom", resumeFrom))
 		}
 		resumeFrom = last
 
@@ -786,16 +797,26 @@ func (b *scanBatch) Update(fi protocol.FileInfo) (bool, error) {
 
 // scanSubdirsChangedAndNew walks the given subs, reporting entries that are new or changed.
 //
-// It runs for at most scanChunkBudget and then returns with more set and lastPath being the resume
+// It runs for at most budget and then returns with more set and lastPath being the resume
 // marker for the next chunk. The marker is the minimum of the last applied path and the first
 // aborted path seen in this chunk: results arrive out of order, so the set of applied entries has
 // holes, and everything the walk handed over but did not apply is reported as an error result by
 // the scanner. Everything strictly below the marker is then known to be applied, and nothing below
 // it was silently dropped, so resuming the walk from the marker loses nothing. The re-walked window
 // is bounded by the hashers in flight at the cut, not by the size of the chunk.
-func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string, batch *scanBatch, resumeFrom string) (changes int, lastPath string, more bool, err error) {
-	deadline := time.Now().Add(scanChunkBudget)
-
+//
+// The budget is a timer, not a per-result check: the scanner reports nothing at all for unchanged
+// files, so on a re-scan of a mostly unchanged tree results may not arrive for minutes at a time.
+// A deadline checked only when a result arrives then never fires - measured on a 2.35M-file tree,
+// where the first chunk boundary came 2m53s into the scan, when one changed file happened to
+// produce a result. The timer cuts the walk regardless, and the abort reports of whatever was in
+// flight at the cut keep the resume marker honest.
+//
+// progressed reports whether the marker moved forward. A chunk can fail to progress when the walk
+// could not hand anything over within the budget (a file still hashing, a directory still
+// enumerating); the caller responds by giving the next chunk a longer budget rather than
+// restarting the same stretch forever.
+func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string, batch *scanBatch, resumeFrom string, budget time.Duration) (changes int, lastPath string, more, progressed bool, err error) {
 	// If we return early e.g. due to a folder health error, the scan needs
 	// to be cancelled.
 	scanCtx, scanCancel := context.WithCancel(ctx)
@@ -828,96 +849,126 @@ func (f *folder) scanSubdirsChangedAndNew(ctx context.Context, subDirs []string,
 		fchan = scanner.Walk(scanCtx, scanConfig)
 	}
 
-	// stopped records that the deadline cut the walk short. The walk is cancelled there, but results
+	// stopped records that the budget cut the walk short. The walk is cancelled there, but results
 	// already in the hashing pipeline are still consumed and applied rather than thrown away. They
 	// have to be: results do not arrive in walk order, so an entry whose result is still in flight
 	// may sort before the resume marker, and resuming would then skip it for good. Draining in
 	// flight work is bounded by the hashers and the queue depth, not by the size of the folder.
 	stopped := false
+	// The marker starts at the resume point and advances over what this chunk applies. Abort
+	// reports are tracked separately in firstAborted and minned in only at the end: they arrive
+	// out of order against applied results, so folding them into the marker directly would let
+	// the next applied result advance past an aborted entry and lose it for good.
+	marker := resumeFrom
 	// firstAborted is the smallest path of any error result in this chunk, aborts included. The
 	// scanner reports every handed-over file it could not apply, so the resume marker must stay
 	// behind all of them: an entry the marker moved past would never be visited again.
 	firstAborted := ""
-	for res := range fchan {
-		if res.Err != nil {
-			// An abort (the chunk deadline cancelled the scan under this entry) is
-			// bookkeeping for the resume marker, not a user-visible scan error: the
-			// entry is retried by the next chunk. Anything else is a real error.
-			if !errors.Is(res.Err, context.Canceled) {
-				f.newScanError(res.Path, res.Err)
-			}
-			// The minimum must be in walk order for the same reason as below.
-			if firstAborted == "" || scanner.WalkOrderLess(res.Path, firstAborted) {
-				firstAborted = res.Path
-			}
-			continue
-		}
+	// The budget is enforced two ways: the timer covers silence (unchanged files produce no
+	// results, so there is nothing to check against for minutes at a time), and the deadline
+	// check covers bursts (a timer is delivered asynchronously, so a result stream can otherwise
+	// outrun it arbitrarily long, and with a zero budget no cut would be guaranteed at all).
+	deadline := time.Now().Add(budget)
+	budgetTimer := time.NewTimer(budget)
+	defer budgetTimer.Stop()
+	budgetC := budgetTimer.C
 
-		if !stopped && time.Now().After(deadline) {
-			// Stop walking here, at an item boundary, and let the loop below finish what is
-			// already in flight. This entry has not been handled yet, so lastPath still names the
-			// entry before it and resuming from there skips nothing.
+loop:
+	for {
+		select {
+		case <-budgetC:
+			// The budget expired. Cut the walk here, whether or not any result
+			// has arrived in this chunk - see the function comment.
 			stopped = true
+			budgetC = nil
 			scanCancel()
-		}
-
-		if err := batch.FlushIfFull(); err != nil {
-			// Prevent a race between the scan aborting due to context
-			// cancellation and releasing the snapshot in defer here.
-			scanCancel()
-			for range fchan {
+		case res, ok := <-fchan:
+			if !ok {
+				break loop
 			}
-			return changes, lastPath, false, err
-		}
 
-		if ok, err := batch.Update(res.File); err != nil {
-			// The scanner's abort reports cannot be abandoned to a cancelled context,
-			// so the channel must be drained before returning, or the scanner blocks
-			// on a send forever.
-			scanCancel()
-			for range fchan {
+			if res.Err != nil {
+				// An abort (the chunk budget cancelled the scan under this entry) is
+				// bookkeeping for the resume marker, not a user-visible scan error: the
+				// entry is retried by the next chunk. Anything else is a real error.
+				if !errors.Is(res.Err, context.Canceled) {
+					f.newScanError(res.Path, res.Err)
+				}
+				// The minimum must be in walk order for the same reason as below.
+				if firstAborted == "" || scanner.WalkOrderLess(res.Path, firstAborted) {
+					firstAborted = res.Path
+				}
+				continue
 			}
-			return changes, lastPath, false, err
-		} else if ok {
-			changes++
-		}
 
-		switch f.Type {
-		case config.FolderTypeReceiveOnly, config.FolderTypeReceiveEncrypted:
-		default:
-			// Rename detection is comparatively expensive, so only attempt
-			// it for files that appeared as new on disk during this scan. A
-			// rename that overwrites an existing file (the destination path
-			// already had an entry, so it scans as an update rather than a
-			// new file) is not optimised as a rename.
-			if res.File.New && res.File.Size > 0 {
-				if nf, ok := f.findRename(ctx, res.File, batch); ok {
-					if ok, err := batch.Update(nf); err != nil {
-						scanCancel()
-						for range fchan {
+			if !stopped && !time.Now().Before(deadline) {
+				// The budget expired while results were flowing. Stop walking
+				// here and let the loop finish what is already in flight.
+				stopped = true
+				budgetC = nil
+				scanCancel()
+			}
+
+			if err := batch.FlushIfFull(); err != nil {
+				// Prevent a race between the scan aborting due to context
+				// cancellation and releasing the snapshot in defer here.
+				scanCancel()
+				for range fchan {
+				}
+				return changes, lastPath, false, false, err
+			}
+
+			if ok, err := batch.Update(res.File); err != nil {
+				// The scanner's abort reports cannot be abandoned to a cancelled context,
+				// so the channel must be drained before returning, or the scanner blocks
+				// on a send forever.
+				scanCancel()
+				for range fchan {
+				}
+				return changes, lastPath, false, false, err
+			} else if ok {
+				changes++
+			}
+
+			switch f.Type {
+			case config.FolderTypeReceiveOnly, config.FolderTypeReceiveEncrypted:
+			default:
+				// Rename detection is comparatively expensive, so only attempt
+				// it for files that appeared as new on disk during this scan. A
+				// rename that overwrites an existing file (the destination path
+				// already had an entry, so it scans as an update rather than a
+				// new file) is not optimised as a rename.
+				if res.File.New && res.File.Size > 0 {
+					if nf, ok := f.findRename(ctx, res.File, batch); ok {
+						if ok, err := batch.Update(nf); err != nil {
+							scanCancel()
+							for range fchan {
+							}
+							return changes, lastPath, false, false, err
+						} else if ok {
+							changes++
 						}
-						return changes, lastPath, false, err
-					} else if ok {
-						changes++
 					}
 				}
 			}
+
+			marker = res.File.Name
 		}
-
-		lastPath = res.File.Name
 	}
 
-	// The marker stays behind every reported abort: the minimum of what was applied and what
-	// was reported aborted. The minimum is in walk order, not string order, because that is
-	// the order the scanner's resume predicate speaks: "doc01.txt" < "doc01/file" as strings
-	// (0x2E < 0x2F), but the walk visits "doc01/file" first, so a string minimum would let the
-	// marker jump past an aborted file that was never applied. Nothing below the marker is
-	// then unaccounted for.
-	if firstAborted != "" && (lastPath == "" || scanner.WalkOrderLess(firstAborted, lastPath)) {
-		lastPath = firstAborted
+	// The marker stays behind every reported abort: the minimum of what was applied and what was
+	// reported aborted. The minimum is in walk order, not string order, because that is the order
+	// the scanner's resume predicate speaks: "doc01.txt" < "doc01/file" as strings (0x2E < 0x2F),
+	// but the walk visits "doc01/file" first, so a string minimum would let the marker jump past an
+	// aborted file that was never applied. Nothing below the marker is then unaccounted for. An
+	// abort report with nothing applied after it leaves the marker where it started, which the
+	// caller sees as no progress.
+	if firstAborted != "" && (marker == "" || scanner.WalkOrderLess(firstAborted, marker)) {
+		marker = firstAborted
 	}
+	lastPath = marker
 
-	return changes, lastPath, stopped, nil
+	return changes, lastPath, stopped, marker != resumeFrom, nil
 }
 
 func (f *folder) scanSubdirsDeletedAndIgnored(ctx context.Context, subDirs []string, batch *scanBatch) (int, error) {
