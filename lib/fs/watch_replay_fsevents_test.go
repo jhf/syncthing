@@ -149,27 +149,36 @@ func TestFSEventsNoReplayWithoutSeed(t *testing.T) {
 	}
 }
 
-// TestWatchEventFatalClassification unit-tests the journal-failure
-// classifier. Probing on macOS 26 showed that seeding a stream with a
-// journal position the log no longer covers is silently clamped WITHOUT the
-// documented MustScanSubDirs flag, so an OS-level gap test is not possible;
-// the flags below still fire on live queue overflows and root changes, and
-// the over-old-watermark case is handled by the age gate in the model
-// (maxWatchReplayAge).
-func TestWatchEventFatalClassification(t *testing.T) {
+// TestWatchEventClassify unit-tests the journal-failure classifier. Probing
+// on macOS 26 showed that seeding a stream with a journal position the log
+// no longer covers is sometimes silently clamped WITHOUT the documented
+// MustScanSubDirs flag (and sometimes flagged, as the live serve
+// demonstrated), so an OS-level gap test is not deterministic; the
+// over-old-watermark case is handled by the age gate in the model
+// (maxWatchReplayAge), and overflow flags are healed by a full scan without
+// killing the watch.
+func TestWatchEventClassify(t *testing.T) {
 	defer ResetWatchReplay()
 
 	fatal := []notify.Event{
 		notify.FSEventsMustScanSubDirs,
-		notify.FSEventsUserDropped,
-		notify.FSEventsKernelDropped,
 		notify.FSEventsEventIdsWrapped,
 		notify.FSEventsRootChanged,
 		notify.FSEventsCreated | notify.FSEventsMustScanSubDirs, // combined
 	}
 	for _, e := range fatal {
-		if err := watchEventFatal(fakeNotifyEventInfo{e}); err == nil {
-			t.Errorf("event %v not classified as fatal", e)
+		if class := watchEventClassify(fakeNotifyEventInfo{e}); class != watchEventFatalClass {
+			t.Errorf("event %v classified %v, want fatal", e, class)
+		}
+	}
+	overflow := []notify.Event{
+		notify.FSEventsUserDropped,
+		notify.FSEventsKernelDropped,
+		notify.FSEventsModified | notify.FSEventsUserDropped, // combined
+	}
+	for _, e := range overflow {
+		if class := watchEventClassify(fakeNotifyEventInfo{e}); class != watchEventOverflow {
+			t.Errorf("event %v classified %v, want overflow", e, class)
 		}
 	}
 	benign := []notify.Event{
@@ -181,8 +190,8 @@ func TestWatchEventFatalClassification(t *testing.T) {
 		notify.FSEventsHistoryDone,
 	}
 	for _, e := range benign {
-		if err := watchEventFatal(fakeNotifyEventInfo{e}); err != nil {
-			t.Errorf("event %v wrongly classified as fatal: %v", e, err)
+		if class := watchEventClassify(fakeNotifyEventInfo{e}); class != watchEventOK {
+			t.Errorf("event %v classified %v, want OK", e, class)
 		}
 	}
 }
