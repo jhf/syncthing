@@ -290,7 +290,7 @@ func testScenario(t *testing.T, name string, testCase func(c chan<- fs.Event), e
 
 	ctx, cancel := context.WithCancel(context.Background())
 	eventChan := make(chan fs.Event)
-	watchChan := make(chan []string)
+	watchChan := make(chan Batch)
 
 	folderCfg := defaultFolderCfg.Copy()
 	folderCfg.ID = name
@@ -309,7 +309,7 @@ func testScenario(t *testing.T, name string, testCase func(c chan<- fs.Event), e
 	cancel()
 }
 
-func testAggregatorOutput(t *testing.T, fsWatchChan <-chan []string, expectedBatches []expectedBatch, startTime time.Time) {
+func testAggregatorOutput(t *testing.T, fsWatchChan <-chan Batch, expectedBatches []expectedBatch, startTime time.Time) {
 	t.Helper()
 	var received []string
 	var elapsedTime time.Duration
@@ -320,7 +320,8 @@ func testAggregatorOutput(t *testing.T, fsWatchChan <-chan []string, expectedBat
 		case <-timeout.C:
 			t.Errorf("Timeout: Received only %d batches (%d expected)", batchIndex, len(expectedBatches))
 			return
-		case received = <-fsWatchChan:
+		case batch := <-fsWatchChan:
+			received = batch.Paths
 		}
 
 		if batchIndex >= len(expectedBatches) {
@@ -367,5 +368,52 @@ func testAggregatorOutput(t *testing.T, fsWatchChan <-chan []string, expectedBat
 		} else {
 			innerIndex++
 		}
+	}
+}
+
+// TestAggregateMaxEventID checks that the batch watermark is the highest
+// journal ID seen, and that it rides only on the last sub-batch of a flush
+// (deletes last): persisting it after that batch's scan implies the earlier
+// sub-batches were already scanned.
+func TestAggregateMaxEventID(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	eventChan := make(chan fs.Event)
+	watchChan := make(chan Batch)
+
+	folderCfg := defaultFolderCfg.Copy()
+	folderCfg.ID = "maxeventid"
+	a := newAggregator(ctx, folderCfg)
+	a.notifyTimeout = testNotifyTimeout
+
+	go a.mainLoop(eventChan, watchChan, defaultCfg, events.NoopLogger)
+	sleepMs(20)
+
+	go func() {
+		eventChan <- fs.Event{Name: "new", Type: fs.NonRemove, ID: 5}
+		eventChan <- fs.Event{Name: "old", Type: fs.Remove, ID: 9}
+	}()
+
+	timeout := time.After(10 * time.Second)
+	var batches []Batch
+	for len(batches) < 2 {
+		select {
+		case b := <-watchChan:
+			batches = append(batches, b)
+		case <-timeout:
+			t.Fatalf("received %d sub-batches, expected 2: %v", len(batches), batches)
+		}
+	}
+	if len(batches[0].Paths) != 1 || batches[0].Paths[0] != "new" {
+		t.Errorf("first sub-batch should be the non-remove: %v", batches[0])
+	}
+	if batches[0].MaxEventID != 0 {
+		t.Errorf("watermark on non-final sub-batch: %d", batches[0].MaxEventID)
+	}
+	if len(batches[1].Paths) != 1 || batches[1].Paths[0] != "old" {
+		t.Errorf("last sub-batch should be the remove: %v", batches[1])
+	}
+	if batches[1].MaxEventID != 9 {
+		t.Errorf("watermark on final sub-batch = %d, expected 9 (max of 5 and 9)", batches[1].MaxEventID)
 	}
 }
