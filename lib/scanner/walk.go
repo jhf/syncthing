@@ -102,7 +102,7 @@ func WalkWithoutHashing(ctx context.Context, cfg Config) chan ScanResult {
 }
 
 func newWalker(cfg Config) *walker {
-	w := &walker{cfg}
+	w := &walker{Config: cfg}
 
 	if w.CurrentFiler == nil {
 		w.CurrentFiler = noCurrentFiler{}
@@ -126,6 +126,14 @@ var (
 
 type walker struct {
 	Config
+	// lastWalked is the enumeration frontier: the most recent path the walk
+	// visited, whether or not it produced a result. Unchanged entries produce
+	// no result, so a caller that cuts the walk short cannot tell how far it
+	// got from results alone; on cancellation the frontier is reported like an
+	// abort, and the caller's resume marker can advance across silent stretches.
+	// The walk callback and the reporting both run on the scan goroutine, so a
+	// plain string is enough.
+	lastWalked string
 }
 
 // Walk returns the list of files found in the local folder by scanning the
@@ -324,6 +332,18 @@ func (w *walker) scan(ctx context.Context, toHashChan chan<- protocol.FileInfo, 
 			}
 		}
 	}
+	if ctx.Err() != nil {
+		if last := w.lastWalked; last != "" {
+			// The walk was cut short. Report how far it got: entries that were
+			// enumerated and found unchanged produce no result of their own, so
+			// without this a caller resuming from a marker cannot advance the
+			// marker across a silent stretch and the next chunk would restart
+			// from the same place. It is reported like an abort, so the caller
+			// mins it against anything still in flight below it, and the walk
+			// resumes inclusive of it.
+			handleError(ctx, "walking", last, ctx.Err(), finishedChan)
+		}
+	}
 	close(toHashChan)
 }
 
@@ -360,6 +380,7 @@ func (w *walker) walkAndHashFiles(ctx context.Context, toHashChan chan<- protoco
 		}
 
 		metricScannedItems.WithLabelValues(w.Folder).Inc()
+		w.lastWalked = path
 
 		// Return value used when we are returning early and don't want to
 		// process the item. For directories, this means do-not-descend.
