@@ -22,25 +22,51 @@ import (
 // scan to re-establish a complete picture.
 var errWatchJournalIncomplete = errors.New("filesystem journal does not cover all changes, full scan required")
 
-// watchFailureMask are FSEvents flags that mean "the event stream is no
-// longer a complete account of what changed". They are requested as part of
-// the event mask (basicfs_watch_eventtypes_darwin.go) and intercepted in the
-// watch loop before regular event translation.
-const watchFailureMask = notify.FSEventsMustScanSubDirs |
-	notify.FSEventsUserDropped |
-	notify.FSEventsKernelDropped |
+// watchEventClass is the watch loop's verdict for a backend failure-flag
+// event.
+type watchEventClass int
+
+const (
+	watchEventOK watchEventClass = iota
+	// watchEventOverflow means events were lost but the stream is alive:
+	// heal by scanning the whole folder and keep watching (the same course
+	// the inotify backend takes on queue overflow).
+	watchEventOverflow
+	// watchEventFatalClass means the stream can no longer be trusted at
+	// all: report an error and tear the watch down.
+	watchEventFatalClass
+)
+
+// watchOverflowMask are FSEvents flags meaning "some events were dropped,
+// stream continues". Apple documents the stream as usable afterwards; the
+// missed changes are healed by a full scan.
+const watchOverflowMask = notify.FSEventsUserDropped |
+	notify.FSEventsKernelDropped
+
+// watchFatalMask are FSEvents flags meaning the stream itself is
+// untrustworthy: the seeded journal position is not covered, the watched
+// root changed identity, or journal IDs are no longer comparable.
+const watchFatalMask = notify.FSEventsMustScanSubDirs |
 	notify.FSEventsEventIdsWrapped |
 	notify.FSEventsRootChanged
 
-// watchEventFatal classifies a backend event: a non-nil return means the
-// stream can no longer be trusted and the watch must be restarted with a
-// full scan. Journal replay is reset as a side effect, so the restarted
-// stream does not replay the same failure in a loop.
-func watchEventFatal(ev notify.EventInfo) error {
-	if ev.Event()&watchFailureMask == 0 {
-		return nil
+// watchEventClassify classifies a backend event. On a fatal verdict the
+// journal replay seed is reset as a side effect, so the restarted stream
+// does not replay the same failure in a loop.
+func watchEventClassify(ev notify.EventInfo) watchEventClass {
+	flags := ev.Event()
+	switch {
+	case flags&watchFatalMask != 0:
+		ResetWatchReplay()
+		return watchEventFatalClass
+	case flags&watchOverflowMask != 0:
+		return watchEventOverflow
 	}
-	ResetWatchReplay()
+	return watchEventOK
+}
+
+// fatalEventError renders the error reported for a fatal backend event.
+func fatalEventError(ev notify.EventInfo) error {
 	return fmt.Errorf("%w (fsevents flags: %s)", errWatchJournalIncomplete, ev.Event())
 }
 
