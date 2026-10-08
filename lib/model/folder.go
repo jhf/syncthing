@@ -8,6 +8,7 @@ package model
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -402,8 +403,20 @@ func (f *folder) pull(ctx context.Context) (success bool, err error) {
 	select {
 	case <-f.initialScanFinished:
 	default:
-		// Once the initial scan finished, a pull will be scheduled
-		return true, nil
+		// The initial scan is still running. Pulls are normally held until
+		// it completes, because before the first scan ever completes we
+		// cannot trust the local index: every remote file looks needed,
+		// including files that already exist on disk but have not been
+		// indexed yet. Once a folder has completed an initial scan at any
+		// point (recorded in the database), the local index it holds was
+		// complete when written, and everything the puller is about to
+		// change is first checked against it (scanIfItemChanged), backing
+		// off with errModified where the disk and the index disagree. So
+		// after a restart we pull during the re-scan; during the first scan
+		// ever we wait for it.
+		if done, serr := f.initialScanEverCompleted(); serr != nil || !done {
+			return true, nil
+		}
 	}
 
 	defer func() {
@@ -480,6 +493,26 @@ func (f *folder) pull(ctx context.Context) (success bool, err error) {
 // tests can shrink it to force chunk boundaries; production wants it small enough that a pull is
 // never waiting long, and large enough that the per-chunk overhead stays irrelevant.
 var scanChunkBudget = 250 * time.Millisecond
+
+// initialScanDoneKVPrefix namespaces the per-folder marker recording that this folder once
+// completed an initial scan. The marker is what lets pulls run during the initial scan after a
+// restart (see pull): before the first scan ever completes, every remote file looks needed,
+// including files that exist on disk but are not indexed yet, so pulling then is not safe.
+const initialScanDoneKVPrefix = "model/initialScanDone/"
+
+// initialScanEverCompleted reports whether this folder has ever completed an initial scan, as
+// recorded in the database. A missing marker means no; a database error is reported to the
+// caller, whose conservative answer is also no.
+func (f *folder) initialScanEverCompleted() (bool, error) {
+	_, err := f.db.GetKV(initialScanDoneKVPrefix + f.folderID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
 
 // serviceQueuedPull runs one pull iteration if the folder has one queued, and returns immediately
 // otherwise. It exists so that a chunked scan does not starve the puller: the scan and the pull both
@@ -586,8 +619,18 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 		if err := batch.Flush(); err != nil {
 			return err
 		}
-		if err := f.serviceQueuedPull(ctx); err != nil {
-			return err
+		// The scan holds an I/O token for its whole duration. Hand it back
+		// while servicing a pull, or the pull's own TakeWithContext would
+		// deadlock against us when maxFolderConcurrency is 1 (or wait out
+		// the rest of the scan when it equals the number of folders).
+		f.ioLimiter.Give(1)
+		pullErr := f.serviceQueuedPull(ctx)
+		limitErr := f.ioLimiter.TakeWithContext(ctx, 1)
+		if pullErr != nil {
+			return pullErr
+		}
+		if limitErr != nil {
+			return limitErr
 		}
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1120,6 +1163,13 @@ func (f *folder) scanTimerFired(ctx context.Context) error {
 		switch {
 		case err == nil:
 			f.sl.InfoContext(ctx, "Completed initial scan")
+			// Record that this folder once completed an initial scan. After a
+			// restart this is what lets pulls run while the re-scan is still
+			// in progress (see pull); a failure to record it costs one more
+			// gated scan, nothing else.
+			if perr := f.db.PutKV(initialScanDoneKVPrefix+f.folderID, []byte{1}); perr != nil {
+				f.sl.WarnContext(ctx, "Failed to record initial scan completion", slogutil.Error(perr))
+			}
 		case errors.Is(err, context.Canceled):
 			// Suppressed: context was canceled (e.g. by user)
 		default:
