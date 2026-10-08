@@ -1027,6 +1027,17 @@ func (f *folder) scanSubdirsDeletedAndIgnored(ctx context.Context, subDirs []str
 	ignoredParent := ""
 	changes := 0
 
+	// On a full scan this sweep iterates every local database entry, which takes
+	// the majority of a big scan's wall time (measured: about 15 of 22 minutes
+	// on a 2.35M-entry folder). It runs in the serve goroutine like the walk
+	// above, so without servicing it starves queued pulls and watch events just
+	// the same - a removal watched at the start of the sweep was indexed only
+	// when the whole scan ended. The database iterator is a snapshot, so it
+	// stays valid across servicing, and unlike the walk there is nothing to
+	// resume: the loop simply continues after the queued work is done.
+	budget := time.NewTimer(scanChunkBudget)
+	defer budget.Stop()
+
 outer:
 	for _, sub := range subDirs {
 		for fi, err := range itererr.Zip(f.db.AllLocalFilesWithPrefix(f.folderID, protocol.LocalDeviceID, sub)) {
@@ -1037,6 +1048,27 @@ outer:
 			select {
 			case <-ctx.Done():
 				break outer
+			default:
+			}
+
+			select {
+			case <-budget.C:
+				// Hand back the scan's I/O token while servicing a pull, for the
+				// same deadlock reason as in the walk loop above.
+				f.ioLimiter.Give(1)
+				pullErr := f.serviceQueuedPull(ctx)
+				watchErr := f.serviceQueuedWatch(ctx)
+				limitErr := f.ioLimiter.TakeWithContext(ctx, 1)
+				budget.Reset(scanChunkBudget)
+				if pullErr != nil {
+					return changes, pullErr
+				}
+				if watchErr != nil {
+					return changes, watchErr
+				}
+				if limitErr != nil {
+					return changes, limitErr
+				}
 			default:
 			}
 
