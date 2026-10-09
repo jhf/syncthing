@@ -1,0 +1,23 @@
+[Unit]
+Description=Syncthing btrfs helper socket
+# syncthing@jhf's shutdown pairing connects while shutdown.target is queued,
+# and systemd refuses every connection to a socket whose stop job is pending
+# (socket.c, "Suppressing connection request since unit stop is
+# scheduled"), so no stop job may reach this socket before syncthing has
+# stopped. Default dependencies add Conflicts=shutdown.target (the
+# 2026-11-25 and 2026-11-28 09:16 reboots: "connection reset by peer"), and
+# Requires=sysinit.target pulls in the stop of sysinit.target, which itself
+# conflicts with shutdown.target (the 10:19 reboot, same error). So only
+# ordering remains: the listener lives until the manager exits.
+DefaultDependencies=no
+After=sysinit.target
+Before=sockets.target
+
+[Socket]
+ListenStream=/run/syncthing-btrfs.sock
+SocketMode=0660
+SocketGroup=jhf
+Accept=true
+
+[Install]
+WantedBy=sockets.target
