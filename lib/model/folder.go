@@ -63,12 +63,45 @@ type folder struct {
 
 	scanInterval           time.Duration
 	scanTimer              *time.Timer
-	watchScanDepth         int // >0 while servicing a watch-triggered scan between chunks
+	watchScanDepth         int         // >0 while servicing a watch-triggered scan between chunks
 	scanDelay              chan time.Duration
 	initialScanFinished    chan struct{}
 	scanScheduled          chan struct{}
 	versionCleanupInterval time.Duration
 	versionCleanupTimer    *time.Timer
+
+	// btrfs scan replay state; serve goroutine only (folder_btrfs.go).
+	// btrfsChecked/btrfsOK cache the one-time btrfs replay eligibility check.
+	btrfsChecked bool
+	btrfsOK      bool
+	// lastBtrfsRefresh is the last successful runtime baseline pairing,
+	// rate-limiting refreshes (Serve goroutine only).
+	lastBtrfsRefresh time.Time
+	// btrfsRearm* drive the post-replay baseline re-arm: the pairing needs
+	// the watch aggregator accepting flushes, which it does only after the
+	// backend setup pass (minutes on a large tree). btrfsRearmAwaitWatch
+	// holds the first attempt until the watch session signals ready; the
+	// timer then paces retries of real pairing failures. Serve goroutine
+	// only.
+	btrfsRearmTimer      *time.Timer
+	btrfsRearmPending    bool
+	btrfsRearmAwaitWatch bool
+	btrfsRearmTries      int
+	// btrfsPairTimer drives the periodic runtime pairing
+	// (btrfsPairInterval); armed only for btrfs-eligible watched folders.
+	btrfsPairTimer *time.Timer
+	// btrfsCleanStart is set at Serve start when the previous shutdown left
+	// a paired, provably consistent baseline+index (see folder_btrfs.go).
+	btrfsCleanStart bool
+	// watchFlush asks the aggregator to emit pending batches immediately;
+	// the shutdown pairing drains the watch through it.
+	watchFlush chan chan struct{}
+	// watchReady is closed once the current watch session's aggregator runs
+	// and accepts flushes (replaced, open, by every startWatch). On Linux
+	// notify sets up one inotify watch per directory synchronously before
+	// that, which on yarlung (476k watches, spinning disks) outlasted the
+	// whole post-replay re-arm retry budget (2026-11-25 02:18-02:32).
+	watchReady chan struct{}
 
 	pullScheduled chan struct{}
 	pullPause     time.Duration
@@ -95,6 +128,10 @@ type folder struct {
 	// can tell whether a startup did a full walk or resumed from the
 	// filesystem journal.
 	fullScanCount atomic.Int64
+	// fullScanOK is true iff the index is provably complete right now: set
+	// when a full scan (or an armed replay) completes, cleared whenever a
+	// full scan starts or the watch dies. Every btrfs pairing requires it.
+	fullScanOK atomic.Bool
 	// lastReplayWatermark is the last persisted FSEvents journal position,
 	// used to throttle KV writes (persist only on advancement).
 	lastReplayWatermark atomic.Uint64
@@ -153,6 +190,10 @@ func newFolder(model *model, ignores *ignore.Matcher, cfg config.FolderConfigura
 	f.pullPause = f.pullBasePause()
 	f.pullFailTimer = time.NewTimer(0)
 	<-f.pullFailTimer.C
+	f.btrfsRearmTimer = time.NewTimer(0)
+	<-f.btrfsRearmTimer.C
+	f.btrfsPairTimer = time.NewTimer(0)
+	<-f.btrfsPairTimer.C
 
 	registerFolderMetrics(f.ID)
 
@@ -171,17 +212,36 @@ func (f *folder) Serve(ctx context.Context) error {
 	defer func() {
 		f.scanTimer.Stop()
 		f.versionCleanupTimer.Stop()
+		f.btrfsRearmTimer.Stop()
+		f.btrfsPairTimer.Stop()
 		f.setState(FolderIdle)
 	}()
+
+	// The watch context is detached from this one (see startWatch) so the
+	// btrfs shutdown pairing can run with the watch still alive; tear it
+	// down when Serve returns.
+	defer f.stopWatch()
 
 	if err := f.reconcileBlockIndex(ctx); err != nil {
 		f.setError(ctx, err)
 		return err // will get restarted by suture
 	}
 
+	f.btrfsCleanStart = f.consumeBtrfsBaselineMarker(ctx)
+
 	if f.FSWatcherEnabled && f.getHealthErrorAndLoadIgnores() == nil {
 		f.tryArmWatchReplay(ctx)
 		f.startWatch(ctx)
+		// Btrfs replay arms AFTER the watch: the diff covers everything up
+		// to its snapshot, the watch everything after its start, and only
+		// this order makes the two overlap instead of leaving a gap.
+		f.tryArmBtrfsScanReplay(ctx)
+		// Periodic runtime pairing (folder_btrfs.go): the shutdown pairing
+		// is a bonus, not the mechanism. btrfsOK is set by the eligibility
+		// probe above (or stays false off btrfs, e.g. on the Mac).
+		if f.btrfsOK {
+			f.btrfsPairTimer.Reset(btrfsPairInterval)
+		}
 	}
 
 	// If we're configured to not do version cleanup, or we don't have a
@@ -201,9 +261,13 @@ func (f *folder) Serve(ctx context.Context) error {
 	for {
 		var err error
 
+		// Nil (blocking forever) unless a post-replay re-arm is pending:
+		// first the watch-ready signal, then the retry timer.
+		btrfsWatchReadyC, btrfsRearmC := f.btrfsRearmChans()
+
 		select {
 		case <-ctx.Done():
-			close(f.done)
+			f.shutdownWork()
 			return nil
 
 		case <-f.pullScheduled:
@@ -273,6 +337,15 @@ func (f *folder) Serve(ctx context.Context) error {
 		case <-f.restartWatchChan:
 			f.sl.DebugContext(ctx, "Restart watcher")
 			err = f.restartWatch(ctx)
+
+		case <-btrfsWatchReadyC:
+			f.btrfsRearmWatchReady(ctx)
+
+		case <-btrfsRearmC:
+			f.btrfsRearmTimerFired(ctx)
+
+		case <-f.btrfsPairTimer.C:
+			f.btrfsPeriodicPair(ctx)
 
 		case <-f.versionCleanupTimer.C:
 			if _, _, healthErr := f.getState(); healthErr != nil {
@@ -601,6 +674,10 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 	f.sl.DebugContext(ctx, "Scanning")
 	if subDirs == nil {
 		f.fullScanCount.Add(1)
+		// A full scan in progress means the index is not currently
+		// provably complete; the btrfs shutdown pairing keys off this
+		// (folder_btrfs.go). Re-set only on success below.
+		f.fullScanOK.Store(false)
 	}
 
 	oldHash := f.ignores.Hash()
@@ -747,7 +824,9 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 
 	f.ScanCompleted()
 	if subDirs == nil || (len(subDirs) == 1 && subDirs[0] == "") {
+		f.fullScanOK.Store(true)
 		f.armWatchReplayAfterFullScan(ctx)
+		f.refreshBtrfsBaseline(ctx)
 	}
 	return nil
 }
@@ -1506,17 +1585,34 @@ func (f *folder) restartWatch(ctx context.Context) error {
 // startWatch should only ever be called synchronously. If you want to use
 // this asynchronously, you should probably use scheduleWatchRestart instead.
 func (f *folder) startWatch(ctx context.Context) {
-	watchCtx, cancel := context.WithCancel(ctx)
+	// Detach the watch from Serve's context: on shutdown the watch and the
+	// aggregator must stay alive while the btrfs shutdown pairing drains
+	// them (folder_btrfs.go); Serve's defer stopWatch tears them down.
+	watchCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	ready := make(chan struct{})
 	f.watchMut.Lock()
 	f.watchChan = make(chan watchaggregator.Batch)
+	f.watchFlush = make(chan chan struct{})
+	f.watchReady = ready
 	f.watchCancel = cancel
 	f.watchMut.Unlock()
-	go f.monitorWatch(watchCtx)
+	go f.monitorWatch(watchCtx, ready, time.Now())
+}
+
+// watchReadyChan returns the current watch session's readiness channel
+// (nil when no watch was started: never ready).
+func (f *folder) watchReadyChan() <-chan struct{} {
+	f.watchMut.Lock()
+	defer f.watchMut.Unlock()
+	return f.watchReady
 }
 
 // monitorWatch starts the filesystem watching and retries every minute on failure.
-// It should not be used except in startWatch.
-func (f *folder) monitorWatch(ctx context.Context) {
+// It should not be used except in startWatch. Its context outlives Serve's
+// (see startWatch) so the btrfs shutdown pairing can drain the aggregator.
+// ready is closed the first time the aggregator runs; started is when
+// this watch session began.
+func (f *folder) monitorWatch(ctx context.Context, ready chan struct{}, started time.Time) {
 	failTimer := time.NewTimer(0)
 	aggrCtx, aggrCancel := context.WithCancel(ctx)
 	var err error
@@ -1554,14 +1650,23 @@ func (f *folder) monitorWatch(ctx context.Context) {
 				continue
 			}
 			lastWatch = time.Now()
-			watchaggregator.Aggregate(aggrCtx, eventChan, f.watchChan, f.FolderConfiguration, f.model.cfg, f.evLogger)
+			watchaggregator.AggregateWithFlush(aggrCtx, eventChan, f.watchChan, f.watchFlush, f.FolderConfiguration, f.model.cfg, f.evLogger)
+			if ready != nil {
+				// INFO: backend setup on a large tree takes minutes, and
+				// the btrfs pairing waits for it (folder_btrfs.go).
+				f.sl.InfoContext(ctx, "Filesystem watcher ready", slog.Duration("setup", time.Since(started).Truncate(time.Millisecond)))
+				close(ready)
+				ready = nil
+			}
 			f.sl.DebugContext(ctx, "Started filesystem watcher")
 		case err = <-errChan:
 			// The watch is dead; events between its death and the re-watch
 			// are lost. Schedule a full scan to re-establish completeness,
 			// and abandon any journal replay seed so the re-watch does not
 			// replay the same gap (or a long history) again - the full
-			// scan covers it.
+			// scan covers it. The index is no longer provably complete:
+			// no btrfs pairing until that full scan finishes.
+			f.fullScanOK.Store(false)
 			f.scanOnWatchErr()
 			fs.ResetWatchReplay()
 			var next time.Duration
@@ -1743,6 +1848,27 @@ func (f *folder) persistWatchReplayWatermark(id uint64) {
 		return
 	}
 	f.lastReplayWatermark.Store(id)
+}
+
+// folderShutdownBudget bounds shutdownWork; a var so tests can shrink it.
+var folderShutdownBudget = svcutil.ShutdownBudget
+
+// shutdownWork runs the folder's shutdown steps under ONE deadline. The
+// btrfs pairing had its own 90 s deadline, which outran both the
+// supervisors' stop timeout and systemd's TimeoutStopSec, so the process
+// was abandoned mid-pairing (yarlung 2026-11-24, three times: "Database
+// failed to stop within 10s" 20 s after the signal). The supervisors on
+// the folder path wait svcutil.ShutdownServiceTimeout, which covers this
+// budget plus the bounded snapshot cleanup.
+func (f *folder) shutdownWork() {
+	ctx, cancel := context.WithTimeout(context.Background(), folderShutdownBudget)
+	defer cancel()
+	start := time.Now()
+	close(f.done)
+	f.shutdownBtrfsBaseline(ctx)
+	if ctx.Err() != nil {
+		f.sl.Info("Folder shutdown budget exhausted, remaining shutdown work skipped", "budget", folderShutdownBudget, "elapsed", time.Since(start).Round(time.Millisecond))
+	}
 }
 
 // scanOnWatchErr schedules a full scan immediately if an error occurred while watching.
