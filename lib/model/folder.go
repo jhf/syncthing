@@ -70,6 +70,11 @@ type folder struct {
 	versionCleanupInterval time.Duration
 	versionCleanupTimer    *time.Timer
 
+	// btrfs scan replay state; serve goroutine only (folder_btrfs.go).
+	btrfsChecked             bool
+	btrfsOK                  bool
+	lastBtrfsBaselineRefresh time.Time
+
 	pullScheduled chan struct{}
 	pullPause     time.Duration
 	pullFailTimer *time.Timer
@@ -182,6 +187,10 @@ func (f *folder) Serve(ctx context.Context) error {
 	if f.FSWatcherEnabled && f.getHealthErrorAndLoadIgnores() == nil {
 		f.tryArmWatchReplay(ctx)
 		f.startWatch(ctx)
+		// Btrfs replay arms AFTER the watch: the diff covers everything up
+		// to its snapshot, the watch everything after its start, and only
+		// this order makes the two overlap instead of leaving a gap.
+		f.tryArmBtrfsScanReplay(ctx)
 	}
 
 	// If we're configured to not do version cleanup, or we don't have a
@@ -268,6 +277,7 @@ func (f *folder) Serve(ctx context.Context) error {
 			err = f.scanSubdirs(ctx, fsEvents.Paths)
 			if err == nil {
 				f.persistWatchReplayWatermark(fsEvents.MaxEventID)
+				f.refreshBtrfsBaseline(ctx, false)
 			}
 
 		case <-f.restartWatchChan:
@@ -549,6 +559,7 @@ func (f *folder) serviceQueuedWatch(ctx context.Context) error {
 		err := f.scanSubdirs(ctx, fsEvents.Paths)
 		if err == nil {
 			f.persistWatchReplayWatermark(fsEvents.MaxEventID)
+			f.refreshBtrfsBaseline(ctx, false)
 		}
 		return err
 	default:
@@ -1356,6 +1367,9 @@ func (f *folder) scanTimerFired(ctx context.Context) error {
 		switch {
 		case err == nil:
 			f.sl.InfoContext(ctx, "Completed initial scan")
+			// The index is now complete; pin the btrfs baseline here so a
+			// later restart can diff against it.
+			f.refreshBtrfsBaseline(ctx, true)
 			// Record that this folder once completed an initial scan. After a
 			// restart this is what lets pulls run while the re-scan is still
 			// in progress (see pull); a failure to record it costs one more
