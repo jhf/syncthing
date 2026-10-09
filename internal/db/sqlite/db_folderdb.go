@@ -211,6 +211,17 @@ func (s *DB) AllLocalFilesBySequence(folder string, device protocol.DeviceID, st
 	return fdb.AllLocalFilesBySequence(device, startSeq, limit)
 }
 
+func (s *DB) LocalNamesSinceSequence(folder string, device protocol.DeviceID, seq int64) ([]string, error) {
+	fdb, err := s.getFolderDB(folder, false)
+	if errors.Is(err, errNoSuchFolder) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return fdb.LocalNamesSinceSequence(device, seq)
+}
+
 func (s *DB) AllLocalFilesWithPrefix(folder string, device protocol.DeviceID, prefix string) (iter.Seq[protocol.FileInfo], func() error) {
 	fdb, err := s.getFolderDB(folder, false)
 	if errors.Is(err, errNoSuchFolder) {

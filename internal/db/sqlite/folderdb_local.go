@@ -74,6 +74,20 @@ func (s *folderDB) AllLocalFilesBySequence(device protocol.DeviceID, startSeq in
 	return itererr.Map(it, errFn, indirectFI.FileInfo)
 }
 
+// LocalNamesSinceSequence returns the distinct names of the device's file
+// entries whose sequence is above seq: every name the index has written
+// for the device since that point. Name-only, so it reads the files rows
+// and file_names, never the fileinfo blobs.
+func (s *folderDB) LocalNamesSinceSequence(device protocol.DeviceID, seq int64) ([]string, error) {
+	var names []string
+	err := s.stmt(`
+		SELECT DISTINCT n.name FROM files f
+		INNER JOIN file_names n ON n.idx = f.name_idx
+		WHERE f.device_idx = (SELECT idx FROM devices WHERE device_id = ?) AND f.sequence > ?
+	`).Select(&names, device.String(), seq)
+	return names, wrap(err)
+}
+
 func (s *folderDB) AllLocalFilesWithPrefix(device protocol.DeviceID, prefix string) (iter.Seq[protocol.FileInfo], func() error) {
 	if prefix == "" {
 		return s.AllLocalFiles(device)

@@ -134,6 +134,11 @@ func (m metricsDB) AllLocalFilesBySequence(folder string, device protocol.Device
 	return accountIter(done, it, errFn)
 }
 
+func (m metricsDB) LocalNamesSinceSequence(folder string, device protocol.DeviceID, seq int64) ([]string, error) {
+	defer m.account(folder, "LocalNamesSinceSequence")()
+	return m.DB.LocalNamesSinceSequence(folder, device, seq)
+}
+
 func (m metricsDB) AllNeededGlobalFiles(folder string, device protocol.DeviceID, order config.PullOrder, limit, offset int) (iter.Seq[protocol.FileInfo], func() error) {
 	done := m.account(folder, "AllNeededGlobalFiles")
 	it, errFn := m.DB.AllNeededGlobalFiles(folder, device, order, limit, offset)
