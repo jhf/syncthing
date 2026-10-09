@@ -13,7 +13,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
+	"io"
+	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -31,11 +33,22 @@ import (
 // failure modes (helper missing, baseline deleted, nested subvolumes), all of
 // which fall back to the regular full scan.
 //
-// The helper is a fixed path with fixed subcommands so that a sudoers entry
-// can grant it without granting anything else:
+// The privileged helper is reached over a unix socket served by a
+// socket-activated systemd service (Accept=true, one helper instance per
+// connection), so the syncthing process itself needs no capabilities and the
+// stock hardened unit stays intact:
 //
-//	syncthing-btrfs-helper snap|diff|diff-baseline|setbaseline|rmsnap|status|subvol|subvols
-const btrfsHelperPath = "/usr/local/sbin/syncthing-btrfs-helper"
+//	syncthing-btrfs.socket: ListenStream=/run/syncthing-btrfs.sock,
+//	                        SocketMode=0660, SocketGroup=<syncthing user>
+//	syncthing-btrfs@.service: root, runs an adapter that reads one request
+//	                        line ("<verb> [name...]") and execs
+//	                        /usr/local/sbin/syncthing-btrfs-helper, which owns
+//	                        all validation (fixed verb list, name charset).
+//
+// Protocol: the client writes the request line and half-closes; the service
+// streams the helper's stdout back and appends a status trailer
+// "\x00status=<exitcode>\n" so failures can never pass as silent success.
+const btrfsSocketPath = "/run/syncthing-btrfs.sock"
 
 const btrfsSuperMagic = 0x9123683e
 
@@ -44,14 +57,28 @@ const btrfsSuperMagic = 0x9123683e
 // mean: do a full scan.
 var errBtrfsReplayUnsupported = errors.New("btrfs scan replay not available")
 
+// btrfsStatusMarker introduces the status trailer appended by the socket
+// adapter. NUL cannot appear in btrfs paths or helper output, so the last
+// NUL in the response unambiguously starts the trailer.
+var btrfsStatusMarker = []byte("\x00status=")
+
 var btrfsHelperOnce = sync.OnceValues(checkBtrfsHelper)
+
+// btrfsSock returns the helper socket path, overridable for tests and
+// non-standard installs.
+func btrfsSock() string {
+	if p := os.Getenv("SYNCTHING_BTRFS_SOCK"); p != "" {
+		return p
+	}
+	return btrfsSocketPath
+}
 
 func checkBtrfsHelper() (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "sudo", "-n", btrfsHelperPath, "subvol").Output()
+	out, err := btrfsHelper(ctx, "subvol")
 	if err != nil {
-		return false, fmt.Errorf("%w: helper: %w", errBtrfsReplayUnsupported, err)
+		return false, err
 	}
 	subvol, ok := strings.CutPrefix(strings.TrimSpace(string(out)), "subvol=")
 	if !ok || !filepath.IsAbs(subvol) {
@@ -60,33 +87,59 @@ func checkBtrfsHelper() (bool, error) {
 	return true, nil
 }
 
-// BtrfsScanReplaySupported reports whether the helper is installed and
-// answers. Cheap after the first call.
+// BtrfsScanReplaySupported reports whether the helper socket answers. Cheap
+// after the first call.
 func BtrfsScanReplaySupported() bool {
 	ok, _ := btrfsHelperOnce()
 	return ok
 }
 
 // BtrfsScanReplaySupportedErr is BtrfsScanReplaySupported with the reason,
-// for one-time diagnostics at folder start (a hardened systemd unit that
-// breaks sudo's setuid otherwise disables the feature silently).
+// for one-time diagnostics at folder start (a missing socket/service
+// otherwise disables the feature silently).
 func BtrfsScanReplaySupportedErr() (bool, error) {
 	return btrfsHelperOnce()
 }
 
-// btrfsHelper runs the helper with the given subcommand.
+// btrfsHelper sends one request to the helper over the socket and returns
+// the helper's stdout. A nonzero helper exit status is an error; the status
+// trailer guarantees that a failed helper cannot masquerade as success with
+// empty output.
 func btrfsHelper(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sudo", append([]string{"-n", btrfsHelperPath}, args...)...)
-	out, err := cmd.Output()
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "unix", btrfsSock())
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			err = fmt.Errorf("%w: %s", err, bytes.TrimSpace(exitErr.Stderr))
-		}
+		return nil, fmt.Errorf("%w: helper socket %s: %w", errBtrfsReplayUnsupported, btrfsSock(), err)
 	}
-	return out, err
+	defer conn.Close()
+	if dl, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(dl)
+	}
+	if _, err := conn.Write([]byte(strings.Join(args, " ") + "\n")); err != nil {
+		return nil, fmt.Errorf("helper request: %w", err)
+	}
+	if uc, ok := conn.(*net.UnixConn); ok {
+		uc.CloseWrite()
+	}
+	out, err := io.ReadAll(conn)
+	if err != nil {
+		return nil, fmt.Errorf("helper response: %w", err)
+	}
+	i := bytes.LastIndex(out, btrfsStatusMarker)
+	if i < 0 {
+		return nil, fmt.Errorf("helper response missing status trailer (%d bytes)", len(out))
+	}
+	var code int
+	if _, err := fmt.Sscanf(string(out[i+len(btrfsStatusMarker):]), "%d", &code); err != nil {
+		return nil, fmt.Errorf("helper status trailer malformed: %q", out[i:])
+	}
+	out = out[:i]
+	if code != 0 {
+		return nil, fmt.Errorf("helper %q failed with status %d (details in the syncthing-btrfs service journal)", strings.Join(args, " "), code)
+	}
+	return out, nil
 }
 
 // BtrfsScanBaselineOK reports whether the helper has a baseline snapshot to
