@@ -102,3 +102,59 @@ enable STTRACE=model,fs or correlate scan start times with churn to confirm,
 and consider: larger backendBuffer, draining the channel instead of
 full-scan on overflow, or faster full scans (budget pacing makes the walk
 ~10 min; continuous would be far shorter).
+
+## Update 01:10: mechanism CONFIRMED by direct observation (dev.44 INF logging)
+
+The ["."] chain is driven by fseventsd-level drops, not syncthing's
+backendChan (which overflowed exactly once). dev.44 logs every
+overflow-flagged event at INF:
+
+- 4953+ "Watch: Backend dropped events (flags=notify.FSEventsUserDropped /
+  FSEventsMustScanSubDirs path=.)" lines between 01:02:55 and 01:08,
+  arriving ~15/s, sustained. Each logged line is one split flag of a flagged
+  physical event (notify's Dispatch splits multi-flag events).
+- Controlled experiments: create+delete of a root file in one aggregator
+  window does NOT escalate (targeted scan of the path); 600-file burst in
+  one dir scans just that dir (per-dir aggregation); `touch /Users/jhf`
+  (event for the root dir itself) deterministically produces ["."].
+- The fork's serial dispatch queue stalls when the aggregator's 10s flush
+  blocks on the folder watchChan during long scans; fseventsd's per-stream
+  client buffer overflows under a churn burst (my 2000-event test burst),
+  and from then on fseventsd delivers flagged events; each batch containing
+  a flagged event heals via a full ["."] scan, and the scan itself keeps the
+  pipeline slow enough that drops continue. Self-sustaining at the FSEvents
+  layer. Original seed tonight: the 13-watcher storm (fseventsd overload).
+- Chain break: restart the serve. The watermark had advanced past the
+  backlog via completed scans, so replay is light and the fresh stream is
+  healthy.
+- Real fix candidate (needs user decision): with the FSEvents journal, an
+  overflow heal does not need a blind full walk — replaying the journal
+  from the last persisted watermark covers the gap exactly. FSEvents
+  UserDropped means the CLIENT failed to read; the on-disk journal still
+  has the events.
+
+## Update 01:30: restart AMPLIFIES the chain — do not restart to fix it
+
+Restarting the serve at 01:09 made it worse: the boot replay from the last
+watermark re-delivered the journaled flagged backlog (83803 INF flag lines
+in 3 min, ~460/s), and the replay flood itself stalled the fresh stream's
+serial queue, causing NEW fseventsd drops, which get journaled and
+re-flagged. The loop is: flagged events in journal -> replay flood -> new
+drops -> new flagged events. It converges only by letting scans COMPLETE
+ uninterrupted (each completed full scan advances the watermark past the
+flagged range; observed: 01:09:34 scan completed 01:24:07, sweep 7m30s).
+Residual live flag rate after drain: ~9/s at 01:25-01:29 (was 460/s).
+
+Controlled-trigger results (dev.44):
+- create+delete same root file in one 10s window: targeted scan, no ["."].
+- 600-file burst in one subdir: targeted scan of that dir, no ["."].
+- touch of the folder root dir itself: deterministic ["."] full scan.
+- 2000-event burst during a full scan: backendChan overflow fired ONCE;
+  the real damage was fseventsd-level drops ~7 min later (01:02:55 flood).
+
+Morning decision for user: on overflow flags, heal by journal replay from
+the last watermark (exact, bounded) instead of a blind ["."] full walk.
+Also consider coalescing flagged batches while a full scan is already
+running (a second ["."] scan queued behind an identical one in progress is
+pure waste), and whether flagged events should be journaled/replayed at
+all on the syncthing side.
