@@ -20,6 +20,21 @@ import (
 
 const ServiceTimeout = 10 * time.Second
 
+// ShutdownBudget is the time a folder may spend on its shutdown work (e.g.
+// pairing the btrfs baseline), shared by all of it. ShutdownServiceTimeout
+// is how long the supervisors on the folder path (main -> model -> folder
+// runners) wait before abandoning a stopping service: the budget plus a
+// bounded cleanup and margin. With the 10 s database close and log flush
+// after it, a stop stays below systemd's default 90 s TimeoutStopSec:
+// 65 + 10 + 2 = 77 s. Before this the supervisors abandoned the folder
+// after ServiceTimeout, mid-pairing, and the process exited with "Database
+// failed to stop within 10s".
+const (
+	ShutdownBudget         = 50 * time.Second
+	ShutdownCleanupTimeout = 10 * time.Second
+	ShutdownServiceTimeout = ShutdownBudget + ShutdownCleanupTimeout + 5*time.Second
+)
+
 type FatalErr struct {
 	Err    error
 	Status ExitStatus
@@ -165,6 +180,21 @@ func SpecWithDebugLogger() suture.Spec {
 
 func SpecWithInfoLogger() suture.Spec {
 	return spec(infoEventHook())
+}
+
+// SpecWithShutdownBudget is SpecWithDebugLogger for supervisors on the
+// folder path: they wait ShutdownServiceTimeout for a stopping service, and
+// an abandoned service is logged at INFO (it was invisible at debug).
+func SpecWithShutdownBudget() suture.Spec {
+	s := spec(func(e suture.Event) {
+		if st, ok := e.(suture.EventStopTimeout); ok {
+			slog.Info("Service did not stop within the shutdown timeout, abandoned", "supervisor", st.SupervisorName, "service", st.ServiceName, "timeout", ShutdownServiceTimeout)
+			return
+		}
+		slog.Debug(e.String())
+	})
+	s.Timeout = ShutdownServiceTimeout
+	return s
 }
 
 func spec(eventHook suture.EventHook) suture.Spec {

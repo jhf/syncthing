@@ -213,7 +213,8 @@ var (
 // where it sends index information to connected peers and responds to requests
 // for file data without altering the local folder in any way.
 func NewModel(cfg config.Wrapper, id protocol.DeviceID, sdb db.DB, protectedFiles []string, evLogger events.Logger, keyGen *protocol.KeyGenerator) Model {
-	spec := svcutil.SpecWithDebugLogger()
+	// Folder path: waits out the folders' shutdown budget (svcutil.ShutdownBudget).
+	spec := svcutil.SpecWithShutdownBudget()
 	m := &model{
 		Supervisor: suture.New("model", spec),
 

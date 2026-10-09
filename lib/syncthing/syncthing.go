@@ -97,7 +97,9 @@ func New(cfg config.Wrapper, sdb db.DB, evLogger events.Logger, cert tls.Certifi
 func (a *App) Start() error {
 	// Create a main service manager. We'll add things to this as we go along.
 	// We want any logging it does to go through our log system.
-	spec := svcutil.SpecWithDebugLogger()
+	// The model (and its folders) stop under main: main must wait out the
+	// folders' shutdown budget, or it abandons them mid-pairing.
+	spec := svcutil.SpecWithShutdownBudget()
 	a.mainService = suture.New("main", spec)
 
 	// Start the supervisor and wait for it to stop to handle cleanup.
