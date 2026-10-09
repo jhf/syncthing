@@ -34,7 +34,7 @@ import (
 // The helper is a fixed path with fixed subcommands so that a sudoers entry
 // can grant it without granting anything else:
 //
-//	syncthing-btrfs-helper refresh|diff|promote|status|subvol|subvols
+//	syncthing-btrfs-helper snap|diff|diff-baseline|setbaseline|rmsnap|status|subvol|subvols
 const btrfsHelperPath = "/usr/local/sbin/syncthing-btrfs-helper"
 
 const btrfsSuperMagic = 0x9123683e
@@ -92,19 +92,23 @@ func BtrfsScanBaselineOK(ctx context.Context) (bool, error) {
 	return strings.TrimSpace(string(out)) != "baseline=none", nil
 }
 
-// BtrfsScanRefresh replaces the baseline snapshot with one of the current
-// state. Call only when the folder index is known complete for the folder;
-// diffing later over-reports rather than under-reports when in doubt.
-func BtrfsScanRefresh(ctx context.Context) error {
-	_, err := btrfsHelper(ctx, "refresh")
+// BtrfsScanSnapshot takes a read-only snapshot of the helper's subvolume
+// under the given name (restricted to [a-z0-9.-] by the helper).
+func BtrfsScanSnapshot(ctx context.Context, name string) error {
+	_, err := btrfsHelper(ctx, "snap", name)
 	return err
 }
 
-// BtrfsScanPromote makes the snapshot taken by the last BtrfsScanDiff the new
-// baseline. Call only after the diff's paths have been scanned into the
-// index; a crash before promotion simply replays a superset next time.
-func BtrfsScanPromote(ctx context.Context) error {
-	_, err := btrfsHelper(ctx, "promote")
+// BtrfsScanSetBaseline makes the named snapshot the baseline, deleting the
+// previous one.
+func BtrfsScanSetBaseline(ctx context.Context, name string) error {
+	_, err := btrfsHelper(ctx, "setbaseline", name)
+	return err
+}
+
+// BtrfsScanRemoveSnapshot deletes the named snapshot (never the baseline).
+func BtrfsScanRemoveSnapshot(ctx context.Context, name string) error {
+	_, err := btrfsHelper(ctx, "rmsnap", name)
 	return err
 }
 
@@ -163,15 +167,14 @@ func BtrfsScanNestedSubvols(ctx context.Context, folderRoot string) ([]string, e
 	return nested, nil
 }
 
-// BtrfsScanDiff returns the folder-relative paths that changed between the
-// baseline snapshot and now. The snapshot taken for the diff stays around for
-// BtrfsScanPromote.
-func BtrfsScanDiff(ctx context.Context, folderRoot string) ([]string, error) {
+// BtrfsScanDiffBaseline returns the folder-relative paths that changed
+// between the baseline snapshot and the named snapshot.
+func BtrfsScanDiffBaseline(ctx context.Context, snapName, folderRoot string) ([]string, error) {
 	prefix, err := btrfsFolderPrefix(ctx, folderRoot)
 	if err != nil {
 		return nil, err
 	}
-	out, err := btrfsHelper(ctx, "diff")
+	out, err := btrfsHelper(ctx, "diff-baseline", snapName)
 	if err != nil {
 		return nil, err
 	}

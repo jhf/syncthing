@@ -8,34 +8,47 @@ package model
 
 import (
 	"context"
+	"database/sql"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"regexp"
 	"time"
 
-	"github.com/syncthing/syncthing/internal/slogutil"
 	"github.com/syncthing/syncthing/lib/fs"
+	"github.com/syncthing/syncthing/internal/slogutil"
 )
 
 // This file implements the Linux/btrfs counterpart of the FSEvents journal
-// replay (see tryArmWatchReplay): instead of seeding a watch stream with a
-// journal position, a root-owned helper diffs two btrfs snapshots (one taken
-// while the index was complete, one taken now) and the changed paths are
-// scanned directly. The diff is exact, so every failure mode is operational
-// (helper missing, baseline snapshot gone, nested subvolume inside the
-// folder) and every failure falls back to the regular full scan.
+// replay (see tryArmWatchReplay), skipping the initial full scan by applying
+// a snapshot diff instead of walking the tree.
 //
-// Ordering invariant: the watch must be started BEFORE the diff snapshot is
-// taken. The diff covers everything up to the snapshot, the watch covers
-// everything after its start; starting the watch first makes the two overlap
-// instead of leaving a gap.
+// Why the design is what it is: a snapshot diff is STATE-based, not
+// event-based like the FSEvents journal. A file created, indexed by the
+// watch, and deleted again between the baseline snapshot and the next boot
+// leaves no trace in the diff (absent at both ends) while the index still
+// holds it - and next boot would resurrect it to the peers. The only safe
+// baseline is therefore one paired with a provably consistent index: the
+// shutdown sequence below drains the watch completely, snapshots, and
+// confirms no further events arrive afterwards, establishing index ==
+// disk(snapshot). It then records a clean-shutdown marker KV, which a crash
+// cannot leave behind, and boot arming requires that marker.
+//
+// Boot ordering invariant: the watch is started BEFORE the diff snapshot is
+// taken, so live changes and the diff overlap instead of leaving a gap.
+
+// btrfsBaselineKVPrefix namespaces the clean-shutdown marker: it exists iff
+// the previous run paired the baseline snapshot with a provably consistent
+// index (see above). Read and deleted at folder start, so a crashed run can
+// never inherit it; rewritten by the shutdown sequence on success.
+const btrfsBaselineKVPrefix = "model/btrfsScanBaseline/"
 
 // maxBtrfsReplayPaths caps the targeted scan after a snapshot diff. A larger
-// diff means the baseline is ancient and the regular full walk is the simpler
-// course; the scan that then runs refreshes the baseline.
+// diff means the downtime was very busy and the regular full walk is the
+// simpler course.
 const maxBtrfsReplayPaths = 200_000
 
-// btrfsBaselineRefreshInterval bounds how stale the baseline snapshot gets
-// while the watch is healthy, so the next restart's diff stays small. The
-// snapshot itself costs milliseconds (reflink metadata only).
-const btrfsBaselineRefreshInterval = 10 * time.Minute
+var btrfsSnapNameClean = regexp.MustCompile(`[^a-z0-9.-]+`)
 
 // btrfsReplayEligible reports, once per folder lifetime, whether this folder
 // can use btrfs scan replay: helper installed, folder on the helper's btrfs
@@ -47,11 +60,6 @@ func (f *folder) btrfsReplayEligible(ctx context.Context) bool {
 		return f.btrfsOK
 	}
 	f.btrfsChecked = true
-	defer func() {
-		if !f.btrfsOK {
-			f.sl.DebugContext(ctx, "Btrfs scan replay not available for this folder")
-		}
-	}()
 	if !fs.BtrfsScanReplaySupported() {
 		return false
 	}
@@ -68,14 +76,34 @@ func (f *folder) btrfsReplayEligible(ctx context.Context) bool {
 	return true
 }
 
+// consumeBtrfsBaselineMarker reads and deletes the clean-shutdown marker,
+// returning whether it was present. Must run once at folder start; deleting
+// eagerly is what makes the marker crash-proof.
+func (f *folder) consumeBtrfsBaselineMarker(ctx context.Context) bool {
+	if !f.btrfsReplayEligible(ctx) {
+		return false
+	}
+	_, err := f.db.GetKV(btrfsBaselineKVPrefix + f.folderID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	if err != nil {
+		f.sl.WarnContext(ctx, "Failed to read btrfs baseline marker", slogutil.Error(err))
+		return false
+	}
+	if err := f.db.DeleteKV(btrfsBaselineKVPrefix + f.folderID); err != nil {
+		f.sl.WarnContext(ctx, "Failed to drop btrfs baseline marker", slogutil.Error(err))
+	}
+	return true
+}
+
 // tryArmBtrfsScanReplay attempts to skip the initial full scan by applying a
 // btrfs snapshot diff. Must be called after startWatch (see the ordering
-// invariant above). On success the changed paths are scanned synchronously,
-// the diff snapshot is promoted to the new baseline, and the folder falls
-// into the regular rescan schedule, keeping periodic full scans as the
-// safety net.
+// invariant above). On success the changed paths are scanned synchronously
+// and the folder falls into the regular rescan schedule, keeping periodic
+// full scans as the safety net.
 func (f *folder) tryArmBtrfsScanReplay(ctx context.Context) bool {
-	if !f.btrfsReplayEligible(ctx) {
+	if !f.btrfsCleanStart {
 		return false
 	}
 	if done, err := f.initialScanEverCompleted(); err != nil || !done {
@@ -88,11 +116,15 @@ func (f *folder) tryArmBtrfsScanReplay(ctx context.Context) bool {
 		return false
 	}
 	if !ok {
-		// No baseline yet (first run with the helper installed); the full
-		// scan that follows creates one via refreshBtrfsBaseline.
 		return false
 	}
-	paths, err := fs.BtrfsScanDiff(ctx, f.Filesystem().URI())
+	snap := btrfsSnapName("boot", f.folderID)
+	if err := fs.BtrfsScanSnapshot(ctx, snap); err != nil {
+		f.sl.WarnContext(ctx, "Failed to snapshot for btrfs scan diff, falling back to full scan", slogutil.Error(err))
+		return false
+	}
+	defer fs.BtrfsScanRemoveSnapshot(context.Background(), snap)
+	paths, err := fs.BtrfsScanDiffBaseline(ctx, snap, f.Filesystem().URI())
 	if err != nil {
 		f.sl.WarnContext(ctx, "Failed to compute btrfs snapshot diff, falling back to full scan", slogutil.Error(err))
 		return false
@@ -107,12 +139,6 @@ func (f *folder) tryArmBtrfsScanReplay(ctx context.Context) bool {
 			return false
 		}
 	}
-	// The diff's snapshot becomes the baseline only now: a crash before this
-	// point replays a superset next time, a crash after loses nothing.
-	if err := fs.BtrfsScanPromote(ctx); err != nil {
-		f.sl.WarnContext(ctx, "Failed to promote btrfs scan baseline", slogutil.Error(err))
-	}
-	f.lastBtrfsBaselineRefresh = time.Now()
 
 	// Skip the pending initial scan and fall straight into the regular
 	// rescan schedule (same as tryArmWatchReplay).
@@ -132,22 +158,126 @@ func (f *folder) tryArmBtrfsScanReplay(ctx context.Context) bool {
 	return true
 }
 
-// refreshBtrfsBaseline replaces the baseline snapshot with one of the
-// current filesystem state. Called when the index is known complete: after a
-// full scan (force) or after watch batches at a bounded rate. Snapshotting
-// while watch events are still queued is safe: the snapshot then predates
-// full index coverage and the next diff over-reports, never under-reports.
-func (f *folder) refreshBtrfsBaseline(ctx context.Context, force bool) {
-	if !f.btrfsReplayEligible(ctx) {
+// shutdownBtrfsBaseline pairs the baseline snapshot with a provably
+// consistent index at shutdown: drain the watch completely, snapshot, and
+// confirm no further events arrive afterwards (then index == disk at the
+// snapshot). Only then is the clean-shutdown marker written, arming the next
+// boot's diff. Any failure or busy filesystem just means no marker: the next
+// boot runs the regular full scan. The watch is still alive here (its
+// context outlives Serve's); it is stopped by Serve's defer afterwards.
+func (f *folder) shutdownBtrfsBaseline() {
+	if !f.btrfsOK || !f.FSWatcherEnabled {
 		return
 	}
-	if !force && time.Since(f.lastBtrfsBaselineRefresh) < btrfsBaselineRefreshInterval {
+	if done, err := f.initialScanEverCompleted(); err != nil || !done {
 		return
 	}
-	if err := fs.BtrfsScanRefresh(ctx); err != nil {
-		f.sl.WarnContext(ctx, "Failed to refresh btrfs scan baseline", slogutil.Error(err))
-		return
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	snap := btrfsSnapName("shutdown", f.folderID)
+	defer fs.BtrfsScanRemoveSnapshot(context.Background(), snap)
+
+	for attempt := 0; attempt < 3; attempt++ {
+		// Drain every buffered watch event into the index.
+		if !f.drainWatch(ctx) {
+			f.sl.DebugContext(ctx, "Btrfs baseline: watch did not drain in time")
+			return
+		}
+		// Pin the filesystem state.
+		if err := fs.BtrfsScanSnapshot(ctx, snap); err != nil {
+			f.sl.DebugContext(ctx, "Btrfs baseline: snapshot failed", slogutil.Error(err))
+			return
+		}
+		// Changes after the drain must show up as new events; scanning them
+		// would move the index past the snapshot, so discard instead and
+		// retry with a fresh snapshot.
+		if f.awaitWatchQuiet(ctx) {
+			if err := fs.BtrfsScanSetBaseline(ctx, snap); err != nil {
+				f.sl.DebugContext(ctx, "Btrfs baseline: setbaseline failed", slogutil.Error(err))
+				return
+			}
+			var b [8]byte
+			binary.BigEndian.PutUint64(b[:], uint64(time.Now().Unix()))
+			if err := f.db.PutKV(btrfsBaselineKVPrefix+f.folderID, b[:]); err != nil {
+				f.sl.WarnContext(ctx, "Failed to record btrfs baseline marker", slogutil.Error(err))
+				return
+			}
+			f.sl.DebugContext(ctx, "Btrfs scan baseline paired with index at shutdown")
+			return
+		}
+		_ = fs.BtrfsScanRemoveSnapshot(ctx, snap)
 	}
-	f.lastBtrfsBaselineRefresh = time.Now()
-	f.sl.DebugContext(ctx, "Refreshed btrfs scan baseline")
+	f.sl.DebugContext(ctx, "Btrfs baseline: filesystem busy, no clean pairing")
+}
+
+// drainWatch flushes and scans pending watch batches until none arrive for
+// btrfsWatchQuietPeriod after a flush. Returns false on timeout/cancel.
+func (f *folder) drainWatch(ctx context.Context) bool {
+	for {
+		ack := make(chan struct{})
+		select {
+		case f.watchFlush <- ack:
+		case <-ctx.Done():
+			return false
+		default:
+			// Aggregator not running (watch failed or was never started):
+			// no clean pairing is possible.
+			return false
+		}
+		select {
+		case <-ack:
+		case <-ctx.Done():
+			return false
+		}
+		select {
+		case batch := <-f.watchChan:
+			if err := f.scanSubdirs(ctx, batch.Paths); err != nil {
+				return false
+			}
+		case <-time.After(btrfsWatchQuietPeriod):
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+// awaitWatchQuiet reports whether no watch events arrive for
+// btrfsWatchQuietPeriod after a flush. Arriving batches are DISCARDED, not
+// scanned: they postdate the snapshot, and leaving them out of the index is
+// exactly what the next boot's diff expects.
+func (f *folder) awaitWatchQuiet(ctx context.Context) bool {
+	ack := make(chan struct{})
+	select {
+	case f.watchFlush <- ack:
+	case <-ctx.Done():
+		return false
+	default:
+		return false
+	}
+	select {
+	case <-ack:
+	case <-ctx.Done():
+		return false
+	}
+	select {
+	case batch := <-f.watchChan:
+		f.sl.DebugContext(ctx, "Btrfs baseline: discarding post-snapshot batch", "paths", len(batch.Paths))
+		return false
+	case <-time.After(btrfsWatchQuietPeriod):
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// btrfsWatchQuietPeriod bounds kernel->aggregator->batch latency when proving
+// that no change happened around the shutdown snapshot.
+const btrfsWatchQuietPeriod = 2 * time.Second
+
+// btrfsSnapName builds a helper-safe snapshot name.
+func btrfsSnapName(prefix, folderID string) string {
+	id := btrfsSnapNameClean.ReplaceAllString(folderID, "-")
+	return fmt.Sprintf("%s-%s-%d", prefix, id, time.Now().UnixNano())
 }
