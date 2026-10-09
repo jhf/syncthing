@@ -155,6 +155,7 @@ func (f *folder) tryArmBtrfsScanReplay(ctx context.Context) bool {
 		close(f.initialScanFinished)
 	}
 	f.sl.InfoContext(ctx, "Skipping initial scan, applied btrfs snapshot diff", "changedPaths", len(paths))
+	f.fullScanOK.Store(true)
 	return true
 }
 
@@ -169,7 +170,10 @@ func (f *folder) shutdownBtrfsBaseline() {
 	if !f.btrfsOK || !f.FSWatcherEnabled {
 		return
 	}
-	if done, err := f.initialScanEverCompleted(); err != nil || !done {
+	// The pairing is only sound when the index is provably complete NOW:
+	// a run that neither armed the replay nor finished a full scan still
+	// carries staleness the watch drain cannot repair.
+	if !f.fullScanOK.Load() {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
