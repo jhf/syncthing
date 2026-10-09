@@ -96,7 +96,6 @@ type folder struct {
 	forcedRescanPathsMut  sync.Mutex
 
 	watchCancel      context.CancelFunc
-	monitorCancel    context.CancelFunc
 	watchChan        chan watchaggregator.Batch
 	restartWatchChan chan struct{}
 	watchErr         error
@@ -162,7 +161,6 @@ func newFolder(model *model, ignores *ignore.Matcher, cfg config.FolderConfigura
 		forcedRescanPaths:     make(map[string]struct{}),
 
 		watchCancel:      func() {},
-		monitorCancel:    func() {},
 		restartWatchChan: make(chan struct{}, 1),
 
 		versioner: ver,
@@ -232,15 +230,8 @@ func (f *folder) Serve(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			f.drainWatchQueueOnShutdown()
-			// Stop monitorWatch first so the shutdown pairing is the only
-			// consumer of watch batches; the aggregator and the underlying
-			// watch stay alive on their detached context until the Serve
-			// defer stops them.
-			f.watchMut.Lock()
-			f.monitorCancel()
-			f.watchMut.Unlock()
-			f.shutdownBtrfsBaseline()
 			close(f.done)
+			f.shutdownBtrfsBaseline()
 			return nil
 
 		case <-f.pullScheduled:
@@ -1465,7 +1456,6 @@ func (f *folder) WatchError() error {
 // stopWatch immediately aborts watching and may be called asynchronously
 func (f *folder) stopWatch() {
 	f.watchMut.Lock()
-	f.monitorCancel()
 	f.watchCancel()
 	f.watchMut.Unlock()
 	f.setWatchError(nil, 0)
@@ -1498,25 +1488,20 @@ func (f *folder) startWatch(ctx context.Context) {
 	// aggregator must stay alive while the btrfs shutdown pairing drains
 	// them (folder_btrfs.go); Serve's defer stopWatch tears them down.
 	watchCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	monitorCtx, monitorCancel := context.WithCancel(ctx)
 	f.watchMut.Lock()
 	f.watchChan = make(chan watchaggregator.Batch)
 	f.watchFlush = make(chan chan struct{})
 	f.watchCancel = cancel
-	f.monitorCancel = monitorCancel
 	f.watchMut.Unlock()
-	go f.monitorWatch(monitorCtx, watchCtx)
+	go f.monitorWatch(watchCtx)
 }
 
 // monitorWatch starts the filesystem watching and retries every minute on failure.
-// It should not be used except in startWatch. monitorCtx governs this
-// goroutine (stopped first at shutdown), watchCtx the aggregator and the
-// watch backend (detached from Serve, outliving it for the btrfs shutdown
-// pairing).
-func (f *folder) monitorWatch(monitorCtx, watchCtx context.Context) {
-	ctx := monitorCtx
+// It should not be used except in startWatch. Its context outlives Serve's
+// (see startWatch) so the btrfs shutdown pairing can drain the aggregator.
+func (f *folder) monitorWatch(ctx context.Context) {
 	failTimer := time.NewTimer(0)
-	aggrCtx, aggrCancel := context.WithCancel(watchCtx)
+	aggrCtx, aggrCancel := context.WithCancel(ctx)
 	var err error
 	var eventChan <-chan fs.Event
 	var errChan <-chan error
@@ -1539,7 +1524,7 @@ func (f *folder) monitorWatch(monitorCtx, watchCtx context.Context) {
 	for {
 		select {
 		case <-failTimer.C:
-			eventChan, errChan, err = f.mtimefs.Watch(".", f.ignores, watchCtx, f.IgnorePerms)
+			eventChan, errChan, err = f.mtimefs.Watch(".", f.ignores, ctx, f.IgnorePerms)
 			// We do this once per minute initially increased to
 			// max one hour in case of repeat failures.
 			f.scanOnWatchErr()
