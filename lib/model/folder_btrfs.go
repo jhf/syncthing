@@ -60,7 +60,10 @@ func (f *folder) btrfsReplayEligible(ctx context.Context) bool {
 		return f.btrfsOK
 	}
 	f.btrfsChecked = true
-	if !fs.BtrfsScanReplaySupported() {
+	if ok, err := fs.BtrfsScanReplaySupportedErr(); !ok {
+		if err != nil {
+			f.sl.InfoContext(ctx, "Btrfs scan replay not available", slogutil.Error(err))
+		}
 		return false
 	}
 	nested, err := fs.BtrfsScanNestedSubvols(ctx, f.Filesystem().URI())

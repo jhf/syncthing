@@ -67,6 +67,13 @@ func BtrfsScanReplaySupported() bool {
 	return ok
 }
 
+// BtrfsScanReplaySupportedErr is BtrfsScanReplaySupported with the reason,
+// for one-time diagnostics at folder start (a hardened systemd unit that
+// breaks sudo's setuid otherwise disables the feature silently).
+func BtrfsScanReplaySupportedErr() (bool, error) {
+	return btrfsHelperOnce()
+}
+
 // btrfsHelper runs the helper with the given subcommand.
 func btrfsHelper(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
