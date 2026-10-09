@@ -211,12 +211,12 @@ func (f *folder) shutdownBtrfsBaseline() {
 				f.sl.WarnContext(ctx, "Failed to record btrfs baseline marker", slogutil.Error(err))
 				return
 			}
-			f.sl.DebugContext(ctx, "Btrfs scan baseline paired with index at shutdown")
+			f.sl.InfoContext(ctx, "Btrfs scan baseline paired with index at shutdown")
 			return
 		}
 		_ = fs.BtrfsScanRemoveSnapshot(ctx, snap)
 	}
-	f.sl.DebugContext(ctx, "Btrfs baseline: filesystem busy, no clean pairing")
+	f.sl.InfoContext(ctx, "Btrfs baseline: no clean shutdown pairing, next boot does a full scan")
 }
 
 // drainWatch flushes and scans pending watch batches until none arrive for
