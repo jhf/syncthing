@@ -14,6 +14,7 @@ package fs
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"unicode/utf8"
 
 	"github.com/syncthing/notify"
@@ -78,7 +79,7 @@ func (f *BasicFilesystem) watchLoop(ctx context.Context, name string, roots []st
 			}
 			// When next scheduling a scan, do it on the entire folder as events have been lost.
 			outChan <- Event{Name: name, Type: NonRemove}
-			l.Debugln(f.Type(), f.URI(), "Watch: Event overflow, send \".\"")
+			slog.Info("Watch: Event overflow, send root scan", "path", name, "backendBuffer", backendBuffer)
 		}
 
 		select {
@@ -92,7 +93,7 @@ func (f *BasicFilesystem) watchLoop(ctx context.Context, name string, roots []st
 			// be trusted: report an error and tear the watch down.
 			switch class := watchEventClassify(ev); class {
 			case watchEventOverflow:
-				l.Debugln(f.Type(), f.URI(), "Watch: Backend dropped events, sending", name)
+				slog.Info("Watch: Backend dropped events, sending root scan", "flags", ev.Event().String(), "path", name)
 				select {
 				case outChan <- Event{Name: name, Type: NonRemove}:
 				case <-ctx.Done():
