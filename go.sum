@@ -132,8 +132,8 @@ github.com/jcmturner/gokrb5/v8 v8.4.4 h1:x1Sv4HaTpepFkXbt2IkL29DXRf8sOfZXo8eRKh6
 github.com/jcmturner/gokrb5/v8 v8.4.4/go.mod h1:1btQEpgT6k+unzCwX1KdWMEwPPkkgBtP+F6aCACiMrs=
 github.com/jcmturner/rpc/v2 v2.0.3 h1:7FXXj8Ti1IaVFpSAziCZWNzbNuZmnvw/i6CqLNdWfZY=
 github.com/jcmturner/rpc/v2 v2.0.3/go.mod h1:VUJYCIDm3PVOEHw8sgt091/20OJjskO/YJki3ELg/Hc=
-github.com/jhf/notify v0.0.0-20261013152350-1f2f7bb40679 h1:M/wbhUMFCXXnmF1MjwQQaeo1uRhm18sPGXuiAXFHm5M=
-github.com/jhf/notify v0.0.0-20261013152350-1f2f7bb40679/go.mod h1:J0q59IWjLtpRIJulohwqEZvjzwOfTEPp8SVhDJl+y0Y=
+github.com/jhf/notify v0.0.0-20261013185601-9a7d1dfd3338 h1:+jop91+2ic6tpJzNulSsxDiPIyLWtGEWlZDkyByg/9s=
+github.com/jhf/notify v0.0.0-20261013185601-9a7d1dfd3338/go.mod h1:J0q59IWjLtpRIJulohwqEZvjzwOfTEPp8SVhDJl+y0Y=
 github.com/jmespath/go-jmespath v0.4.0 h1:BEgLn5cpjn8UN1mAw4NjwDrS35OdebyEtFe+9YPoQUg=
 github.com/jmespath/go-jmespath v0.4.0/go.mod h1:T8mJZnbsbmF+m6zOOFylbeCJqk5+pHWvzYPziyZiYoo=
 github.com/jmespath/go-jmespath/internal/testify v1.5.1 h1:shLQSRRSCCPj3f2gpwzGwWFoC7ycTf1rcQZHOlsJ6N8=
