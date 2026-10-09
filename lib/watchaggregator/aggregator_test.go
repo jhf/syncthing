@@ -298,7 +298,7 @@ func testScenario(t *testing.T, name string, testCase func(c chan<- fs.Event), e
 	a.notifyTimeout = testNotifyTimeout
 
 	startTime := time.Now()
-	go a.mainLoop(eventChan, watchChan, defaultCfg, evLogger)
+	go a.mainLoop(eventChan, watchChan, nil, defaultCfg, evLogger)
 
 	sleepMs(20)
 
@@ -386,7 +386,7 @@ func TestAggregateMaxEventID(t *testing.T) {
 	a := newAggregator(ctx, folderCfg)
 	a.notifyTimeout = testNotifyTimeout
 
-	go a.mainLoop(eventChan, watchChan, defaultCfg, events.NoopLogger)
+	go a.mainLoop(eventChan, watchChan, nil, defaultCfg, events.NoopLogger)
 	sleepMs(20)
 
 	go func() {
@@ -415,5 +415,63 @@ func TestAggregateMaxEventID(t *testing.T) {
 	}
 	if batches[1].MaxEventID != 9 {
 		t.Errorf("watermark on final sub-batch = %d, expected 9 (max of 5 and 9)", batches[1].MaxEventID)
+	}
+}
+
+// TestAggregateFlush verifies that the flush channel forces pending events
+// out immediately, without waiting out the batching delay - the shutdown
+// drain of the btrfs scan replay depends on it.
+func TestAggregateFlush(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	eventChan := make(chan fs.Event)
+	watchChan := make(chan Batch)
+	flushChan := make(chan chan struct{})
+
+	folderCfg := defaultFolderCfg.Copy()
+	folderCfg.ID = "flush"
+	a := newAggregator(ctx, folderCfg)
+	a.notifyTimeout = testNotifyTimeout
+
+	go a.mainLoop(eventChan, watchChan, flushChan, defaultCfg, events.NoopLogger)
+	sleepMs(20)
+
+	// An event sits in the aggregator, younger than the batching delay.
+	eventChan <- fs.Event{Name: "file.txt", Type: fs.NonRemove}
+	sleepMs(20)
+
+	// Flush; the batch must arrive well before the ~1s delay would allow.
+	ack := make(chan struct{})
+	select {
+	case flushChan <- ack:
+	case <-time.After(time.Second):
+		t.Fatal("flush channel not serviced")
+	}
+	select {
+	case b := <-watchChan:
+		if len(b.Paths) != 1 || b.Paths[0] != "file.txt" {
+			t.Fatalf("unexpected flushed batch: %v", b.Paths)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("flush did not emit the pending event")
+	}
+	select {
+	case <-ack:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("flush ack not closed")
+	}
+
+	// A second flush with nothing pending must still ack and emit nothing.
+	ack2 := make(chan struct{})
+	flushChan <- ack2
+	select {
+	case <-ack2:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("empty flush ack not closed")
+	}
+	select {
+	case b := <-watchChan:
+		t.Fatalf("empty flush emitted a batch: %v", b.Paths)
+	case <-time.After(200 * time.Millisecond):
 	}
 }

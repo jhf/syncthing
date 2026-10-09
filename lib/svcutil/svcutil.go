@@ -20,6 +20,38 @@ import (
 
 const ServiceTimeout = 10 * time.Second
 
+// ShutdownBudget is the time a folder may spend on its shutdown work (e.g.
+// pairing the btrfs baseline), shared by all of it. ShutdownServiceTimeout
+// is how long the supervisors on the folder path (main -> model -> folder
+// runners) wait before abandoning a stopping service: the budget plus a
+// bounded cleanup and margin. Before this the supervisors abandoned the
+// folder after ServiceTimeout, mid-pairing, and the process exited with
+// "Database failed to stop within 10s".
+//
+// The budget is sized from measured pairing barriers on yarlung (20
+// pairings, 2026-11-25 to 11-27): median 0.28 s, but the barrier's rescan
+// of recently written paths took 47.9 s (01:35, a shutdown pairing that the
+// 50 s budget cut off) and 70.1 s (03:09, a post-replay pairing that
+// completed). A shutdown pairing that misses the budget costs the next
+// boot a diff against an older runtime baseline, or a full walk when
+// there is none, so the budget covers the largest observed barrier with
+// headroom: 120 s.
+//
+// StopTimeout is the whole stop: the supervisors' wait, then the database
+// close (DatabaseCloseTimeout, lib/syncthing's 10 s wait), the pull churn
+// capture stop and the final log flush (2 s each in cmd/syncthing,
+// ExitFlushTimeout), plus margin. The service manager's stop timeout must
+// be at least this (TimeoutStopSec in the systemd drop-in installed by
+// ops/custom-syncthing/btrfs/install.sh, pinned by a test).
+const (
+	ShutdownBudget         = 120 * time.Second
+	ShutdownCleanupTimeout = 10 * time.Second
+	ShutdownServiceTimeout = ShutdownBudget + ShutdownCleanupTimeout + 5*time.Second
+	DatabaseCloseTimeout   = 10 * time.Second
+	ExitFlushTimeout       = 2*time.Second + 2*time.Second
+	StopTimeout            = ShutdownServiceTimeout + DatabaseCloseTimeout + ExitFlushTimeout + 11*time.Second
+)
+
 type FatalErr struct {
 	Err    error
 	Status ExitStatus
@@ -165,6 +197,21 @@ func SpecWithDebugLogger() suture.Spec {
 
 func SpecWithInfoLogger() suture.Spec {
 	return spec(infoEventHook())
+}
+
+// SpecWithShutdownBudget is SpecWithDebugLogger for supervisors on the
+// folder path: they wait ShutdownServiceTimeout for a stopping service, and
+// an abandoned service is logged at INFO (it was invisible at debug).
+func SpecWithShutdownBudget() suture.Spec {
+	s := spec(func(e suture.Event) {
+		if st, ok := e.(suture.EventStopTimeout); ok {
+			slog.Info("Service did not stop within the shutdown timeout, abandoned", "supervisor", st.SupervisorName, "service", st.ServiceName, "timeout", ShutdownServiceTimeout)
+			return
+		}
+		slog.Debug(e.String())
+	})
+	s.Timeout = ShutdownServiceTimeout
+	return s
 }
 
 func spec(eventHook suture.EventHook) suture.Spec {
