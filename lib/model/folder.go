@@ -720,6 +720,9 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 		pullErr := f.serviceQueuedPull(ctx)
 		watchErr := f.serviceQueuedWatch(ctx)
 		limitErr := f.ioLimiter.TakeWithContext(ctx, 1)
+		// The next chunk iteration restores the FolderScanning label that a
+		// serviced pull moved; the sweep loop below has no such per-iteration
+		// restore and needs its own.
 		if pullErr != nil {
 			return pullErr
 		}
@@ -1129,6 +1132,13 @@ outer:
 				watchErr := f.serviceQueuedWatch(ctx)
 				limitErr := f.ioLimiter.TakeWithContext(ctx, 1)
 				budget.Reset(scanChunkBudget)
+				// The serviced pull moved the folder state (sync-preparing
+				// etc.), but this sweep is still running and, unlike the walk
+				// loop, does not set FolderScanning per iteration: restore the
+				// label here or the GUI reports e.g. "Preparing to Sync" for
+				// the rest of the sweep (observed: label stuck for the
+				// remaining 862s of a full sweep while all work was scan work).
+				f.setState(FolderScanning)
 				if pullErr != nil {
 					return changes, pullErr
 				}
