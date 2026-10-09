@@ -106,6 +106,10 @@ type folder struct {
 	// can tell whether a startup did a full walk or resumed from the
 	// filesystem journal.
 	fullScanCount atomic.Int64
+	// fullScanOK is true iff the index is provably complete right now: set
+	// when a full scan (or an armed replay) completes, cleared whenever a
+	// full scan starts. The btrfs shutdown pairing requires it.
+	fullScanOK atomic.Bool
 	// lastReplayWatermark is the last persisted FSEvents journal position,
 	// used to throttle KV writes (persist only on advancement).
 	lastReplayWatermark atomic.Uint64
@@ -604,6 +608,10 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 	f.sl.DebugContext(ctx, "Scanning")
 	if subDirs == nil {
 		f.fullScanCount.Add(1)
+		// A full scan in progress means the index is not currently
+		// provably complete; the btrfs shutdown pairing keys off this
+		// (folder_btrfs.go). Re-set only on success below.
+		f.fullScanOK.Store(false)
 	}
 
 	oldHash := f.ignores.Hash()
@@ -755,6 +763,9 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 	}
 
 	f.ScanCompleted()
+	if subDirs == nil || (len(subDirs) == 1 && subDirs[0] == "") {
+		f.fullScanOK.Store(true)
+	}
 	return nil
 }
 
