@@ -168,14 +168,17 @@ func (f *folder) tryArmBtrfsScanReplay(ctx context.Context) bool {
 // context outlives Serve's); it is stopped by Serve's defer afterwards.
 func (f *folder) shutdownBtrfsBaseline() {
 	if !f.btrfsOK || !f.FSWatcherEnabled {
+		f.sl.InfoContext(context.Background(), "Btrfs baseline: skipping pairing", "btrfsOK", f.btrfsOK, "fsWatcher", f.FSWatcherEnabled)
 		return
 	}
 	// The pairing is only sound when the index is provably complete NOW:
 	// a run that neither armed the replay nor finished a full scan still
 	// carries staleness the watch drain cannot repair.
 	if !f.fullScanOK.Load() {
+		f.sl.InfoContext(context.Background(), "Btrfs baseline: skipping pairing, index not provably complete")
 		return
 	}
+	f.sl.InfoContext(context.Background(), "Btrfs baseline: attempting shutdown pairing")
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
