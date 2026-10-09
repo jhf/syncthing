@@ -19,12 +19,16 @@ func BtrfsScanReplaySupported() bool { return false }
 
 func BtrfsScanBaselineOK(context.Context) (bool, error) { return false, errBtrfsReplayUnsupported }
 
-func BtrfsScanRefresh(context.Context) error { return errBtrfsReplayUnsupported }
+func BtrfsScanSnapshot(context.Context, string) error { return errBtrfsReplayUnsupported }
 
-func BtrfsScanPromote(context.Context) error { return errBtrfsReplayUnsupported }
+func BtrfsScanSetBaseline(context.Context, string) error { return errBtrfsReplayUnsupported }
+
+func BtrfsScanRemoveSnapshot(context.Context, string) error { return errBtrfsReplayUnsupported }
 
 func BtrfsScanNestedSubvols(context.Context, string) ([]string, error) {
 	return nil, errBtrfsReplayUnsupported
 }
 
-func BtrfsScanDiff(context.Context, string) ([]string, error) { return nil, errBtrfsReplayUnsupported }
+func BtrfsScanDiffBaseline(context.Context, string, string) ([]string, error) {
+	return nil, errBtrfsReplayUnsupported
+}

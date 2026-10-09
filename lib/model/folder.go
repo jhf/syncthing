@@ -71,9 +71,14 @@ type folder struct {
 	versionCleanupTimer    *time.Timer
 
 	// btrfs scan replay state; serve goroutine only (folder_btrfs.go).
-	btrfsChecked             bool
-	btrfsOK                  bool
-	lastBtrfsBaselineRefresh time.Time
+	btrfsChecked bool
+	btrfsOK      bool
+	// btrfsCleanStart is set at Serve start when the previous shutdown left
+	// a paired, provably consistent baseline+index (see folder_btrfs.go).
+	btrfsCleanStart bool
+	// watchFlush asks the aggregator to emit pending batches immediately;
+	// the shutdown pairing drains the watch through it.
+	watchFlush chan chan struct{}
 
 	pullScheduled chan struct{}
 	pullPause     time.Duration
@@ -90,6 +95,7 @@ type folder struct {
 	forcedRescanPathsMut  sync.Mutex
 
 	watchCancel      context.CancelFunc
+	monitorCancel    context.CancelFunc
 	watchChan        chan watchaggregator.Batch
 	restartWatchChan chan struct{}
 	watchErr         error
@@ -151,6 +157,7 @@ func newFolder(model *model, ignores *ignore.Matcher, cfg config.FolderConfigura
 		forcedRescanPaths:     make(map[string]struct{}),
 
 		watchCancel:      func() {},
+		monitorCancel:    func() {},
 		restartWatchChan: make(chan struct{}, 1),
 
 		versioner: ver,
@@ -179,10 +186,17 @@ func (f *folder) Serve(ctx context.Context) error {
 		f.setState(FolderIdle)
 	}()
 
+	// The watch context is detached from this one (see startWatch) so the
+	// btrfs shutdown pairing can run with the watch still alive; tear it
+	// down when Serve returns.
+	defer f.stopWatch()
+
 	if err := f.reconcileBlockIndex(ctx); err != nil {
 		f.setError(ctx, err)
 		return err // will get restarted by suture
 	}
+
+	f.btrfsCleanStart = f.consumeBtrfsBaselineMarker(ctx)
 
 	if f.FSWatcherEnabled && f.getHealthErrorAndLoadIgnores() == nil {
 		f.tryArmWatchReplay(ctx)
@@ -212,6 +226,14 @@ func (f *folder) Serve(ctx context.Context) error {
 
 		select {
 		case <-ctx.Done():
+			// Stop monitorWatch first so the shutdown pairing is the only
+			// consumer of watch batches; the aggregator and the underlying
+			// watch stay alive on their detached context until the Serve
+			// defer stops them.
+			f.watchMut.Lock()
+			f.monitorCancel()
+			f.watchMut.Unlock()
+			f.shutdownBtrfsBaseline()
 			close(f.done)
 			return nil
 
@@ -277,7 +299,6 @@ func (f *folder) Serve(ctx context.Context) error {
 			err = f.scanSubdirs(ctx, fsEvents.Paths)
 			if err == nil {
 				f.persistWatchReplayWatermark(fsEvents.MaxEventID)
-				f.refreshBtrfsBaseline(ctx, false)
 			}
 
 		case <-f.restartWatchChan:
@@ -559,7 +580,6 @@ func (f *folder) serviceQueuedWatch(ctx context.Context) error {
 		err := f.scanSubdirs(ctx, fsEvents.Paths)
 		if err == nil {
 			f.persistWatchReplayWatermark(fsEvents.MaxEventID)
-			f.refreshBtrfsBaseline(ctx, false)
 		}
 		return err
 	default:
@@ -1367,9 +1387,6 @@ func (f *folder) scanTimerFired(ctx context.Context) error {
 		switch {
 		case err == nil:
 			f.sl.InfoContext(ctx, "Completed initial scan")
-			// The index is now complete; pin the btrfs baseline here so a
-			// later restart can diff against it.
-			f.refreshBtrfsBaseline(ctx, true)
 			// Record that this folder once completed an initial scan. After a
 			// restart this is what lets pulls run while the re-scan is still
 			// in progress (see pull); a failure to record it costs one more
@@ -1416,6 +1433,7 @@ func (f *folder) WatchError() error {
 // stopWatch immediately aborts watching and may be called asynchronously
 func (f *folder) stopWatch() {
 	f.watchMut.Lock()
+	f.monitorCancel()
 	f.watchCancel()
 	f.watchMut.Unlock()
 	f.setWatchError(nil, 0)
@@ -1444,19 +1462,29 @@ func (f *folder) restartWatch(ctx context.Context) error {
 // startWatch should only ever be called synchronously. If you want to use
 // this asynchronously, you should probably use scheduleWatchRestart instead.
 func (f *folder) startWatch(ctx context.Context) {
-	watchCtx, cancel := context.WithCancel(ctx)
+	// Detach the watch from Serve's context: on shutdown the watch and the
+	// aggregator must stay alive while the btrfs shutdown pairing drains
+	// them (folder_btrfs.go); Serve's defer stopWatch tears them down.
+	watchCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	monitorCtx, monitorCancel := context.WithCancel(ctx)
 	f.watchMut.Lock()
 	f.watchChan = make(chan watchaggregator.Batch)
+	f.watchFlush = make(chan chan struct{})
 	f.watchCancel = cancel
+	f.monitorCancel = monitorCancel
 	f.watchMut.Unlock()
-	go f.monitorWatch(watchCtx)
+	go f.monitorWatch(monitorCtx, watchCtx)
 }
 
 // monitorWatch starts the filesystem watching and retries every minute on failure.
-// It should not be used except in startWatch.
-func (f *folder) monitorWatch(ctx context.Context) {
+// It should not be used except in startWatch. monitorCtx governs this
+// goroutine (stopped first at shutdown), watchCtx the aggregator and the
+// watch backend (detached from Serve, outliving it for the btrfs shutdown
+// pairing).
+func (f *folder) monitorWatch(monitorCtx, watchCtx context.Context) {
+	ctx := monitorCtx
 	failTimer := time.NewTimer(0)
-	aggrCtx, aggrCancel := context.WithCancel(ctx)
+	aggrCtx, aggrCancel := context.WithCancel(watchCtx)
 	var err error
 	var eventChan <-chan fs.Event
 	var errChan <-chan error
@@ -1479,7 +1507,7 @@ func (f *folder) monitorWatch(ctx context.Context) {
 	for {
 		select {
 		case <-failTimer.C:
-			eventChan, errChan, err = f.mtimefs.Watch(".", f.ignores, ctx, f.IgnorePerms)
+			eventChan, errChan, err = f.mtimefs.Watch(".", f.ignores, watchCtx, f.IgnorePerms)
 			// We do this once per minute initially increased to
 			// max one hour in case of repeat failures.
 			f.scanOnWatchErr()
@@ -1492,7 +1520,7 @@ func (f *folder) monitorWatch(ctx context.Context) {
 				continue
 			}
 			lastWatch = time.Now()
-			watchaggregator.Aggregate(aggrCtx, eventChan, f.watchChan, f.FolderConfiguration, f.model.cfg, f.evLogger)
+			watchaggregator.AggregateWithFlush(aggrCtx, eventChan, f.watchChan, f.watchFlush, f.FolderConfiguration, f.model.cfg, f.evLogger)
 			f.sl.DebugContext(ctx, "Started filesystem watcher")
 		case err = <-errChan:
 			// The watch is dead; events between its death and the re-watch
