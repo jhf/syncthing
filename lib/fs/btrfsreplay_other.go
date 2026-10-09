@@ -17,6 +17,8 @@ var errBtrfsReplayUnsupported = errors.New("btrfs scan replay not available")
 
 func BtrfsScanReplaySupported() bool { return false }
 
+func BtrfsScanReplaySupportedErr() (bool, error) { return false, errBtrfsReplayUnsupported }
+
 func BtrfsScanBaselineOK(context.Context) (bool, error) { return false, errBtrfsReplayUnsupported }
 
 func BtrfsScanSnapshot(context.Context, string) error { return errBtrfsReplayUnsupported }
