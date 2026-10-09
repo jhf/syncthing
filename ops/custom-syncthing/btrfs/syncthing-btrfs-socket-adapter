@@ -1,0 +1,18 @@
+#!/bin/bash
+# systemd socket-activated adapter for syncthing-btrfs-helper (Accept=true:
+# one instance per connection, socket on stdin/stdout). Reads ONE request
+# line ("<verb> [name...]"), hands it to the helper, which owns all
+# validation (fixed verb list, name charset, baseline protection), then
+# appends a status trailer "\x00status=<exitcode>\n" so a failed helper can
+# never pass as silent success. The request is logged to the journal for
+# audit, like sudo does.
+set -u
+if ! IFS=" " read -r -a argv; then
+    printf "\0status=1\n"
+    exit 0
+fi
+echo "request: ${argv[*]}" >&2
+/usr/local/sbin/syncthing-btrfs-helper "${argv[@]}"
+rc=$?
+printf "\0status=%d\n" "$rc"
+exit 0
