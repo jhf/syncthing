@@ -193,10 +193,14 @@ func (f *folder) shutdownBtrfsBaseline() {
 			f.sl.DebugContext(ctx, "Btrfs baseline: snapshot failed", slogutil.Error(err))
 			return
 		}
-		// Changes after the drain must show up as new events; scanning them
-		// would move the index past the snapshot, so discard instead and
-		// retry with a fresh snapshot.
-		if f.awaitWatchQuiet(ctx) {
+		// Any change after the drain shows up as a new batch; scanning it is
+		// harmless (the retry's snapshot includes it) but means this snapshot
+		// is not paired with a quiet index, so retry with a fresh one.
+		quiet, ok := f.settleWatch(ctx)
+		if !ok {
+			return
+		}
+		if quiet {
 			if err := fs.BtrfsScanSetBaseline(ctx, snap); err != nil {
 				f.sl.DebugContext(ctx, "Btrfs baseline: setbaseline failed", slogutil.Error(err))
 				return
@@ -217,21 +221,15 @@ func (f *folder) shutdownBtrfsBaseline() {
 
 // drainWatch flushes and scans pending watch batches until none arrive for
 // btrfsWatchQuietPeriod after a flush. Returns false on timeout/cancel.
+// Note the aggregator emits flushed batches BEFORE closing the flush ack,
+// so batches must be received while waiting for the ack.
 func (f *folder) drainWatch(ctx context.Context) bool {
 	for {
-		ack := make(chan struct{})
-		select {
-		case f.watchFlush <- ack:
-		case <-ctx.Done():
-			return false
-		default:
-			// Aggregator not running (watch failed or was never started):
-			// no clean pairing is possible.
+		ack, ok := f.requestWatchFlush(ctx)
+		if !ok {
 			return false
 		}
-		select {
-		case <-ack:
-		case <-ctx.Done():
+		if !f.scanUntilAck(ctx, ack) {
 			return false
 		}
 		select {
@@ -247,32 +245,70 @@ func (f *folder) drainWatch(ctx context.Context) bool {
 	}
 }
 
-// awaitWatchQuiet reports whether no watch events arrive for
-// btrfsWatchQuietPeriod after a flush. Arriving batches are DISCARDED, not
-// scanned: they postdate the snapshot, and leaving them out of the index is
-// exactly what the next boot's diff expects.
-func (f *folder) awaitWatchQuiet(ctx context.Context) bool {
-	ack := make(chan struct{})
-	select {
-	case f.watchFlush <- ack:
-	case <-ctx.Done():
-		return false
-	default:
-		return false
+// settleWatch is the post-snapshot quiet check: flush once, scan whatever
+// still arrives (harmless: the retry's snapshot includes those changes),
+// and report whether the flush window plus btrfsWatchQuietPeriod passed
+// with zero batches. Only then does index == disk(snapshot).
+func (f *folder) settleWatch(ctx context.Context) (quiet, ok bool) {
+	ack, ok := f.requestWatchFlush(ctx)
+	if !ok {
+		return false, false
 	}
-	select {
-	case <-ack:
-	case <-ctx.Done():
-		return false
+	quiet = true
+	for a := ack; a != nil; {
+		select {
+		case batch := <-f.watchChan:
+			quiet = false
+			if err := f.scanSubdirs(ctx, batch.Paths); err != nil {
+				return false, false
+			}
+		case <-a:
+			a = nil
+		case <-ctx.Done():
+			return false, false
+		}
 	}
 	select {
 	case batch := <-f.watchChan:
-		f.sl.DebugContext(ctx, "Btrfs baseline: discarding post-snapshot batch", "paths", len(batch.Paths))
-		return false
+		quiet = false
+		if err := f.scanSubdirs(ctx, batch.Paths); err != nil {
+			return false, false
+		}
 	case <-time.After(btrfsWatchQuietPeriod):
-		return true
 	case <-ctx.Done():
-		return false
+		return false, false
+	}
+	return quiet, true
+}
+
+// requestWatchFlush asks the aggregator to emit pending batches immediately.
+func (f *folder) requestWatchFlush(ctx context.Context) (chan struct{}, bool) {
+	ack := make(chan struct{})
+	select {
+	case f.watchFlush <- ack:
+		return ack, true
+	case <-ctx.Done():
+		return nil, false
+	default:
+		// Aggregator not running (watch failed or was never started):
+		// no clean pairing is possible.
+		return nil, false
+	}
+}
+
+// scanUntilAck scans watch batches until the flush ack closes.
+func (f *folder) scanUntilAck(ctx context.Context, ack chan struct{}) bool {
+	for {
+		select {
+		case batch := <-f.watchChan:
+			if err := f.scanSubdirs(ctx, batch.Paths); err != nil {
+				return false
+			}
+		case <-ack:
+			return true
+		case <-ctx.Done():
+			return false
+		}
 	}
 }
 
