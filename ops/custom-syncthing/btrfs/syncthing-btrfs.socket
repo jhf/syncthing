@@ -1,0 +1,11 @@
+[Unit]
+Description=Syncthing btrfs helper socket
+
+[Socket]
+ListenStream=/run/syncthing-btrfs.sock
+SocketMode=0660
+SocketGroup=jhf
+Accept=true
+
+[Install]
+WantedBy=sockets.target
