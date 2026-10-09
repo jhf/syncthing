@@ -177,7 +177,7 @@ func TestWatchEventClassify(t *testing.T) {
 		notify.FSEventsUserDropped,
 		notify.FSEventsKernelDropped,
 		notify.FSEventsModified | notify.FSEventsMustScanSubDirs, // combined
-		notify.FSEventsModified | notify.FSEventsUserDropped,    // combined
+		notify.FSEventsModified | notify.FSEventsUserDropped,     // combined
 	}
 	for _, e := range overflow {
 		if class := watchEventClassify(fakeNotifyEventInfo{e}); class != watchEventOverflow {
