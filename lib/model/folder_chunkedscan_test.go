@@ -12,12 +12,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/scanner"
+	"github.com/syncthing/syncthing/lib/watchaggregator"
 )
 
 // liveLocalNames returns the names of the local files that are present and not deleted, which is
-// what a scan is expected to bring in line with the filesystem.
+// what a scan is expected to bring in line with the filesystem. Names are normalized to slash
+// form: the database stores native names, which differ on Windows.
 func liveLocalNames(t *testing.T, m *model, folder string) map[string]struct{} {
 	t.Helper()
 	names := make(map[string]struct{})
@@ -26,7 +29,7 @@ func liveLocalNames(t *testing.T, m *model, folder string) map[string]struct{} {
 		if fi.IsDeleted() || fi.IsDirectory() {
 			continue
 		}
-		names[fi.Name] = struct{}{}
+		names[osutil.NormalizedFilename(fi.Name)] = struct{}{}
 	}
 	if err := errFn(); err != nil {
 		t.Fatal(err)
@@ -60,11 +63,11 @@ func TestScanChunkedServicesWatchEvents(t *testing.T) {
 	writeFile(t, ffs, "b/file2", []byte("b"))
 
 	// The watch channel is normally created by startWatch, which is not running here.
-	f.watchChan = make(chan []string)
+	f.watchChan = make(chan watchaggregator.Batch)
 	delivered := make(chan struct{})
 	go func() {
 		select {
-		case f.watchChan <- []string{"b"}:
+		case f.watchChan <- watchaggregator.Batch{Paths: []string{"b"}}:
 			close(delivered)
 		case <-ctx.Done():
 		}
@@ -102,7 +105,6 @@ func TestScanChunkedBoundaryWithoutResults(t *testing.T) {
 	// Not parallel: mutates a package-level budget.
 	old := scanChunkBudget
 	defer func() { scanChunkBudget = old }()
-	scanChunkBudget = 5 * time.Millisecond
 
 	_, f := setupSendReceiveFolder(t)
 	ffs := f.Filesystem()
@@ -111,18 +113,24 @@ func TestScanChunkedBoundaryWithoutResults(t *testing.T) {
 	// Enough files that walking them unchanged takes clearly longer than the budget.
 	must(t, ffs.MkdirAll("d", 0o755))
 	for i := range 2000 {
-		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte("x"))
+		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte(fmt.Sprintf("x-%d", i)))
 	}
 	must(t, f.scanSubdirs(ctx, nil))
+
+	// The tiny budget applies only to the unchanged re-walk below. Setting it before
+	// the initial scan would chunk the first hashing pass over all files too, which
+	// is setup cost, not subject - and on slow runners that cost alone blew the
+	// package timeout (Linux CI: 29s for this test in isolation, worse under load).
+	scanChunkBudget = 5 * time.Millisecond
 
 	must(t, ffs.MkdirAll("d2", 0o755))
 	writeFile(t, ffs, "d2/new", []byte("y"))
 
-	f.watchChan = make(chan []string)
+	f.watchChan = make(chan watchaggregator.Batch)
 	delivered := make(chan struct{})
 	go func() {
 		select {
-		case f.watchChan <- []string{"d2"}:
+		case f.watchChan <- watchaggregator.Batch{Paths: []string{"d2"}}:
 			close(delivered)
 		case <-ctx.Done():
 		}
@@ -160,7 +168,7 @@ func TestScanChunkMarkerAdvancesThroughSilence(t *testing.T) {
 	// exactly the case that regressed. It must also be small enough to set up quickly,
 	// because hashing the initial scan dominates the test time.
 	for i := range 2000 {
-		writeFile(t, ffs, fmt.Sprintf("d/f%05d", i), []byte("x"))
+		writeFile(t, ffs, fmt.Sprintf("d/f%05d", i), []byte(fmt.Sprintf("x-%d", i)))
 	}
 	must(t, f.scanSubdirs(ctx, nil))
 
@@ -256,27 +264,39 @@ func TestScanChunkMarkerPassesErroringEntry(t *testing.T) {
 	// visits it - it can never be indexed, so it errors persistently. It sorts between the
 	// a* and z* files. (The folder filesystem in these tests is the in-memory fakefs, where
 	// permission bits are not enforced, so an unreadable directory would not error.)
-	bad := "d/b\xad"
+	// Markers are compared in native form: walk paths use the OS separator.
+	bad := osutil.NativeFilename("d/b\xad")
 	must(t, ffs.MkdirAll("d", 0o755))
 	for i := range 10 {
-		writeFile(t, ffs, fmt.Sprintf("d/a%03d", i), []byte("x"))
+		writeFile(t, ffs, fmt.Sprintf("d/a%03d", i), []byte(fmt.Sprintf("x-%d", i)))
 	}
 	writeFile(t, ffs, bad, []byte("x"))
 	for i := range 2000 {
-		writeFile(t, ffs, fmt.Sprintf("d/z%04d", i), []byte("x"))
+		writeFile(t, ffs, fmt.Sprintf("d/z%04d", i), []byte(fmt.Sprintf("x-%d", i)))
 	}
 	must(t, f.scanSubdirs(ctx, nil))
 
 	// Resume just before the erroring entry: the catch-up is a handful of skipped entries,
-	// so a 20ms budget lands deep in the z* stretch - past the error, well short of the
+	// so a small budget lands deep in the z* stretch - past the error, well short of the
 	// whole tree, and with nothing applied in between. The marker must then be past the
 	// erroring entry: holding errors the way aborts are held would park the marker on the
 	// erroring entry itself (the minimum of nothing applied and the one error report).
-	batch := f.newScanBatch()
-	_, last, more, _, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, "d/a005", 20*time.Millisecond)
-	must(t, err)
-	if !more {
-		t.Fatal("the 20ms budget walked the whole tree; the test setup is too fast to be meaningful")
+	// How small a budget actually cuts the walk depends on the runner, so halve from 20ms
+	// until the walk does not finish; the a* catch-up and the error take microseconds, so
+	// any real cut lands in the z* stretch.
+	var last string
+	var more bool
+	for budget := 20 * time.Millisecond; ; budget /= 2 {
+		batch := f.newScanBatch()
+		var err error
+		_, last, more, _, err = f.scanSubdirsChangedAndNew(ctx, nil, batch, osutil.NativeFilename("d/a005"), budget)
+		must(t, err)
+		if more {
+			break
+		}
+		if budget < time.Millisecond {
+			t.Fatal("even a sub-millisecond budget walked the whole tree; the test setup is too fast to be meaningful")
+		}
 	}
 	if !scanner.WalkOrderLess(bad, last) {
 		t.Fatalf("the marker did not advance past the erroring entry (last=%q)", last)
@@ -318,26 +338,30 @@ func TestScanChunkAppliesChangedFilesBeforeCut(t *testing.T) {
 
 	must(t, ffs.MkdirAll("d", 0o755))
 	for i := range 2000 {
-		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte("x"))
+		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte(fmt.Sprintf("x-%d", i)))
 	}
 	must(t, f.scanSubdirs(ctx, nil))
 
-	// Change a handful of files at the start of the walk.
-	for i := range 30 {
-		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte("y"))
-	}
-
 	// A budget that cuts the walk mid-tree. The changed files were handed over at the very
-	// start, and their results must be applied, not aborted.
+	// start, and their results must be applied, not aborted. On a loaded runner the 5ms
+	// budget can expire before the first result arrives, which says nothing about the
+	// property under test - so retry with fresh changes a few times, and require one cut
+	// that happened after results started flowing.
 	batch := f.newScanBatch()
-	changes, _, more, _, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, "", 5*time.Millisecond)
-	must(t, err)
-	if !more {
-		t.Fatal("the 5ms budget walked the whole tree; the test setup is too fast to be meaningful")
+	for attempt := range 5 {
+		for i := range 30 {
+			writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte(fmt.Sprintf("y-%d-%d", attempt, i)))
+		}
+		changes, _, more, _, err := f.scanSubdirsChangedAndNew(ctx, nil, batch, "", 5*time.Millisecond)
+		must(t, err)
+		if !more {
+			t.Fatal("the 5ms budget walked the whole tree; the test setup is too fast to be meaningful")
+		}
+		if changes > 0 {
+			return
+		}
 	}
-	if changes == 0 {
-		t.Fatal("a chunk cut mid-walk applied none of the changed files it found: the handovers were buffered until the walk ended and then aborted wholesale")
-	}
+	t.Fatal("a chunk cut mid-walk applied none of the changed files it found, five times in a row: the handovers were buffered until the walk ended and then aborted wholesale")
 }
 
 // TestScanChunkedDeliversEverything forces the walk to yield over and over by shrinking the chunk
@@ -432,7 +456,6 @@ func TestScanSweepServicesWatch(t *testing.T) {
 	// Not parallel: mutates a package-level budget.
 	old := scanChunkBudget
 	defer func() { scanChunkBudget = old }()
-	scanChunkBudget = 5 * time.Millisecond
 
 	_, f := setupSendReceiveFolder(t)
 	ffs := f.Filesystem()
@@ -442,18 +465,22 @@ func TestScanSweepServicesWatch(t *testing.T) {
 	// budget expires mid-sweep, long after the (empty) walk has finished.
 	must(t, ffs.MkdirAll("d", 0o755))
 	for i := range 2000 {
-		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte("x"))
+		writeFile(t, ffs, fmt.Sprintf("d/f%04d", i), []byte(fmt.Sprintf("x-%d", i)))
 	}
 	must(t, f.scanSubdirs(ctx, nil))
+
+	// The tiny budget applies only from here on; setting it before the initial scan would
+	// chunk the first hashing pass over all files, which is setup cost, not subject.
+	scanChunkBudget = 5 * time.Millisecond
 
 	must(t, ffs.MkdirAll("d2", 0o755))
 	writeFile(t, ffs, "d2/new", []byte("y"))
 
-	f.watchChan = make(chan []string)
+	f.watchChan = make(chan watchaggregator.Batch)
 	delivered := make(chan struct{})
 	go func() {
 		select {
-		case f.watchChan <- []string{"d2"}:
+		case f.watchChan <- watchaggregator.Batch{Paths: []string{"d2"}}:
 			close(delivered)
 		case <-ctx.Done():
 		}

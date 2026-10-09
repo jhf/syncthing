@@ -27,6 +27,7 @@ import (
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/ignore"
+	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/rand"
 )
@@ -1041,7 +1042,8 @@ func TestWalkResumeFrom(t *testing.T) {
 		defer cancel()
 		cfg.Filesystem = fsys
 		cfg.Subs = nil
-		cfg.ResumeFrom = marker
+		// Walk paths use the OS separator; the marker literals are slash form.
+		cfg.ResumeFrom = osutil.NativeFilename(marker)
 
 		var names []string
 		for res := range Walk(context.Background(), cfg) {
@@ -1051,7 +1053,7 @@ func TestWalkResumeFrom(t *testing.T) {
 			if res.File.IsDirectory() {
 				continue
 			}
-			names = append(names, res.File.Name)
+			names = append(names, osutil.NormalizedFilename(res.File.Name))
 		}
 		slices.Sort(names)
 		return names
