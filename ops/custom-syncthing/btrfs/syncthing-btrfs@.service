@@ -1,0 +1,29 @@
+[Unit]
+Description=Syncthing btrfs helper connection
+
+[Service]
+Type=exec
+ExecStart=/usr/local/sbin/syncthing-btrfs-socket-adapter
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/.snapshots/syncthing
+PrivateTmp=true
+PrivateDevices=true
+DevicePolicy=closed
+PrivateNetwork=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+MemoryDenyWriteExecute=true
+LockPersonality=true
+RestrictRealtime=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectClock=true
