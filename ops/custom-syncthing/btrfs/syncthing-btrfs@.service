@@ -1,0 +1,50 @@
+[Unit]
+Description=Syncthing btrfs helper connection
+# Must stay startable while syncthing@ stops: syncthing's shutdown pairing
+# snapshots through this helper. With the default dependencies every
+# instance (and the auto-generated system-syncthing\x2dbtrfs.slice it lands
+# in) conflicts with shutdown.target, so once a reboot starts no instance
+# can start: 2026-11-25 02:00 on yarlung the slice was removed 14 ms before
+# syncthing@jhf began stopping and the pairing's snap request got
+# "connection reset by peer". Instances are short-lived (one request);
+# the final kill of systemd-shutdown still ends any straggler. No After=/
+# RequiresMountsFor= here: at shutdown a start job is ordered after the
+# pending stop job of any unit it is ordered against (basic.target,
+# home.mount), which would recreate the stall. /home stays mounted while
+# syncthing@jhf runs (its own RequiresMountsFor=/home), and the socket
+# already requires sysinit.target.
+DefaultDependencies=no
+
+[Service]
+# system.slice has no shutdown conflict (DefaultDependencies=no).
+Slice=system.slice
+Type=exec
+ExecStart=/usr/local/sbin/syncthing-btrfs-socket-adapter
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/.snapshots/syncthing
+# "disconnected" (systemd >= 258): a fresh tmpfs for the helper's mktemp,
+# without the After=tmp.mount systemd-tmpfiles-setup.service that "true"
+# adds. At shutdown tmp.mount's stop waits for syncthing@jhf (ordered
+# After=tmp.mount), so a helper start ordered after it would wait for
+# syncthing itself.
+PrivateTmp=disconnected
+PrivateDevices=true
+DevicePolicy=closed
+PrivateNetwork=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+MemoryDenyWriteExecute=true
+LockPersonality=true
+RestrictRealtime=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectClock=true
