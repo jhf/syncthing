@@ -37,7 +37,9 @@ func newServiceMap[K comparable, S suture.Service](eventLogger events.Logger) *s
 		tokens:      make(map[K]suture.ServiceToken),
 		eventLogger: eventLogger,
 	}
-	m.supervisor = suture.New(m.String(), svcutil.SpecWithDebugLogger())
+	// The folder runners' own supervisor is the one that abandons a
+	// stopping folder: it must wait out the folder shutdown budget too.
+	m.supervisor = suture.New(m.String(), svcutil.SpecWithShutdownBudget())
 	return m
 }
 
