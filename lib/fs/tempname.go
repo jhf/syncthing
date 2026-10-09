@@ -57,3 +57,17 @@ func TempNameWithPrefix(name, prefix string) string {
 func TempName(name string) string {
 	return TempNameWithPrefix(name, tempPrefix())
 }
+
+// WatchBarrierCanaryPrefix names the btrfs baseline pairing's canary files
+// (see folder.watchBarrier). The canary is a control-plane signal: its
+// filesystem event must reach the watch consumer to prove event delivery is
+// caught up (inotify FIFO ordering), while the file itself must never be
+// scanned or synced - the temp prefix gives the latter, and the watch event
+// filter excepts this prefix to give the former.
+const WatchBarrierCanaryPrefix = UnixTempPrefix + "barrier-"
+
+// IsWatchBarrierCanary reports whether name is a watch barrier canary.
+func IsWatchBarrierCanary(name string) bool {
+	base := filepath.Base(name)
+	return strings.HasPrefix(base, WatchBarrierCanaryPrefix) && strings.HasSuffix(base, ".tmp")
+}
