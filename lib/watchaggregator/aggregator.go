@@ -158,13 +158,23 @@ func newAggregator(ctx context.Context, folderCfg config.FolderConfiguration) *a
 }
 
 func Aggregate(ctx context.Context, in <-chan fs.Event, out chan<- Batch, folderCfg config.FolderConfiguration, cfg config.Wrapper, evLogger events.Logger) {
+	AggregateWithFlush(ctx, in, out, nil, folderCfg, cfg, evLogger)
+}
+
+// AggregateWithFlush is Aggregate with a flush channel: sending an ack
+// channel forces all pending events to be emitted as batches immediately,
+// without waiting out the batching delay; the ack is closed once the batches
+// have been handed off for sending. Used by the btrfs scan replay shutdown
+// sequence, which must drain the watch completely before pairing a snapshot
+// with the index. A nil flush channel disables the feature.
+func AggregateWithFlush(ctx context.Context, in <-chan fs.Event, out chan<- Batch, flush <-chan chan struct{}, folderCfg config.FolderConfiguration, cfg config.Wrapper, evLogger events.Logger) {
 	a := newAggregator(ctx, folderCfg)
 
 	// Necessary for unit tests where the backend is mocked
-	go a.mainLoop(in, out, cfg, evLogger)
+	go a.mainLoop(in, out, flush, cfg, evLogger)
 }
 
-func (a *aggregator) mainLoop(in <-chan fs.Event, out chan<- Batch, cfg config.Wrapper, evLogger events.Logger) {
+func (a *aggregator) mainLoop(in <-chan fs.Event, out chan<- Batch, flush <-chan chan struct{}, cfg config.Wrapper, evLogger events.Logger) {
 	a.notifyTimer = time.NewTimer(a.notifyDelay)
 	defer a.notifyTimer.Stop()
 
@@ -186,6 +196,9 @@ func (a *aggregator) mainLoop(in <-chan fs.Event, out chan<- Batch, cfg config.W
 			}
 		case <-a.notifyTimer.C:
 			a.actOnTimer(out)
+		case ack := <-flush:
+			a.flushAll(out)
+			close(ack)
 		case interval := <-a.notifyTimerResetChan:
 			a.resetNotifyTimer(interval)
 		case folderCfg := <-a.folderCfgUpdate:
@@ -336,6 +349,35 @@ func (a *aggregator) resetNotifyTimer(duration time.Duration) {
 	l.Debugln(a, "Resetting notifyTimer to", duration.String())
 	a.notifyTimerNeedsReset = false
 	a.notifyTimer.Reset(duration)
+}
+
+// flushAll emits every pending event regardless of age, for shutdown
+// draining. Like actOnTimer it hands the batch off asynchronously.
+func (a *aggregator) flushAll(out chan<- Batch) {
+	c := a.counts.total()
+	if c == 0 {
+		return
+	}
+	oldEvents := make(map[string]*aggregatedEvent, c)
+	a.popAllEventsTo(oldEvents, a.root, ".")
+	if len(oldEvents) == 0 {
+		return
+	}
+	go a.notify(oldEvents, out)
+}
+
+func (a *aggregator) popAllEventsTo(to map[string]*aggregatedEvent, dir *eventDir, dirPath string) {
+	for childName, childDir := range dir.dirs {
+		a.popAllEventsTo(to, childDir, filepath.Join(dirPath, childName))
+		if childDir.childCount() == 0 {
+			delete(dir.dirs, childName)
+		}
+	}
+	for name, event := range dir.events {
+		to[filepath.Join(dirPath, name)] = event
+		delete(dir.events, name)
+		a.counts.add(event.evType, -1)
+	}
 }
 
 func (a *aggregator) actOnTimer(out chan<- Batch) {
