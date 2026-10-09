@@ -1,0 +1,90 @@
+#!/bin/bash
+# Root helper for syncthing btrfs scan replay (v3, primitive operations).
+# Called via the socket adapter (one connection per request). Snapshot names
+# are restricted to [a-z0-9.-].
+#   snap <name>           - read-only snapshot of the subvolume as <name>
+#   diff <a> <b>          - print btrfs send --no-data -p <a> <b> | receive --dump
+#   setbaseline <name>    - make snapshot <name> the baseline (deletes old)
+#   rmsnap <name>         - delete snapshot <name> (never the baseline); a
+#                           missing snapshot is success (idempotent)
+#   status                - print baseline=<path|none>
+#   subvol                - print subvol=<mount path>
+#   subvols               - list nested subvolumes by path
+#   version               - print helper-version=N (drift detection via the
+#                           socket, no root needed)
+#
+# v4 (2026-10-21): rmsnap made truly idempotent — the old `[ -d x ] && delete`
+# trailing test exited 1 when x was absent, which turned every successful
+# pairing's deferred cleanup into a false-failure WRN (setbaseline renames
+# the staging snapshot to baseline, so the name is legitimately gone by then).
+# Added the version verb.
+#
+# v3 (2026-10-15): diff/diff-baseline no longer pipe send directly into
+# receive --dump. On streams larger than the pipe buffer, receive exits
+# after the final command while the kernel still has a write in flight;
+# send then dies with SIGPIPE/EPIPE (pipeline exit 141/32) despite a
+# complete stream. The temp file decouples the two. Streams are ~2MB.
+set -euo pipefail
+SUB=/home
+DIR=/home/.snapshots/syncthing
+BASE=$DIR/baseline
+
+mkdir -p "$DIR"
+
+name_ok() { [[ "${1:-}" =~ ^[a-z0-9.-]+$ ]] && [[ "$1" != "baseline" ]]; }
+
+dump_diff() { # dump_diff <parent> <child>
+    local stream
+    stream=$(mktemp)
+    trap "rm -f \"$stream\"" EXIT
+    btrfs send --no-data -p "$1" "$2" > "$stream"
+    btrfs receive --dump < "$stream"
+}
+
+case "${1:-}" in
+  snap)
+    name_ok "${2:-}" || { echo "bad name" >&2; exit 2; }
+    btrfs subvolume snapshot -r "$SUB" "$DIR/$2" >/dev/null
+    echo "snap=$DIR/$2"
+    ;;
+  diff)
+    name_ok "${2:-}" && name_ok "${3:-}" || { echo "bad name" >&2; exit 2; }
+    [ -d "$DIR/$2" ] && [ -d "$DIR/$3" ] || { echo "snapshot missing" >&2; exit 1; }
+    dump_diff "$DIR/$2" "$DIR/$3"
+    ;;
+  diff-baseline)
+    name_ok "${2:-}" || { echo "bad name" >&2; exit 2; }
+    [ -d "$BASE" ] || { echo "no baseline snapshot" >&2; exit 1; }
+    [ -d "$DIR/$2" ] || { echo "snapshot missing" >&2; exit 1; }
+    dump_diff "$BASE" "$DIR/$2"
+    ;;
+  setbaseline)
+    name_ok "${2:-}" || { echo "bad name" >&2; exit 2; }
+    [ -d "$DIR/$2" ] || { echo "snapshot missing" >&2; exit 1; }
+    [ -d "$BASE" ] && btrfs subvolume delete "$BASE" >/dev/null
+    mv "$DIR/$2" "$BASE"
+    echo "baseline=$BASE"
+    ;;
+  rmsnap)
+    name_ok "${2:-}" || { echo "bad name" >&2; exit 2; }
+    # Idempotent: a missing snapshot is success, and the trailing test must
+    # not decide the script's exit status (`[ -d x ] && cmd` yields 1 when
+    # x is absent).
+    if [ -d "$DIR/$2" ]; then btrfs subvolume delete "$DIR/$2" >/dev/null; fi
+    ;;
+  status)
+    if [ -d "$BASE" ]; then echo "baseline=$BASE"; else echo "baseline=none"; fi
+    ;;
+  subvol)
+    echo "subvol=$SUB"
+    ;;
+  subvols)
+    btrfs subvolume list -o "$SUB" | sed "s:.*path ::"
+    ;;
+  version)
+    echo "helper-version=4"
+    ;;
+  *)
+    echo "usage: $0 snap|diff|diff-baseline|setbaseline|rmsnap|status|subvol|subvols|version" >&2; exit 2
+    ;;
+esac
