@@ -596,7 +596,14 @@ func (f *folder) serviceQueuedPull(ctx context.Context) error {
 }
 
 func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
-	f.sl.DebugContext(ctx, "Scanning")
+	// Instrumentation (2026-10-09, revert before upstreaming): log what
+	// triggered the scan with enough path detail to attribute wall time.
+	// Full scans have subDirs nil; watch scans carry the batched paths.
+	sample := subDirs
+	if len(sample) > 5 {
+		sample = append(sample[:3:3], sample[len(sample)-2:]...)
+	}
+	f.sl.DebugContext(ctx, "Scanning", "nilSubs", subDirs == nil, "subs", len(subDirs), slog.Any("sample", sample))
 	if subDirs == nil {
 		f.fullScanCount.Add(1)
 		// A full scan in progress means the index is not currently
@@ -1081,6 +1088,13 @@ func (f *folder) scanSubdirsDeletedAndIgnored(ctx context.Context, subDirs []str
 	var toIgnore []protocol.FileInfo
 	ignoredParent := ""
 	changes := 0
+
+	// Instrumentation (2026-10-09, revert before upstreaming): attribute
+	// sweep wall time to its prefixes.
+	sweepStart := time.Now()
+	defer func() {
+		f.sl.DebugContext(ctx, "Deleted/ignored sweep done", "subs", len(subDirs), slog.Duration("took", time.Since(sweepStart)), "changes", changes)
+	}()
 
 	// On a full scan this sweep iterates every local database entry, which takes
 	// the majority of a big scan's wall time (measured: about 15 of 22 minutes
