@@ -1,0 +1,60 @@
+#!/bin/bash
+# Root helper for syncthing btrfs scan replay (v2, primitive operations).
+# Called by jhf via sudo -n. Snapshot names are restricted to [a-z0-9.-].
+#   snap <name>           - read-only snapshot of the subvolume as <name>
+#   diff <a> <b>          - print btrfs send --no-data -p <a> <b> | receive --dump
+#   setbaseline <name>    - make snapshot <name> the baseline (deletes old)
+#   rmsnap <name>         - delete snapshot <name> (never the baseline)
+#   status                - print baseline=<path|none>
+#   subvol                - print subvol=<mount path>
+#   subvols               - list nested subvolumes by path
+set -euo pipefail
+SUB=/home
+DIR=/home/.snapshots/syncthing
+BASE=$DIR/baseline
+
+mkdir -p "$DIR"
+
+name_ok() { [[ "${1:-}" =~ ^[a-z0-9.-]+$ ]] && [[ "$1" != "baseline" ]]; }
+
+case "${1:-}" in
+  snap)
+    name_ok "${2:-}" || { echo "bad name" >&2; exit 2; }
+    btrfs subvolume snapshot -r "$SUB" "$DIR/$2" >/dev/null
+    echo "snap=$DIR/$2"
+    ;;
+  diff)
+    name_ok "${2:-}" && name_ok "${3:-}" || { echo "bad name" >&2; exit 2; }
+    [ -d "$DIR/$2" ] && [ -d "$DIR/$3" ] || { echo "snapshot missing" >&2; exit 1; }
+    btrfs send --no-data -p "$DIR/$2" "$DIR/$3" | btrfs receive --dump
+    ;;
+  diff-baseline)
+    name_ok "${2:-}" || { echo "bad name" >&2; exit 2; }
+    [ -d "$BASE" ] || { echo "no baseline snapshot" >&2; exit 1; }
+    [ -d "$DIR/$2" ] || { echo "snapshot missing" >&2; exit 1; }
+    btrfs send --no-data -p "$BASE" "$DIR/$2" | btrfs receive --dump
+    ;;
+  setbaseline)
+    name_ok "${2:-}" || { echo "bad name" >&2; exit 2; }
+    [ -d "$DIR/$2" ] || { echo "snapshot missing" >&2; exit 1; }
+    [ -d "$BASE" ] && btrfs subvolume delete "$BASE" >/dev/null
+    mv "$DIR/$2" "$BASE"
+    echo "baseline=$BASE"
+    ;;
+  rmsnap)
+    name_ok "${2:-}" || { echo "bad name" >&2; exit 2; }
+    [ -d "$DIR/$2" ] && btrfs subvolume delete "$DIR/$2" >/dev/null
+    ;;
+  status)
+    if [ -d "$BASE" ]; then echo "baseline=$BASE"; else echo "baseline=none"; fi
+    ;;
+  subvol)
+    echo "subvol=$SUB"
+    ;;
+  subvols)
+    btrfs subvolume list -o "$SUB" | sed "s:.*path ::"
+    ;;
+  *)
+    echo "usage: $0 snap|diff|diff-baseline|setbaseline|rmsnap|status|subvol|subvols" >&2; exit 2
+    ;;
+esac
