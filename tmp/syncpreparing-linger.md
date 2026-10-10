@@ -207,3 +207,35 @@ D. Operational: ignore .pgadmin/sessions in .stignore (per-minute session
 
 Recommended: C+A first (small, fork-local), B as the semantic improvement.
 Instrumentation commits to revert before upstreaming: 8d0cefd30, 093f3bf9.
+
+## Update 08:05: proposal C implemented, teeth-tested, deployed (dev.48)
+
+Root cause of flag GENERATION found in the fork: Dispatch (running on the
+serial fseventsd delivery queue) sent to the tree channel with a BLOCKING
+send; the tree buffer was 128 entries (~280ms at the observed 460 events/s
+replay-flood rate). Any consumer stall longer than that stalled the serial
+queue, and fseventsd responded by dropping events for the stream and
+flagging all later events MustScanSubDirs/UserDropped.
+
+Fix (notify fork commit 79d5886, branch fsevents-replay):
+- tree buffer 128 -> 65536 (1 MB, absorbs multi-minute floods).
+- Dispatch sends non-blocking; a full channel counts drops and emits ONE
+  synthetic MustScanSubDirs for the watch root when there is room - the
+  same drop-and-signal contract fseventsd itself uses, never silent loss.
+- Teeth test TestDispatchDropsWithSyntheticFlag: with the old blocking
+  send it times out (verified by reverting); with the fix it passes and
+  the synthetic flag arrives in order. TestWatchDispatchBoundedHistory
+  updated to the new contract (channel sized for full delivery).
+- Full fork suite passes (29s).
+
+Syncthing side (commit 664b9cacf): backendBuffer 500 -> 65536 to match,
+so the model-side channel no longer overflows before the fork's buffer
+does. lib/fs tests pass (38s).
+
+Deployed 07:47 as dev.48.g664b9cac. Result after 15 min: flag rate
+collapsed from 460/s (07:47 replay flood) to ~2/min and decaying (the
+tail of the journaled backlog; no evidence of NEW flag generation).
+The backlog drains as a few queued full scans (~10 min each), then the
+folder should hold idle. Proposals A (drop replayed flags / coalesce
+replay heals to one scan), B (heal-by-replay), D (pgadmin ignore) remain
+open for the user.
