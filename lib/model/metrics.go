@@ -96,4 +96,7 @@ func registerFolderMetrics(folderID string) {
 	metricFolderProcessedBytesTotal.WithLabelValues(folderID, metricSourceLocalOther)
 	metricFolderProcessedBytesTotal.WithLabelValues(folderID, metricSourceSkipped)
 	metricFolderConflictsTotal.WithLabelValues(folderID)
+	metricFolderWatchBatchesIntegrated.WithLabelValues(folderID)
+	metricFolderWatchBatchesDeferred.WithLabelValues(folderID)
+	metricFolderWatchPendingScans.WithLabelValues(folderID)
 }

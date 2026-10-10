@@ -23,6 +23,7 @@ import (
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/svcutil"
+	"github.com/syncthing/syncthing/lib/watchaggregator"
 )
 
 // This file implements the Linux/btrfs counterpart of the FSEvents journal
@@ -478,6 +479,18 @@ func (f *folder) btrfsRearmTimerFired(ctx context.Context) {
 func (f *folder) pairBtrfsBaseline(ctx context.Context, trigger string) bool {
 	f.sl.InfoContext(ctx, "Btrfs baseline: attempting pairing", "trigger", trigger)
 
+	// Scans run below must not dequeue watch batches between their chunks:
+	// the barrier has to see its canary batch itself, and every batch has
+	// to be scanned before pairing, not deferred past it.
+	f.watchHold = true
+	defer func() { f.watchHold = false }()
+	// Deferred batches were observed before anything still queued; scan
+	// them first.
+	if !f.pairingStep(ctx, trigger, "drain-pending", func() bool { return f.drainWatchPending(ctx) }) {
+		f.sl.InfoContext(ctx, "Btrfs baseline: pairing failed, deferred watch batches did not scan")
+		return false
+	}
+
 	// Drain every buffered watch event into the index. The barrier below is
 	// what proves completeness; this flush just keeps the barrier short.
 	var ack chan struct{}
@@ -568,6 +581,12 @@ func (f *folder) pairBtrfsBaseline(ctx context.Context, trigger string) bool {
 // overflow already forces a full scan, so it cannot combine with pairing.)
 // The canary uses the temp-file prefix, so the scanner ignores it and it is
 // never indexed or synced.
+//
+// The barrier has no deadline of its own (the runtime and post-replay
+// pairings run without one), so it ends on the two conditions under which
+// the canary stops being on its way: the watch died
+// (watchDiedDuringPairing), or the aggregator escalated to a full-folder
+// batch (deferRootBatchInPairing).
 func (f *folder) watchBarrier(ctx context.Context) bool {
 	var nonce [8]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -599,6 +618,9 @@ func (f *folder) watchBarrier(ctx context.Context) bool {
 	for {
 		select {
 		case batch := <-f.watchChan:
+			if f.deferRootBatchInPairing(ctx, "barrier", batch) {
+				return false
+			}
 			if err := f.pairingScan(ctx, "barrier", batch.Paths); err != nil {
 				return false
 			}
@@ -608,6 +630,9 @@ func (f *folder) watchBarrier(ctx context.Context) bool {
 		case <-ack:
 			ack = nil
 		case <-reflush.C:
+			if f.watchDiedDuringPairing(ctx, "barrier") {
+				return false
+			}
 			if ack == nil && flushC == nil {
 				flushC, nextAck = f.watchFlush, make(chan struct{})
 			}
@@ -675,6 +700,20 @@ func (f *folder) btrfsPeriodicPair(ctx context.Context) {
 // shutdown, so a months-long uptime would pin months of churned blocks in
 // the old baseline and every unclean restart would full-scan. Must run on
 // the Serve goroutine.
+//
+// A runtime pairing does no catch-up scanning of deferred watch batches:
+// it stands down, marks itself due, and runDueBtrfsPairing runs it once the
+// Serve loop has scanned them. Measured on yarlung 2026-11-27 16:28:34: the
+// pairing right after a 2h2m full scan found 28 deferred directories and
+// failed drain-pending at 2m1.343s against its 2-minute deadline; the
+// Serve loop then scanned the same directories in 7m33s (changes=0) and
+// the next pairing took about 2 s. Nor does it run under a deadline: its
+// scans are ones the Serve loop would run anyway (07:32 the same day a
+// flush-drain scan of one .git/objects directory was cut off at 2m5.961s),
+// and every step that can wait for something that is not coming ends on
+// that condition instead (flush-request: watchFlushTimeout; helper calls:
+// btrfsHelperTimeout; flush-drain and barrier: watch death and root
+// escalation, see watchBarrier).
 func (f *folder) refreshBtrfsBaseline(ctx context.Context) {
 	if !f.btrfsOK || !f.FSWatcherEnabled {
 		return
@@ -693,11 +732,32 @@ func (f *folder) refreshBtrfsBaseline(ctx context.Context) {
 	default:
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
+	if p := f.watchPending; p != nil {
+		if !f.btrfsPairDue {
+			f.sl.InfoContext(ctx, "Btrfs baseline: runtime pairing waits for deferred watch batches to be scanned", "batches", p.batches, "paths", p.set.Len())
+		}
+		f.btrfsPairDue = true
+		return
+	}
+	f.btrfsPairDue = false
 	if f.pairBtrfsBaseline(ctx, "runtime") {
 		f.lastBtrfsRefresh = time.Now()
 	}
+}
+
+// runDueBtrfsPairing runs a runtime pairing that stood down for deferred
+// watch batches, once none are pending. The Serve loop calls it after each
+// piece of work. A pending post-replay re-arm owns the pairing, as in
+// btrfsPeriodicPair.
+func (f *folder) runDueBtrfsPairing(ctx context.Context) {
+	if !f.btrfsPairDue || f.watchPending != nil || ctx.Err() != nil {
+		return
+	}
+	if f.btrfsRearmPending {
+		f.btrfsPairDue = false
+		return
+	}
+	f.refreshBtrfsBaseline(ctx)
 }
 
 // watchFlushTimeout bounds how long requestWatchFlush waits for the
@@ -727,12 +787,47 @@ func (f *folder) requestWatchFlush(ctx context.Context) (chan struct{}, bool) {
 	}
 }
 
+// deferRootBatchInPairing hands a full-folder watch batch dequeued inside a
+// pairing to the pending set instead of scanning it there: a full-tree walk
+// (2h2m on yarlung 2026-11-27) is the Serve loop's work, and the
+// aggregator's escalation dropped every event it tracked, so a barrier's
+// canary may never arrive. The pairing fails; the next runtime pairing
+// finds the pending set and waits for it (refreshBtrfsBaseline).
+func (f *folder) deferRootBatchInPairing(ctx context.Context, step string, b watchaggregator.Batch) bool {
+	if !slices.ContainsFunc(b.Paths, func(p string) bool { return p == "." || p == "" }) {
+		return false
+	}
+	f.sl.InfoContext(ctx, "Btrfs baseline: full-folder watch batch during pairing, deferring it to the Serve loop", "step", step)
+	f.deferWatchPaths(b.Paths, b.MaxEventID)
+	return true
+}
+
+// watchDiedDuringPairing reports (and logs) that the watch died while a
+// pairing waited on it: monitorWatch clears fullScanOK on watch death, and
+// stops the aggregator, so neither a flush ack nor a canary batch comes.
+func (f *folder) watchDiedDuringPairing(ctx context.Context, step string) bool {
+	if f.fullScanOK.Load() {
+		return false
+	}
+	f.sl.InfoContext(ctx, "Btrfs baseline: index stopped being provably complete during pairing (watch died)", "step", step)
+	return true
+}
+
 // scanUntilAck scans watch batches until the flush ack closes.
 func (f *folder) scanUntilAck(ctx context.Context, ack chan struct{}) bool {
+	tick := time.NewTicker(watchBarrierReflushInterval)
+	defer tick.Stop()
 	for {
 		select {
 		case batch := <-f.watchChan:
+			if f.deferRootBatchInPairing(ctx, "flush-drain", batch) {
+				return false
+			}
 			if err := f.pairingScan(ctx, "flush-drain", batch.Paths); err != nil {
+				return false
+			}
+		case <-tick.C:
+			if f.watchDiedDuringPairing(ctx, "flush-drain") {
 				return false
 			}
 		case <-ack:
