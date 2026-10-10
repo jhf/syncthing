@@ -239,3 +239,25 @@ The backlog drains as a few queued full scans (~10 min each), then the
 folder should hold idle. Proposals A (drop replayed flags / coalesce
 replay heals to one scan), B (heal-by-replay), D (pgadmin ignore) remain
 open for the user.
+
+## Update 08:30: proposal A analyzed — insufficient alone; B is the real fix
+
+A ("drop redundant ["."] scans while one runs/queued") only removes the
+nested-scan amplification. While ANY flag trickle exists, every ~10-min
+scan window contains flags, so the chain persists at one scan per window
+even with coalescing. Breaking the chain requires healing flags without a
+full walk (B: journal replay from the last persisted watermark) or the
+trickle hitting zero. The trickle is NOT the fork's synthetic backstop
+(those would be MustScanSubDirs-only; observed flags are
+UserDropped+MustScanSubDirs pairs on ".", i.e. fseventsd coalesced
+records - either late-flushing journal history, which drains, or live
+drops, which need B). The 90-min verification wake distinguishes: flags
+stopped -> drained -> idle holds; flags continue -> implement B.
+
+Also observed: serviceQueuedWatch runs a queued batch INLINE between scan
+chunks (watchScanDepth caps nesting at 1). A ["."] batch serviced mid-scan
+runs a complete nested full walk inside the outer one; the outer then
+resumes and re-walks the same tree. Tonight's 10-15 min scans were
+multiple full walks sharing one budget. Any A-style change should skip
+nested ["."] scans outright (the outer walk covers the tree; the flagged
+gap is backstopped by the watermark not advancing past that batch).
