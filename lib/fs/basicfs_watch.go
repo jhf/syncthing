@@ -21,9 +21,12 @@ import (
 )
 
 // Notify does not block on sending to channel, so the channel must be buffered.
-// The actual number is magic.
+// 500 entries is a few seconds of headroom under burst load; while a long
+// scan blocks the aggregator's flush, bursts overflowed this and each
+// overflow forced a full-folder rescan (observed as a self-sustaining rescan
+// loop, 2026-10-10). 65536 (1 MB) matches the notify fork's tree buffer.
 // Not meant to be changed, but must be changeable for tests
-var backendBuffer = 500
+var backendBuffer = 65536
 
 func (f *BasicFilesystem) Watch(name string, ignore Matcher, ctx context.Context, ignorePerms bool) (<-chan Event, <-chan error, error) {
 	watchPath, roots, err := f.watchPaths(name)
