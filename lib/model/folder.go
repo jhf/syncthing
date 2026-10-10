@@ -63,7 +63,12 @@ type folder struct {
 
 	scanInterval           time.Duration
 	scanTimer              *time.Timer
-	watchScanDepth         int         // >0 while servicing a watch-triggered scan between chunks
+	scanCover              *scanCoverage // the running scan's coverage, for integrating watch batches (Serve goroutine)
+	watchPending           *watchPendingSet
+	watchPendingReady      chan struct{}
+	scanningPending        bool        // true while servicePendingWatch scans (Serve goroutine)
+	watchHold              bool        // true while the caller owns the watch channel (btrfs pairing); scans then leave it alone
+	fullScanActive         atomic.Bool // true while a full-tree scan is running
 	scanDelay              chan time.Duration
 	initialScanFinished    chan struct{}
 	scanScheduled          chan struct{}
@@ -161,6 +166,7 @@ func newFolder(model *model, ignores *ignore.Matcher, cfg config.FolderConfigura
 		scanDelay:              make(chan time.Duration),
 		initialScanFinished:    make(chan struct{}),
 		scanScheduled:          make(chan struct{}, 1),
+		watchPendingReady:      make(chan struct{}, 1),
 		versionCleanupInterval: time.Duration(cfg.Versioning.CleanupIntervalS) * time.Second,
 		versionCleanupTimer:    time.NewTimer(time.Duration(cfg.Versioning.CleanupIntervalS) * time.Second),
 
@@ -313,10 +319,22 @@ func (f *folder) Serve(ctx context.Context) error {
 
 		case fsEvents := <-f.watchChan:
 			f.sl.DebugContext(ctx, "Scan due to watcher")
+			if f.watchPending != nil {
+				// Deferred batches are older: scan them with this one, so
+				// the watermark never passes an unscanned event.
+				f.watchPending.add(fsEvents.Paths, fsEvents.MaxEventID)
+				err = f.servicePendingWatch(ctx)
+				break
+			}
 			err = f.scanSubdirs(ctx, fsEvents.Paths)
 			if err == nil {
-				f.persistWatchReplayWatermark(fsEvents.MaxEventID)
+				// Batches deferred during this scan may hold events below
+				// this watermark (the aggregator delays removes).
+				f.persistWatchReplayWatermarkAfterPending(fsEvents.MaxEventID)
 			}
+
+		case <-f.watchPendingReady:
+			err = f.servicePendingWatch(ctx)
 
 		case <-f.restartWatchChan:
 			f.sl.DebugContext(ctx, "Restart watcher")
@@ -603,31 +621,36 @@ func (f *folder) initialScanEverCompleted() (bool, error) {
 	return true, nil
 }
 
-// serviceQueuedWatch runs one queued batch of watch events, if any, and returns immediately
+// serviceQueuedWatch dequeues one queued batch of watch events, if any, and returns immediately
 // otherwise. Watch events wait on the serve goroutine like pulls do, so a long scan otherwise
-// delays noticing (and announcing) local changes until it finishes; on a busy machine that delay
-// was measured at a full scan's duration, and the notify backlog can overflow and lose events
-// entirely while it builds up. A watch-triggered scan does not itself service the watch channel:
-// the batches it would find there were generated while it ran, and servicing them inline would
-// never let the outer scan finish.
+// delays noticing (and announcing) local changes until it finishes, and the notify backlog builds
+// up behind it. The batch is never scanned here, nested inside the running scan (see
+// folder_watch_pending.go): it is integrated into the running walk when that walk still covers
+// it, and otherwise deferred to one follow-up scan the Serve loop runs after this scan returns.
 //
 // The bool reports whether a batch was dequeued, regardless of what was done with it: a waiting
 // batch means the machine is producing work, which the adaptive scan chunk budget reads as a
 // signal to keep the quantum small.
 func (f *folder) serviceQueuedWatch(ctx context.Context) (bool, error) {
-	if f.watchScanDepth > 0 {
+	if f.watchHold {
 		return false, nil
 	}
 	select {
 	case fsEvents := <-f.watchChan:
-		f.sl.DebugContext(ctx, "Scan due to watcher (serviced between scan chunks)")
-		f.watchScanDepth++
-		defer func() { f.watchScanDepth-- }()
-		err := f.scanSubdirs(ctx, fsEvents.Paths)
-		if err == nil {
-			f.persistWatchReplayWatermark(fsEvents.MaxEventID)
+		root := len(fsEvents.Paths) == 1 && (fsEvents.Paths[0] == "." || fsEvents.Paths[0] == "")
+		// A full-folder escalation dequeued while a full-tree scan is
+		// already running would walk the whole tree a second time - the
+		// doubling was measured at 10-15 min per scan during the
+		// 2026-10-10 fseventsd drop-flag storm. The running scan covers the
+		// tree; the skipped batch's watermark stays unpersisted, so a later
+		// restart replays anything the running scan walked past before the
+		// batch's events landed.
+		if root && f.fullScanActive.Load() {
+			f.sl.DebugContext(ctx, "Skipping full-folder watch batch during a running full scan")
+			return true, nil
 		}
-		return true, err
+		f.handleWatchBatchMidScan(ctx, fsEvents)
+		return true, nil
 	default:
 		return false, nil
 	}
@@ -648,7 +671,7 @@ func (f *folder) serviceQueuedPull(ctx context.Context) (bool, error) {
 	}
 }
 
-func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
+func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) (retErr error) {
 	f.sl.DebugContext(ctx, "Scanning")
 	if subDirs == nil {
 		f.fullScanCount.Add(1)
@@ -702,6 +725,14 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 		subDirs[i] = sub
 	}
 
+	// A full-tree scan (nil subDirs, or the watch escalation ["."]) covers
+	// everything; serviceQueuedWatch consults this to avoid nesting a second
+	// full walk inside this one's chunk budget.
+	if subDirs == nil || (len(subDirs) == 1 && (subDirs[0] == "." || subDirs[0] == "")) {
+		f.fullScanActive.Store(true)
+		defer f.fullScanActive.Store(false)
+	}
+
 	// Clean the list of subitems to ensure that we start at a known
 	// directory, and don't scan subdirectories of things we've already
 	// scanned.
@@ -712,6 +743,11 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 
 	f.setState(FolderScanning)
 	f.clearScanErrors(subDirs)
+
+	// Watch batches dequeued between this scan's chunks are integrated into
+	// its walk or deferred, never scanned nested (folder_watch_pending.go).
+	cover, prevCover := f.beginScanCoverage(subDirs)
+	defer func() { f.endScanCoverage(cover, prevCover, retErr) }()
 
 	batch := f.newScanBatch()
 
@@ -732,6 +768,9 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 	// servicing a pull here is the same thing the loop would have done had it not been scanning.
 	resumeFrom := ""
 	budget := scanChunkBudget
+	if cover != nil {
+		cover.walking = true
+	}
 	for {
 		f.setState(FolderScanning)
 
@@ -744,6 +783,9 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 			break
 		}
 		resumeFrom = last
+		if cover != nil {
+			cover.frontier = last
+		}
 
 		if err := batch.Flush(); err != nil {
 			return err
@@ -779,6 +821,11 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 
 	if err := batch.Flush(); err != nil {
 		return err
+	}
+	// The walk is done: from here on (deletion sweep) newly dequeued watch
+	// batches can no longer be integrated, only deferred.
+	if cover != nil {
+		cover.walking = false
 	}
 
 	if len(subDirs) == 0 {

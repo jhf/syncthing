@@ -146,7 +146,127 @@ func TestAggregate(t *testing.T) {
 			}, inProgress)
 		}
 	}
+	// The total overflows; at the test scale the cluster threshold is not
+	// reached anywhere, so this still escalates to the root. The subtree
+	// collapse is pinned by TestAggregateOverflowCollapsesToSubtrees.
 	compareBatchToExpectedDirect(t, getEventPaths(a.root, ".", a), []string{"."})
+}
+
+// TestAggregateOverflowCollapsesToSubtrees pins the behavior that avoids a
+// full-tree scan on bursty writes: when the window's distinct-path count
+// overflows but the events cover only a few top-level directories, the batch
+// names those directories. Nothing was lost on overflow - every event is in
+// the tracked tree - so scanning the named subtrees covers every event.
+func TestAggregateOverflowCollapsesToSubtrees(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	folderCfg := defaultFolderCfg.Copy()
+	folderCfg.ID = "test"
+	inProgress := make(map[string]struct{})
+	a := newAggregator(ctx, folderCfg)
+
+	// The test scale (maxFiles 32, maxFilesPerDir 8) overflows before the
+	// default cluster threshold is reached, so pin it low: a prefix
+	// covering more than four tracked paths collapses into a subtree scan.
+	oldThreshold := collapseClusterThreshold
+	defer func() { collapseClusterThreshold = oldThreshold }()
+	collapseClusterThreshold = 4
+
+	// Fill the window with events confined to four directories: exactly at
+	// the per-directory limit each, so they stay expanded and the total
+	// reaches maxFiles.
+	dirs := []string{"alpha", "beta", "gamma", "delta"}
+	for _, dir := range dirs {
+		for i := 0; i < maxFilesPerDir; i++ {
+			a.newEvent(fs.Event{Name: filepath.Join(dir, strconv.Itoa(i)), Type: fs.NonRemove}, inProgress)
+		}
+	}
+	// A root-level file pushes the total past the limit.
+	a.newEvent(fs.Event{Name: "rootfile.txt", Type: fs.NonRemove}, inProgress)
+
+	compareBatchToExpectedDirect(t, getEventPaths(a.root, ".", a), append(dirs, "rootfile.txt"))
+
+	// Further events merge into the collapsed paths: nothing new appears,
+	// and the root is never scanned for these.
+	a.newEvent(fs.Event{Name: filepath.Join("alpha", "sub", "deeper"), Type: fs.NonRemove}, inProgress)
+	compareBatchToExpectedDirect(t, getEventPaths(a.root, ".", a), append(dirs, "rootfile.txt"))
+}
+
+// TestAggregateOverflowWideChurnFactors pins that churn spread over many
+// directories still factors instead of flattening to the root: scanning the
+// union of the touched subtrees never costs more than a full walk, so no
+// path-count cap applies. The root escalation survives only when factoring
+// cannot shrink the set below maxFiles (pinned by TestAggregate) and for
+// explicit root events (backend drop flags).
+func TestAggregateOverflowWideChurnFactors(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	folderCfg := defaultFolderCfg.Copy()
+	folderCfg.ID = "test"
+	inProgress := make(map[string]struct{})
+	a := newAggregator(ctx, folderCfg)
+
+	oldThreshold := collapseClusterThreshold
+	defer func() { collapseClusterThreshold = oldThreshold }()
+	collapseClusterThreshold = 2
+
+	// Fill the window to exactly the limit: six directories of five files
+	// plus two root-level files.
+	var dirs []string
+	for d := 0; d < 6; d++ {
+		dirs = append(dirs, "dir"+strconv.Itoa(d))
+		for i := 0; i < 5; i++ {
+			a.newEvent(fs.Event{Name: filepath.Join(dirs[d], strconv.Itoa(i)), Type: fs.NonRemove}, inProgress)
+		}
+	}
+	a.newEvent(fs.Event{Name: "rf0", Type: fs.NonRemove}, inProgress)
+	a.newEvent(fs.Event{Name: "rf1", Type: fs.NonRemove}, inProgress)
+	// The total is at the limit; this event overflows it.
+	a.newEvent(fs.Event{Name: filepath.Join("dir6", "x"), Type: fs.NonRemove}, inProgress)
+
+	// The six dense directories collapse to subtree scans; the rest stays
+	// precise. Eight directories' worth of churn, zero of it at the root.
+	compareBatchToExpectedDirect(t, getEventPaths(a.root, ".", a),
+		append(dirs, "rf0", "rf1", filepath.Join("dir6", "x")))
+}
+
+// TestAggregateOverflowFactorsCommonPrefix pins the least-common-prefix
+// factoring: bursts spread over sibling subtrees scan those subtrees, not
+// their parent, and not the root.
+func TestAggregateOverflowFactorsCommonPrefix(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	folderCfg := defaultFolderCfg.Copy()
+	folderCfg.ID = "test"
+	inProgress := make(map[string]struct{})
+	a := newAggregator(ctx, folderCfg)
+
+	oldThreshold := collapseClusterThreshold
+	defer func() { collapseClusterThreshold = oldThreshold }()
+	collapseClusterThreshold = 4
+
+	// 31 events over four sibling subtrees, two each under "a" and "d".
+	for _, dir := range []string{"a/b", "a/c", "d/e"} {
+		for i := 0; i < maxFilesPerDir; i++ {
+			a.newEvent(fs.Event{Name: filepath.Join(dir, strconv.Itoa(i)), Type: fs.NonRemove}, inProgress)
+		}
+	}
+	for i := 0; i < maxFilesPerDir-1; i++ {
+		a.newEvent(fs.Event{Name: filepath.Join("d", "f", strconv.Itoa(i)), Type: fs.NonRemove}, inProgress)
+	}
+	// The total is now at the limit; the next event overflows it. (The
+	// overflow check fires when an event arrives at a full window.)
+	a.newEvent(fs.Event{Name: filepath.Join("d", "f", "new"), Type: fs.NonRemove}, inProgress)
+	a.newEvent(fs.Event{Name: "rootfile.txt", Type: fs.NonRemove}, inProgress)
+
+	// Each sibling subtree is dense enough to collapse, but their parents
+	// are not: the batch names the four subtrees, not "a", not "d", not "."
+	compareBatchToExpectedDirect(t, getEventPaths(a.root, ".", a), []string{
+		filepath.Join("a", "b"), filepath.Join("a", "c"), filepath.Join("d", "e"), filepath.Join("d", "f"), "rootfile.txt",
+	})
 }
 
 // TestInProgress checks that ignoring files currently edited by Syncthing works
