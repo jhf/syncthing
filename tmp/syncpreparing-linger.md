@@ -135,6 +135,9 @@ overflow-flagged event at INF:
 
 ## Update 01:30: restart AMPLIFIES the chain — do not restart to fix it
 
+(The convergence prediction in this section was WRONG — see the 07:31
+update below.)
+
 Restarting the serve at 01:09 made it worse: the boot replay from the last
 watermark re-delivered the journaled flagged backlog (83803 INF flag lines
 in 3 min, ~460/s), and the replay flood itself stalled the fresh stream's
@@ -158,3 +161,49 @@ Also consider coalescing flagged batches while a full scan is already
 running (a second ["."] scan queued behind an identical one in progress is
 pure waste), and whether flagged events should be journaled/replayed at
 all on the syncthing side.
+
+## Update 07:31 (morning): the chain does NOT converge — it is a stable limit cycle
+
+Overnight measurements (dev.44, uninterrupted since 01:09):
+
+- Idle time per hour (dev-watch, 2s samples): 01:00h 10s, 02:00-07:31 ZERO.
+  The folder showed Scanning continuously for 6.5 hours.
+- ["."] full scans chained all night, one every ~11-13 min (03:42, 03:54,
+  04:05, 04:18 ... 07:14, 07:29; sweeps 5-8 min each).
+- Flagged-event rate decayed from 59k/10min (01:10, post-restart replay)
+  to hundreds/10min, but never reached zero (06:20 block: 5136 — some
+  nightly churn burst re-seeded it). As long as ANY flagged events arrive,
+  each aggregator batch escalates to ["."] and the next full scan keeps the
+  pipeline slow enough that fseventsd drops a few more. Limit cycle.
+- The sync-preparing fix HELD: watchdog streak=0 all night, no dumps, no
+  lingering sync-preparing. needFiles=0 throughout; pulls serviced.
+- yarlung: 0 warnings/errors in 8h, syncthing@jhf + btrfs socket active.
+
+Interpretation: healing every flagged event with a full 2.39M-file walk is
+too expensive for the flag rate a busy home dir generates. The flagged
+events are almost all redundant: the FSEvents journal on disk contains the
+events the client dropped (UserDropped is a client-side read failure), so a
+journal replay from the last persisted watermark covers the gap exactly,
+and replayed-from-journal flagged events are redundant by construction
+(the replay itself is the heal).
+
+## Proposed fixes (for user decision)
+
+A. Fork (notify): drop overflow-flagged events delivered during historical
+   replay (their gap is covered by the replay). Breaks the restart
+   amplifier. Care: MustScanSubDirs on the FIRST batch of a seeded stream
+   means "journal does not cover your seed" — that one must still heal.
+B. Syncthing: heal a LIVE overflow flag by re-seeding the fork from the
+   last persisted watermark and restarting the stream (exact, seconds),
+   falling back to a full walk when replay reports incomplete. Replaces the
+   11-minute blind walk per flag batch. Needs watermark plumbing from
+   model to fs layer.
+C. Fork: absorb bursts so fseventsd never drops — the stall is Dispatch
+   blocking on the Go channel while the aggregator's 10s flush waits on a
+   busy scan; a large async buffer inside the fork breaks that coupling.
+   Root-cause fix for flag GENERATION; A/B fix the expensive RESPONSE.
+D. Operational: ignore .pgadmin/sessions in .stignore (per-minute session
+   heartbeat file causes a targeted scan + sync every ~60s forever).
+
+Recommended: C+A first (small, fork-local), B as the semantic improvement.
+Instrumentation commits to revert before upstreaming: 8d0cefd30, 093f3bf9.
