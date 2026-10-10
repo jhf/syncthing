@@ -478,6 +478,18 @@ func (f *folder) btrfsRearmTimerFired(ctx context.Context) {
 func (f *folder) pairBtrfsBaseline(ctx context.Context, trigger string) bool {
 	f.sl.InfoContext(ctx, "Btrfs baseline: attempting pairing", "trigger", trigger)
 
+	// Scans run below must not dequeue watch batches between their chunks:
+	// the barrier has to see its canary batch itself, and every batch has
+	// to be scanned before pairing, not deferred past it.
+	f.watchHold = true
+	defer func() { f.watchHold = false }()
+	// Deferred batches were observed before anything still queued; scan
+	// them first.
+	if !f.pairingStep(ctx, trigger, "drain-pending", func() bool { return f.drainWatchPending(ctx) }) {
+		f.sl.InfoContext(ctx, "Btrfs baseline: pairing failed, deferred watch batches did not scan")
+		return false
+	}
+
 	// Drain every buffered watch event into the index. The barrier below is
 	// what proves completeness; this flush just keeps the barrier short.
 	var ack chan struct{}
