@@ -116,8 +116,12 @@ func (f *folder) servicePullRescan(ctx context.Context) (bool, error) {
 			return false, nil
 		}
 	}
-	f.pullRescanActive = true
-	defer func() { f.pullRescanActive = false }()
+	// Watch batches stay queued during this scan: one integrated into it
+	// could persist its watermark while a batch integrated into the running
+	// outer scan is still unwalked. The outer scan's next boundary takes them.
+	prevHold := f.watchHold
+	f.pullRescanActive, f.watchHold = true, true
+	defer func() { f.pullRescanActive, f.watchHold = false, prevHold }()
 	f.sl.DebugContext(ctx, "Rescanning names the puller found changed on disk", slog.Int("names", len(names)))
 	if err := f.scanSubdirs(ctx, names); err != nil {
 		if ctx.Err() == nil {

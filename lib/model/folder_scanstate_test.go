@@ -8,10 +8,12 @@ package model
 
 import (
 	"context"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
 	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/watchaggregator"
 )
 
 // stateDirtyingPuller simulates a pull that ran: the real puller moves the
@@ -88,5 +90,142 @@ func TestSweepRestoresScanningStateAfterPull(t *testing.T) {
 	}
 	if state, _, _ := f.getState(); state != FolderScanning {
 		t.Errorf("state after sweep = %s, want %s (the serviced pull left its state behind)", state, FolderScanning)
+	}
+}
+
+// TestServiceQueuedWatchSkipsNestedFullScan pins the guard against nested
+// full-folder scans: while a full-tree scan is running (fullScanActive
+// set), a full-folder watch batch serviced between chunks must be skipped -
+// running it would walk the whole tree a second time inside the first
+// scan's chunk budget (observed doubling full scans to 10-15min during the
+// 2026-10-10 fseventsd drop-flag storm). A targeted batch must still be
+// serviced. Teeth: without the guard the ["."] batch scans and the new
+// file is indexed; with it, only the targeted batch's file is.
+func TestServiceQueuedWatchSkipsNestedFullScan(t *testing.T) {
+	_, f := setupSendReceiveFolder(t)
+	ffs := f.Filesystem()
+	ctx := t.Context()
+
+	// The fixture's folder never served, so watchChan is nil; give it a
+	// buffered stand-in so the batch can be queued deterministically.
+	f.watchChan = make(chan watchaggregator.Batch, 1)
+
+	must(t, ffs.MkdirAll("skipme", 0o755))
+	writeFile(t, ffs, "skipme/newfile", []byte("x"))
+	must(t, ffs.MkdirAll("target", 0o755))
+	writeFile(t, ffs, "target/newfile", []byte("x"))
+
+	f.fullScanActive.Store(true)
+	defer f.fullScanActive.Store(false)
+
+	f.watchChan <- watchaggregator.Batch{Paths: []string{"."}}
+	_, err := f.serviceQueuedWatch(ctx)
+	must(t, err)
+
+	if _, ok, err := f.db.GetDeviceFile(f.ID, protocol.LocalDeviceID, "skipme/newfile"); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Error("full-folder watch batch was serviced during a running full scan")
+	}
+
+	f.watchChan <- watchaggregator.Batch{Paths: []string{"target"}}
+	_, err = f.serviceQueuedWatch(ctx)
+	must(t, err)
+	// No scan coverage is installed here, so the targeted batch is deferred
+	// (never scanned nested); the pending scan indexes it.
+	must(t, f.servicePendingWatch(ctx))
+
+	if _, ok, err := f.db.GetDeviceFile(f.ID, protocol.LocalDeviceID, "target/newfile"); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		t.Error("targeted watch batch dequeued during a running full scan was not scanned by the pending scan")
+	}
+}
+
+// TestServiceQueuedWatchNeverNests pins that a batch dequeued between scan
+// chunks is never scanned there: measured 2026-11-24, a 41-path batch
+// nested inside a subtree scan took 13 min and a root batch nested inside
+// one held the folder in "scanning" for 2 h 38 min. The batch is deferred
+// (nothing indexed yet, the Serve loop is signalled) and the pending scan
+// indexes it and persists its watermark. Teeth: before, serviceQueuedWatch
+// called scanSubdirs itself and target/newfile was indexed immediately.
+func TestServiceQueuedWatchNeverNests(t *testing.T) {
+	_, f := setupSendReceiveFolder(t)
+	ffs := f.Filesystem()
+	ctx := t.Context()
+	f.watchChan = make(chan watchaggregator.Batch, 1)
+
+	must(t, ffs.MkdirAll("target", 0o755))
+	writeFile(t, ffs, "target/newfile", []byte("x"))
+	// The fixture's full scan may have persisted the live journal position.
+	base := f.lastReplayWatermark.Load()
+
+	f.watchChan <- watchaggregator.Batch{Paths: []string{"target"}, MaxEventID: base + 4242}
+	ran, err := f.serviceQueuedWatch(ctx)
+	must(t, err)
+	if !ran {
+		t.Fatal("queued batch not dequeued")
+	}
+	if _, ok, err := f.db.GetDeviceFile(f.ID, protocol.LocalDeviceID, "target/newfile"); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("batch scanned nested inside the running scan's chunk boundary")
+	}
+	select {
+	case <-f.watchPendingReady:
+	default:
+		t.Fatal("Serve loop not signalled about the deferred batch")
+	}
+
+	must(t, f.servicePendingWatch(ctx))
+	if _, ok, err := f.db.GetDeviceFile(f.ID, protocol.LocalDeviceID, "target/newfile"); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		t.Error("deferred batch not scanned by the pending scan")
+	}
+	if got := f.lastReplayWatermark.Load(); got != base+4242 {
+		t.Errorf("watermark = %d after the pending scan, want %d", got, base+4242)
+	}
+	if f.watchPending != nil {
+		t.Error("pending set not cleared by a successful pending scan")
+	}
+}
+
+// TestWatchBatchIntegratesAheadOfWalkFrontier pins integration: a batch
+// whose paths the running walk has not reached yet is covered by that walk
+// and not scanned again, while a batch behind the frontier (or outside the
+// scanned subtree) is deferred. The integrated batch's watermark is
+// persisted when the scan succeeds.
+func TestWatchBatchIntegratesAheadOfWalkFrontier(t *testing.T) {
+	_, f := setupSendReceiveFolder(t)
+	ctx := t.Context()
+
+	p := filepath.FromSlash
+	base := f.lastReplayWatermark.Load()
+	cover, prev := f.beginScanCoverage([]string{"d"})
+	cover.walking = true
+	cover.frontier = p("d/m")
+
+	f.handleWatchBatchMidScan(ctx, watchaggregator.Batch{Paths: []string{p("d/z"), p("d/m/x")}, MaxEventID: base + 10})
+	if f.watchPending != nil {
+		t.Fatalf("paths ahead of the frontier deferred: %q", f.watchPending.set.Paths())
+	}
+	f.handleWatchBatchMidScan(ctx, watchaggregator.Batch{Paths: []string{p("d/a")}, MaxEventID: base + 11})
+	f.handleWatchBatchMidScan(ctx, watchaggregator.Batch{Paths: []string{"e"}, MaxEventID: base + 12})
+	if f.watchPending == nil {
+		t.Fatal("paths behind the frontier / outside the subtree not deferred")
+	}
+	if got := f.watchPending.set.Paths(); len(got) != 2 || got[0] != p("d/a") || got[1] != "e" {
+		t.Fatalf("pending = %q, want [d/a e]", got)
+	}
+
+	// The scan succeeds while deferred batches are pending: the integrated
+	// watermark must not be persisted ahead of them.
+	f.endScanCoverage(cover, prev, nil)
+	if got := f.lastReplayWatermark.Load(); got != base {
+		t.Fatalf("watermark moved %d -> %d ahead of pending batches", base, got)
+	}
+	if f.watchPending.maxID != base+12 {
+		t.Fatalf("pending watermark = %d, want %d", f.watchPending.maxID, base+12)
 	}
 }
