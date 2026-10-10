@@ -9,6 +9,7 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -309,5 +310,126 @@ func TestShutdownPairingHonoursBudget(t *testing.T) {
 	}
 	if !helper.got("rmsnap shutdown-") {
 		t.Fatalf("staging snapshot leaked after the budget ran out: %v", helper.calls)
+	}
+}
+
+// A runtime pairing that finds deferred watch batches must not scan them
+// itself: it stands down, marks itself due, and pairs once the Serve loop
+// has scanned them. On yarlung 2026-11-27 16:28:34 the pairing right after
+// a 2h2m full scan found 28 deferred directories and failed drain-pending
+// at 2m1.343s against its 2-minute deadline; the Serve loop then scanned
+// the same directories in 7m33s with changes=0.
+//
+// Teeth: drain the pending set inside the runtime pairing (the old
+// drain-pending path) and the first round snapshots with batches pending.
+func TestRuntimePairingWaitsForDeferredBatches(t *testing.T) {
+	helper := startPairingFakeHelper(t)
+	_, f, _ := barrierTestFolder(t)
+	ctx := t.Context()
+	f.btrfsOK = true
+	f.FSWatcherEnabled = true
+	f.fullScanOK.Store(true)
+	drainFlush(f)
+	markReady(f)
+	f.deferWatchPaths([]string{"pending-dir"}, 7)
+
+	f.btrfsPeriodicPair(ctx)
+	if helper.got("snap ") {
+		t.Fatalf("runtime pairing ran with deferred watch batches pending: %v", helper.calls)
+	}
+	if f.watchPending == nil {
+		t.Fatal("runtime pairing scanned the deferred watch batches itself")
+	}
+
+	// Still pending: the due pairing keeps waiting.
+	f.runDueBtrfsPairing(ctx)
+	if helper.got("snap ") {
+		t.Fatalf("due pairing ran with deferred watch batches pending: %v", helper.calls)
+	}
+
+	// The Serve loop scans the backlog; the due pairing then runs.
+	if err := f.servicePendingWatch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	feedCanary(t, f)
+	f.runDueBtrfsPairing(ctx)
+	if !helper.got("setbaseline runtime-") {
+		t.Fatalf("due pairing did not run once nothing was pending: %v", helper.calls)
+	}
+	if f.lastBtrfsRefresh.IsZero() {
+		t.Fatal("due pairing did not record its time")
+	}
+}
+
+// The runtime pairing runs without a deadline, so the barrier must end on
+// its own when the canary stops being on its way: the watch died
+// (monitorWatch clears fullScanOK and stops the aggregator).
+//
+// Teeth: without the watch-death check the barrier waits for a canary
+// that never comes, past the test's bound (before: until the old 2-minute
+// runtime deadline).
+func TestPairingBarrierEndsOnWatchDeath(t *testing.T) {
+	helper := startPairingFakeHelper(t)
+	_, f, _ := barrierTestFolder(t)
+	f.btrfsOK = true
+	f.FSWatcherEnabled = true
+	f.fullScanOK.Store(true)
+	drainFlush(f)
+	markReady(f)
+	// No feedCanary: the watch "dies" once the barrier has started.
+	go func() {
+		waitForCanary(t, f.Filesystem())
+		f.fullScanOK.Store(false)
+	}()
+
+	returned := make(chan struct{})
+	go func() {
+		f.refreshBtrfsBaseline(t.Context())
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("barrier kept waiting after the watch died")
+	}
+	if helper.got("setbaseline ") {
+		t.Fatalf("paired although the watch died during the barrier: %v", helper.calls)
+	}
+	if !f.lastBtrfsRefresh.IsZero() {
+		t.Fatal("failed pairing recorded a refresh")
+	}
+}
+
+// A full-folder watch batch dequeued inside a pairing is the Serve loop's
+// work, not the pairing's: the aggregator dropped every event it tracked
+// when it escalated, so the canary may never come, and the full walk took
+// 2h2m on yarlung. The pairing defers it and fails.
+//
+// Teeth: scan the root batch in the barrier (the old path) and the pending
+// set stays empty.
+func TestPairingDefersRootWatchBatch(t *testing.T) {
+	helper := startPairingFakeHelper(t)
+	_, f, _ := barrierTestFolder(t)
+	// Bounded so the old path (scan the root batch, then wait for a canary
+	// the escalation dropped) fails here instead of hanging.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	drainFlush(f)
+	go func() {
+		waitForCanary(t, f.Filesystem())
+		f.watchChan <- watchaggregator.Batch{Paths: []string{"."}, MaxEventID: 9}
+	}()
+
+	if f.pairBtrfsBaseline(ctx, "runtime") {
+		t.Fatal("pairing succeeded across a full-folder escalation")
+	}
+	if helper.got("setbaseline ") {
+		t.Fatalf("set a baseline across a full-folder escalation: %v", helper.calls)
+	}
+	if f.watchPending == nil || !f.watchPending.set.Root() {
+		t.Fatal("full-folder batch not deferred to the Serve loop")
+	}
+	if f.watchPending.maxID != 9 {
+		t.Fatalf("deferred watermark %d, want 9", f.watchPending.maxID)
 	}
 }

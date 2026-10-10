@@ -38,15 +38,15 @@ func liveLocalNames(t *testing.T, m *model, folder string) map[string]struct{} {
 }
 
 // TestScanChunkedServicesWatchEvents checks that a watch event queued while a chunked scan runs
-// is serviced between chunks, instead of waiting for the whole scan to finish. The Mac showed why
+// is dequeued between chunks, instead of waiting for the whole scan to finish. The Mac showed why
 // this matters: it scanned back to back for hours on a busy tree, and a directory created on disk
 // was never announced to the peer at all - the watch events waited behind every scan and were
 // lost before they were processed.
 //
 // The outer scan only covers "a"; the watch event names "b", which that walk can never reach, so
-// "b/file2" being indexed afterwards proves the event was serviced mid-scan. The send on the
-// unbuffered watch channel doubles as the handshake: it completes exactly when the chunk loop
-// accepts the event.
+// it is deferred (never scanned nested inside the running scan) and scanned by the pending
+// follow-up the Serve loop runs next. The send on the unbuffered watch channel doubles as the
+// handshake: it completes exactly when the chunk loop accepts the event.
 func TestScanChunkedServicesWatchEvents(t *testing.T) {
 	// Not parallel: mutates a package-level budget.
 	old := scanChunkBudget
@@ -80,13 +80,17 @@ func TestScanChunkedServicesWatchEvents(t *testing.T) {
 	default:
 		t.Fatal("the watch event was never serviced during the chunked scan")
 	}
+	if got := liveLocalNames(t, f.model, f.ID); func() bool { _, ok := got["b/file2"]; return ok }() {
+		t.Fatal("b/file2 indexed by the running scan of a: the batch was scanned nested")
+	}
+	must(t, f.servicePendingWatch(ctx))
 
 	got := liveLocalNames(t, f.model, f.ID)
 	if _, ok := got["a/file1"]; !ok {
 		t.Error("a/file1 missing after scanning a")
 	}
 	if _, ok := got["b/file2"]; !ok {
-		t.Error("b/file2 missing: the queued watch event was not serviced between chunks")
+		t.Error("b/file2 missing: the dequeued watch event was not deferred to the pending scan")
 	}
 }
 
@@ -143,10 +147,11 @@ func TestScanChunkedBoundaryWithoutResults(t *testing.T) {
 	default:
 		t.Fatal("no chunk boundary happened during a walk without results; the watch event was not serviced")
 	}
+	must(t, f.servicePendingWatch(ctx))
 
 	got := liveLocalNames(t, f.model, f.ID)
 	if _, ok := got["d2/new"]; !ok {
-		t.Error("d2/new missing: the queued watch event was not serviced between chunks")
+		t.Error("d2/new missing: the dequeued watch event was not deferred to the pending scan")
 	}
 }
 
@@ -502,10 +507,13 @@ func TestScanSweepServicesWatch(t *testing.T) {
 	default:
 		t.Fatal("the sweep ran to completion without servicing the queued watch event")
 	}
+	// The dequeued batch is deferred, never scanned nested inside the sweep;
+	// the pending scan the Serve loop runs next indexes it.
+	must(t, f.servicePendingWatch(ctx))
 
 	got := liveLocalNames(t, f.model, f.ID)
 	if _, ok := got["d2/new"]; !ok {
-		t.Error("d2/new missing: the queued watch event was not serviced inside the sweep")
+		t.Error("d2/new missing: the watch event dequeued inside the sweep was not deferred to the pending scan")
 	}
 }
 
