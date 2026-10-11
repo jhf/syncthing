@@ -641,7 +641,7 @@ var watchBarrierReflushInterval = 250 * time.Millisecond
 // boot runs the regular full scan. The watch is still alive here (its
 // context outlives Serve's); it is stopped by Serve's defer afterwards.
 // ctx is the folder's shared shutdown budget (shutdownWork): whatever the
-// shutdown steps before it left of it.
+// watch-queue drain left of it.
 func (f *folder) shutdownBtrfsBaseline(ctx context.Context) {
 	if !f.btrfsOK || !f.FSWatcherEnabled {
 		f.sl.InfoContext(ctx, "Btrfs baseline: skipping pairing", "btrfsOK", f.btrfsOK, "fsWatcher", f.FSWatcherEnabled)
@@ -655,7 +655,7 @@ func (f *folder) shutdownBtrfsBaseline(ctx context.Context) {
 		return
 	}
 	if ctx.Err() != nil {
-		f.sl.InfoContext(ctx, "Btrfs baseline: skipping pairing, shutdown budget already spent")
+		f.sl.InfoContext(ctx, "Btrfs baseline: skipping pairing, shutdown budget spent by the watch-queue drain")
 	} else if f.pairBtrfsBaseline(ctx, "shutdown") {
 		return
 	}

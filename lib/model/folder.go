@@ -1934,21 +1934,78 @@ func (f *folder) persistWatchReplayWatermark(id uint64) {
 // folderShutdownBudget bounds shutdownWork; a var so tests can shrink it.
 var folderShutdownBudget = svcutil.ShutdownBudget
 
-// shutdownWork runs the folder's shutdown steps under ONE deadline. The
-// btrfs pairing had its own 90 s deadline, which outran both the
-// supervisors' stop timeout and systemd's TimeoutStopSec, so the process
-// was abandoned mid-pairing (yarlung 2026-11-24, three times: "Database
-// failed to stop within 10s" 20 s after the signal). The supervisors on
-// the folder path wait svcutil.ShutdownServiceTimeout, which covers this
-// budget plus the bounded snapshot cleanup.
+// shutdownWork runs the folder's shutdown steps under ONE deadline: the
+// watch-queue drain, then the btrfs baseline pairing. They had separate
+// 2 min and 90 s deadlines that together exceeded both the supervisors'
+// stop timeout and systemd's TimeoutStopSec, so the process was abandoned
+// mid-pairing (yarlung 2026-11-24, three times: "Database failed to stop
+// within 10s" 20 s after the signal). The supervisors on the folder path
+// wait svcutil.ShutdownServiceTimeout, which covers this budget plus the
+// bounded snapshot cleanup.
 func (f *folder) shutdownWork() {
 	ctx, cancel := context.WithTimeout(context.Background(), folderShutdownBudget)
 	defer cancel()
 	start := time.Now()
+	f.drainWatchQueueOnShutdown(ctx)
 	close(f.done)
 	f.shutdownBtrfsBaseline(ctx)
 	if ctx.Err() != nil {
 		f.sl.Info("Folder shutdown budget exhausted, remaining shutdown work skipped", "budget", folderShutdownBudget, "elapsed", time.Since(start).Round(time.Millisecond))
+	}
+}
+
+// drainWatchQueueOnShutdown scans the watch batches still queued when the
+// folder shuts down, then persists the highest journal position they carry.
+// The watermark only ever advances behind completed scans, so without this
+// the position left behind at exit is stale by everything delivered but not
+// yet scanned - measured 15 min / 1.65M journal events on a busy machine,
+// which the next boot pays for as a long replay and its drop-flag storm.
+// A queued root rescan cannot be drained cheaply, so it skips the flush and
+// leaves the watermark behind; the next boot takes the lossy/full-scan
+// path, which is correct, just slower. Deferred batches (the pending set)
+// were observed before anything still queued and drain with them. ctx is
+// the folder's shared shutdown budget (shutdownWork).
+func (f *folder) drainWatchQueueOnShutdown(ctx context.Context) {
+	paths, maxEventID := f.takeWatchPending()
+	if len(paths) == 1 && (paths[0] == "." || paths[0] == "") {
+		f.sl.Info("Not draining watch queue on shutdown: root rescan pending, watermark left behind")
+		return
+	}
+	var batches int
+	// The drain scan must not dequeue (and defer) batches mid-scan: nothing
+	// would scan them after it.
+	f.watchHold = true
+	defer func() { f.watchHold = false }()
+	for {
+		select {
+		case b := <-f.watchChan:
+			for _, p := range b.Paths {
+				if p == "." || p == "" {
+					f.sl.Info("Not draining watch queue on shutdown: root rescan queued, watermark left behind", "droppedBatches", batches)
+					return
+				}
+			}
+			batches++
+			paths = append(paths, b.Paths...)
+			if b.MaxEventID > maxEventID {
+				maxEventID = b.MaxEventID
+			}
+		default:
+			if maxEventID == 0 {
+				return
+			}
+			subs := unifySubs(paths, func(file string) bool {
+				_, ok, err := f.db.GetDeviceFile(f.folderID, protocol.LocalDeviceID, file)
+				return err == nil && ok
+			})
+			if err := f.scanSubdirs(ctx, subs); err != nil {
+				f.sl.Info("Shutdown watch-queue drain scan failed, watermark left behind", slogutil.Error(err))
+				return
+			}
+			f.persistWatchReplayWatermark(maxEventID)
+			f.sl.Info("Drained watch queue before shutdown", "batches", batches, "paths", len(subs), "watermark", maxEventID)
+			return
+		}
 	}
 }
 
