@@ -300,9 +300,26 @@ angular.module('syncthing.core')
             }
         });
 
+        // Fire-and-forget correlation hook: when the server runs with
+        // STGUISTATELOG set, every folder state transition observed by the
+        // GUI is POSTed back and logged server-side, so UI-observed times
+        // can be correlated with backend transitions in the same log.
+        function reportUIStateChange(folder, from, to, source, eventID, eventTime) {
+            $http.post(urlbase + '/debug/uistate', {
+                folder: folder,
+                from: '' + from,
+                to: '' + to,
+                source: source,
+                clientTime: new Date().toISOString(),
+                eventID: eventID || 0,
+                eventTime: eventTime || '',
+            }).error(function () { /* endpoint may not exist; ignore */ });
+        }
+
         $scope.$on(Events.STATE_CHANGED, function (event, arg) {
             var data = arg.data;
             if ($scope.model[data.folder]) {
+                reportUIStateChange(data.folder, data.from, data.to, 'event', arg.globalID, arg.time);
                 $scope.model[data.folder].state = data.to;
                 $scope.model[data.folder].error = data.error;
 
@@ -543,6 +560,13 @@ angular.module('syncthing.core')
             if (!debouncedFuncs[key]) {
                 debouncedFuncs[key] = debounce(function () {
                     $http.get(urlbase + '/db/status?folder=' + encodeURIComponent(folder)).success(function (data) {
+                        // Poll-path state changes (StateChanged events can be
+                        // missed, e.g. on event-buffer overflow): report the
+                        // transition the poll observes, before overwriting.
+                        var prev = $scope.model[folder];
+                        if (prev && prev.state && prev.state !== data.state) {
+                            reportUIStateChange(folder, prev.state, data.state, 'poll', 0, data.stateChanged || '');
+                        }
                         $scope.model[folder] = data;
                         recalcLocalStateTotal();
                         console.log("refreshFolder", folder, data);

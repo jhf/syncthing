@@ -340,6 +340,11 @@ func (s *service) Serve(ctx context.Context) error {
 	debugMux.HandleFunc("/rest/debug/support", s.getSupportBundle)
 	debugMux.HandleFunc("/rest/debug/file", s.getDebugFile)
 	restMux.Handler(http.MethodGet, "/rest/debug/*method", debugMux)
+	// UI state-correlation hook (STGUISTATELOG): the GUI POSTs the folder
+	// state transitions it observes here so that UI-observed times can be
+	// correlated with backend transitions in the log. POST, not GET, so it
+	// lives outside the debugMux above.
+	restMux.HandlerFunc(http.MethodPost, "/rest/debug/uistate", s.postDebugUIState)
 
 	// A handler that disables caching
 	noCacheRestMux := noCacheMiddleware(restMux)
@@ -972,6 +977,26 @@ func (s *service) getDebugFile(w http.ResponseWriter, r *http.Request) {
 		"local":        jsonFileInfo(lf),
 		"availability": av,
 	})
+}
+
+// postDebugUIState receives folder state transitions as observed by the GUI
+// and logs them when STGUISTATELOG is set, so UI-observed transition times
+// can be correlated with backend state changes in the same log. Always 204:
+// the GUI call is fire-and-forget and must never surface an error.
+func (s *service) postDebugUIState(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Folder     string `json:"folder"`
+		From       string `json:"from"`
+		To         string `json:"to"`
+		Source     string `json:"source"`
+		ClientTime string `json:"clientTime"`
+		EventID    int64  `json:"eventID"`
+		EventTime  string `json:"eventTime"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err == nil && os.Getenv("STGUISTATELOG") != "" {
+		slog.Info("uistate", "folder", req.Folder, "from", req.From, "to", req.To, "source", req.Source, "clientTime", req.ClientTime, "eventID", req.EventID, "eventTime", req.EventTime)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *service) postSystemRestart(w http.ResponseWriter, _ *http.Request) {
