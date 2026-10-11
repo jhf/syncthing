@@ -46,6 +46,39 @@ syncthing.config(function ($httpProvider, $translateProvider, LocaleServiceProvi
     $httpProvider.defaults.xsrfCookieName = 'CSRF-Token-' + metadata.deviceIDShort;
 });
 
+// Report uncaught JS exceptions and global errors to the backend log (POST
+// /rest/system/error -> "External error report"), so frontend failures are
+// visible and time-correlatable in the same log as backend events.
+// Throttled to one report per 5 s so an exception looping in a digest
+// cannot storm the log.
+var lastFrontendErrorReport = 0;
+
+function reportFrontendError($injector, message) {
+    var now = Date.now();
+    if (now - lastFrontendErrorReport < 5000) {
+        return;
+    }
+    lastFrontendErrorReport = now;
+    try {
+        $injector.get('$http').post(urlbase + '/system/error', message).error(function () { /* ignore */ });
+    } catch (e) { /* error reporting must never throw */ }
+}
+
+syncthing.config(function ($provide) {
+    $provide.decorator('$exceptionHandler', function ($delegate, $injector) {
+        return function (exception, cause) {
+            $delegate(exception, cause);
+            reportFrontendError($injector, 'JS exception: ' + exception + (cause ? ' (cause: ' + cause + ')' : ''));
+        };
+    });
+});
+
+syncthing.run(function ($injector) {
+    window.addEventListener('error', function (ev) {
+        reportFrontendError($injector, 'JS error: ' + ev.message + ' (' + (ev.filename || '?') + ':' + (ev.lineno || 0) + ')');
+    });
+});
+
 // @TODO: extract global level functions into separate service(s)
 
 function deviceCompare(a, b) {
