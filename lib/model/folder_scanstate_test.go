@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/watchaggregator"
 )
 
 // stateDirtyingPuller simulates a pull that ran: the real puller moves the
@@ -88,5 +89,49 @@ func TestSweepRestoresScanningStateAfterPull(t *testing.T) {
 	}
 	if state, _, _ := f.getState(); state != FolderScanning {
 		t.Errorf("state after sweep = %s, want %s (the serviced pull left its state behind)", state, FolderScanning)
+	}
+}
+
+// TestServiceQueuedWatchSkipsNestedFullScan pins the guard against nested
+// full-folder scans: while a full-tree scan is running (fullScanActive
+// set), a full-folder watch batch serviced between chunks must be skipped -
+// running it would walk the whole tree a second time inside the first
+// scan's chunk budget (observed doubling full scans to 10-15min during the
+// 2026-10-10 fseventsd drop-flag storm). A targeted batch must still be
+// serviced. Teeth: without the guard the ["."] batch scans and the new
+// file is indexed; with it, only the targeted batch's file is.
+func TestServiceQueuedWatchSkipsNestedFullScan(t *testing.T) {
+	_, f := setupSendReceiveFolder(t)
+	ffs := f.Filesystem()
+	ctx := t.Context()
+
+	// The fixture's folder never served, so watchChan is nil; give it a
+	// buffered stand-in so the batch can be queued deterministically.
+	f.watchChan = make(chan watchaggregator.Batch, 1)
+
+	must(t, ffs.MkdirAll("skipme", 0o755))
+	writeFile(t, ffs, "skipme/newfile", []byte("x"))
+	must(t, ffs.MkdirAll("target", 0o755))
+	writeFile(t, ffs, "target/newfile", []byte("x"))
+
+	f.fullScanActive.Store(true)
+	defer f.fullScanActive.Store(false)
+
+	f.watchChan <- watchaggregator.Batch{Paths: []string{"."}}
+	must(t, f.serviceQueuedWatch(ctx))
+
+	if _, ok, err := f.db.GetDeviceFile(f.ID, protocol.LocalDeviceID, "skipme/newfile"); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Error("full-folder watch batch was serviced during a running full scan")
+	}
+
+	f.watchChan <- watchaggregator.Batch{Paths: []string{"target"}}
+	must(t, f.serviceQueuedWatch(ctx))
+
+	if _, ok, err := f.db.GetDeviceFile(f.ID, protocol.LocalDeviceID, "target/newfile"); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		t.Error("targeted watch batch was not serviced during a running full scan")
 	}
 }
