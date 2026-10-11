@@ -176,6 +176,13 @@ func (s *stateTracker) setError(err error) {
 
 	eventData["to"] = s.current.String()
 
+	if eventData["from"] != eventData["to"] {
+		// Same visibility as setState: a scanning->idle transition lands here
+		// (via setError(nil) at scan end) and would otherwise leave the log
+		// showing a folder that scans forever.
+		slog.Debug("Folder changed state", "folder", s.folderID, "state", s.current, "from", eventData["from"])
+	}
+
 	if !s.changed.IsZero() {
 		eventData["duration"] = time.Since(s.changed).Seconds()
 	}
