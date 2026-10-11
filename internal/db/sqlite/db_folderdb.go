@@ -263,6 +263,7 @@ func (s *DB) AllNeededGlobalFilesCached(folder string, device protocol.DeviceID)
 	if err != nil {
 		return nil, err
 	}
+	fdb.ensureNeedBuild()
 	files, _, err := fdb.neededGlobalFilesCached(device, time.Now())
 	return files, err
 }
@@ -352,6 +353,7 @@ func (s *DB) CountNeed(folder string, device protocol.DeviceID) (db.Counts, erro
 	if err != nil {
 		return db.Counts{}, err
 	}
+	fdb.ensureNeedBuild()
 	return fdb.CountNeed(device)
 }
 
