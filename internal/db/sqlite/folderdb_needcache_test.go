@@ -30,7 +30,7 @@ func TestNeedCountCache(t *testing.T) {
 		t.Fatal("empty cache returned a value")
 	}
 
-	c.put(devA, first, now)
+	c.put(devA, first, now, c.snapshot())
 
 	// Without an invalidation the value holds.
 	if got, ok := c.get(devA, now.Add(time.Second)); !ok || got.Files != first.Files {
@@ -52,20 +52,20 @@ func TestNeedCountCache(t *testing.T) {
 
 	// Invalidating because of one device invalidates all of them: another
 	// device's index can change what this device is counted as needing.
-	c.put(devB, first, now)
+	c.put(devB, first, now, c.snapshot())
 	c.invalidate()
 	if _, ok := c.get(devB, now.Add(needCountCacheMinRecompute)); ok {
 		t.Fatal("a write must invalidate every device's entry, not just one")
 	}
 
 	// An entry is dropped once it is old enough even if nothing invalidated it.
-	c.put(devA, first, now)
+	c.put(devA, first, now, c.snapshot())
 	if _, ok := c.get(devA, now.Add(needCountCacheTTL)); ok {
 		t.Fatal("an entry past its TTL should miss")
 	}
 
 	// Newer values replace older ones and clear the invalid flag.
-	c.put(devA, second, now.Add(needCountCacheMinRecompute))
+	c.put(devA, second, now.Add(needCountCacheMinRecompute), c.snapshot())
 	if got, ok := c.get(devA, now.Add(needCountCacheMinRecompute)); !ok || got.Files != second.Files {
 		t.Fatalf("replacement: got %v ok=%v", got, ok)
 	}
@@ -190,12 +190,12 @@ func TestNeedListCache(t *testing.T) {
 	// A cached empty list is still a hit. That is the common case: a folder that
 	// is in sync has nothing to report, and recomputing seconds of query work
 	// every time such a view is opened is the bug this cache exists to fix.
-	c.put(devA, nil, now)
+	c.put(devA, nil, now, c.snapshot())
 	if files, ok := c.get(devA, now.Add(time.Second)); !ok || len(files) != 0 {
 		t.Fatalf("empty entry: got %v ok=%v", files, ok)
 	}
 
-	c.put(devB, first, now)
+	c.put(devB, first, now, c.snapshot())
 	if got, ok := c.get(devB, now.Add(time.Second)); !ok || len(got) != len(first) {
 		t.Fatalf("uninvalidated entry: got %v ok=%v", got, ok)
 	}
@@ -215,20 +215,20 @@ func TestNeedListCache(t *testing.T) {
 
 	// Invalidating because of one device invalidates all of them: another
 	// device's index decides what this one is missing.
-	c.put(devA, first, now)
+	c.put(devA, first, now, c.snapshot())
 	c.invalidate()
 	if _, ok := c.get(devA, now.Add(needCountCacheMinRecompute)); ok {
 		t.Fatal("a write must invalidate every device's entry, not just one")
 	}
 
 	// An entry is dropped once it is old enough even if nothing invalidated it.
-	c.put(devA, second, now)
+	c.put(devA, second, now, c.snapshot())
 	if _, ok := c.get(devA, now.Add(needCountCacheTTL)); ok {
 		t.Fatal("an entry past its TTL should miss")
 	}
 
 	// A newer value replaces the old one and clears the invalid flag.
-	c.put(devB, second, now.Add(needCountCacheMinRecompute))
+	c.put(devB, second, now.Add(needCountCacheMinRecompute), c.snapshot())
 	if got, ok := c.get(devB, now.Add(needCountCacheMinRecompute)); !ok || len(got) != 1 || got[0].Name != "c" {
 		t.Fatalf("replacement: got %v ok=%v", got, ok)
 	}
@@ -337,5 +337,70 @@ func TestNeedListCacheInvalidation(t *testing.T) {
 		t.Fatal(err)
 	} else if !hit {
 		t.Fatal("the recomputed list was not cached")
+	}
+}
+
+// TestNeedCountCachePutAcrossInvalidate verifies that a recomputation which
+// started before an invalidation cannot store its result as valid: the query
+// read a snapshot from before the write, so the result is stale. The entry
+// must stay invalid so that the next read past the minimum-recompute floor
+// recomputes. This is the race that let a multi-second need query, finished
+// after a remote index update landed, pin a stale "out of sync" count in the
+// cache for up to the full TTL.
+func TestNeedCountCachePutAcrossInvalidate(t *testing.T) {
+	t.Parallel()
+
+	dev := protocol.DeviceID{1}
+	stale := db.Counts{Files: 1}
+	fresh := db.Counts{Files: 0}
+	now := time.Unix(0, 0)
+
+	c := new(needCountCache)
+	c.put(dev, stale, now, c.snapshot())
+
+	// A recomputation starts and snapshots the epoch...
+	epoch := c.snapshot()
+
+	// ... a write lands while the query runs ...
+	c.invalidate()
+
+	// ... and the query finishes with a result from its pre-write snapshot.
+	c.put(dev, stale, now.Add(10*time.Second), epoch)
+
+	// The stale result must not become the valid cached value: reads past the
+	// floor must miss.
+	if got, ok := c.get(dev, now.Add(10*time.Second+needCountCacheMinRecompute)); ok {
+		t.Fatalf("stale result was stored over an invalidation: %v", got)
+	}
+
+	// A put that raced no invalidation stores normally.
+	c.put(dev, fresh, now.Add(20*time.Second), c.snapshot())
+	if got, ok := c.get(dev, now.Add(21*time.Second)); !ok || got.Files != fresh.Files {
+		t.Fatalf("current-epoch put must store: %v ok=%v", got, ok)
+	}
+}
+
+// TestNeedListCachePutAcrossInvalidate is the same race guard for the need
+// list cache.
+func TestNeedListCachePutAcrossInvalidate(t *testing.T) {
+	t.Parallel()
+
+	dev := protocol.DeviceID{1}
+	now := time.Unix(0, 0)
+
+	c := new(needListCache)
+	c.put(dev, []protocol.FileInfo{{Name: "stale"}}, now, c.snapshot())
+
+	epoch := c.snapshot()
+	c.invalidate()
+	c.put(dev, []protocol.FileInfo{{Name: "stale-2"}}, now.Add(10*time.Second), epoch)
+
+	if got, ok := c.get(dev, now.Add(10*time.Second+needCountCacheMinRecompute)); ok {
+		t.Fatalf("stale list was stored over an invalidation: %v", got)
+	}
+
+	c.put(dev, []protocol.FileInfo{{Name: "fresh"}}, now.Add(20*time.Second), c.snapshot())
+	if got, ok := c.get(dev, now.Add(21*time.Second)); !ok || len(got) != 1 || got[0].Name != "fresh" {
+		t.Fatalf("current-epoch put must store: %v ok=%v", got, ok)
 	}
 }
