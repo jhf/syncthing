@@ -64,6 +64,7 @@ type folder struct {
 	scanInterval           time.Duration
 	scanTimer              *time.Timer
 	watchScanDepth         int // >0 while servicing a watch-triggered scan between chunks
+	fullScanActive         atomic.Bool // true while a full-tree scan is running
 	scanDelay              chan time.Duration
 	initialScanFinished    chan struct{}
 	scanScheduled          chan struct{}
@@ -569,6 +570,17 @@ func (f *folder) serviceQueuedWatch(ctx context.Context) error {
 	}
 	select {
 	case fsEvents := <-f.watchChan:
+		// A full-folder escalation serviced while a full-tree scan is
+		// already running would walk the whole tree a second time inside
+		// the first scan's chunk budget - the doubling was measured at
+		// 10-15 min per scan during the 2026-10-10 fseventsd drop-flag
+		// storm. The running scan covers the tree; the skipped batch's
+		// watermark stays unpersisted, so a later restart replays anything
+		// the running scan walked past before the batch's events landed.
+		if f.fullScanActive.Load() && len(fsEvents.Paths) == 1 && (fsEvents.Paths[0] == "." || fsEvents.Paths[0] == "") {
+			f.sl.DebugContext(ctx, "Skipping full-folder watch batch during a running full scan")
+			return nil
+		}
 		f.sl.DebugContext(ctx, "Scan due to watcher (serviced between scan chunks)")
 		f.watchScanDepth++
 		defer func() { f.watchScanDepth-- }()
@@ -654,6 +666,14 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 		}
 
 		subDirs[i] = sub
+	}
+
+	// A full-tree scan (nil subDirs, or the watch escalation ["."]) covers
+	// everything; serviceQueuedWatch consults this to avoid nesting a second
+	// full walk inside this one's chunk budget.
+	if subDirs == nil || (len(subDirs) == 1 && (subDirs[0] == "." || subDirs[0] == "")) {
+		f.fullScanActive.Store(true)
+		defer f.fullScanActive.Store(false)
 	}
 
 	// Clean the list of subitems to ensure that we start at a known
