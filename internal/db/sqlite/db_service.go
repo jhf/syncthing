@@ -238,17 +238,63 @@ func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB) error {
 	// Dropping rows can change what a device is counted as needing.
 	defer fdb.invalidateNeedCounts()
 	l.DebugContext(ctx, "Forgetting deleted files", "retention", fdb.deleteRetention)
-	res, err := fdb.stmt(`
-		DELETE FROM files
-		WHERE deleted
-			AND modified != ?
-			AND modified < ?
-			AND local_flags & {{.FlagLocalNeeded}} == 0
-			AND sequence NOT IN (
-				SELECT sequence FROM indexids WHERE device_idx = {{.LocalDeviceIdx}}
-			)
-	`).Exec(recvEncModified, time.Now().Add(-fdb.deleteRetention).UnixNano())
+	cutoff := time.Now().Add(-fdb.deleteRetention).UnixNano()
+	if !fdb.needBuilt.Load() {
+		res, err := fdb.stmt(`
+			DELETE FROM files
+			WHERE deleted
+				AND modified != ?
+				AND modified < ?
+				AND local_flags & {{.FlagLocalNeeded}} == 0
+				AND sequence NOT IN (
+					SELECT sequence FROM indexids WHERE device_idx = {{.LocalDeviceIdx}}
+				)
+		`).Exec(recvEncModified, cutoff)
+		if err != nil {
+			return wrap(err)
+		}
+		if aff, err := res.RowsAffected(); err == nil {
+			l.DebugContext(ctx, "Removed old deleted file records", "affected", aff)
+		}
+		return nil
+	}
+
+	// With the need tables maintained, dropping rows must be followed by a
+	// per-name recalc: the dropped row may have carried the global flag or
+	// been the row that satisfied a device's need. Receive-encrypted rows
+	// (fixed sentinel timestamp) and rows still referenced by the index
+	// sender's high-water mark are never dropped.
+	fdb.updateLock.Lock()
+	defer fdb.updateLock.Unlock()
+	tx, err := fdb.sql.BeginTxx(ctx, nil)
 	if err != nil {
+		return wrap(err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	txp := &txPreparedStmts{Tx: tx}
+	var names []string
+	if err := txp.Select(&names, `
+		SELECT DISTINCT n.name FROM files f
+		INNER JOIN file_names n ON n.idx = f.name_idx
+		WHERE f.deleted AND f.modified != ? AND f.modified < ? AND f.local_flags & ? = 0
+			AND f.sequence NOT IN (SELECT sequence FROM indexids WHERE device_idx = ?)
+	`, recvEncModified, cutoff, protocol.FlagLocalNeeded, fdb.localDeviceIdx); err != nil {
+		return wrap(err)
+	}
+	res, err := txp.Exec(`
+		DELETE FROM files
+		WHERE deleted AND modified != ? AND modified < ? AND local_flags & ? = 0
+			AND sequence NOT IN (SELECT sequence FROM indexids WHERE device_idx = ?)
+	`, recvEncModified, cutoff, protocol.FlagLocalNeeded, fdb.localDeviceIdx)
+	if err != nil {
+		return wrap(err)
+	}
+	for _, name := range names {
+		if err := fdb.recalcGlobalForFile(txp, name); err != nil {
+			return wrap(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return wrap(err)
 	}
 	if aff, err := res.RowsAffected(); err == nil {

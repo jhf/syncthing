@@ -153,6 +153,10 @@ func (s *folderDB) neededGlobalFilesLocal(selectOpts string, limit, offset int) 
 }
 
 func (s *folderDB) neededGlobalFilesRemote(device protocol.DeviceID, selectOpts string, limit, offset int) (iter.Seq[protocol.FileInfo], func() error) {
+	if s.needBuilt.Load() && s.needDeviceKnown(device) {
+		return s.neededGlobalFilesFromDetail(device, selectOpts, limit, offset)
+	}
+
 	// Select:
 	//
 	// - all the valid, non-deleted global files that don't have a
