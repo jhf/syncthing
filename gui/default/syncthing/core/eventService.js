@@ -39,7 +39,17 @@ angular.module('syncthing.core')
         // ---- fetch transport (throttle-immune) ------------------------------
 
         function fetchPoll(url) {
-            fetch(url, { credentials: 'same-origin' })
+            // The CSRF middleware rejects any /rest/ request without a valid
+            // token header, GETs included. Angular's $http adds it
+            // automatically via its XSRF config; fetch does not, so set it
+            // explicitly from the cookie. Missing header -> 403 -> the
+            // handler below reloads the page, forever.
+            var headers = {};
+            var csrf = document.cookie.match(/(?:^|; )CSRF-Token-([^=]+)=([^;]+)/);
+            if (csrf) {
+                headers['X-CSRF-Token-' + csrf[1]] = csrf[2];
+            }
+            fetch(url, { credentials: 'same-origin', headers: headers })
                 .then(function (response) {
                     if (response.status === 403) {
                         // Auth error - reload login page
