@@ -261,3 +261,29 @@ resumes and re-walks the same tree. Tonight's 10-15 min scans were
 multiple full walks sharing one budget. Any A-style change should skip
 nested ["."] scans outright (the outer walk covers the tree; the flagged
 gap is backstopped by the watermark not advancing past that batch).
+
+## 2026-10-11 14:20 - A and B deployed (dev.52)
+
+**A (syncthing 965fe8ea4, teeth-tested)**: `fullScanActive` marks a running
+full-tree scan (nil subs or `["."]`); `serviceQueuedWatch` drops a
+full-folder watch batch while it is set instead of nesting a second full
+walk inside the first scan's chunk budget. Targeted batches still service.
+The skipped batch's replay watermark stays unpersisted, so a restart still
+replays anything the running scan walked past.
+`TestServiceQueuedWatchSkipsNestedFullScan` fails without the guard (the
+`["."]` batch scans and indexes the probe file).
+
+**B (notify fork 37a442f, teeth-tested)**: on a live `UserDropped` the fork
+restarts the FSEvents stream from the last examined event ID and strips
+`UserDropped|MustScanSubDirs` from replayed records up to the heal target,
+so a flagged batch heals by bounded journal replay instead of a 10-minute
+full walk. Boot replay, `KernelDropped`, `EventIdsWrapped`, `RootChanged`,
+and heal-restart failure all keep the old full-scan fallback.
+`TestDispatchHealsUserDroppedByReplay` fails with the heal branch disabled.
+
+Deployed as dev.52 (fb73048d + guard; fork 37a442f; sha256
+11134a3dc5d4c3b56967715c5270445bdff40ce337da32d98313503e2fb12b14), REST
+`system/version` confirms. Watch: flag rate (`MustScanSubDirs` in
+/tmp/custom-serve-sttrace.log), full-scan cadence (`fullScanCount`),
+heal count, idle fraction. If fseventsd keeps flagging under load, the heal
+may need a rate limit.
