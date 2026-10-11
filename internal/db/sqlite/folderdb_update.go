@@ -52,6 +52,15 @@ func (s *folderDB) Update(device protocol.DeviceID, fs []protocol.FileInfo, opti
 	defer tx.Rollback() //nolint:errcheck
 	txp := &txPreparedStmts{Tx: tx}
 
+	// A device the need tracking does not know yet gets its full detail set
+	// before the batch lands; the batch's per-name maintenance then adjusts
+	// the names it announces.
+	if device != protocol.LocalDeviceID && s.needBuilt.Load() {
+		if err := s.backfillNeedForDevice(txp, deviceIdx); err != nil {
+			return wrap(err)
+		}
+	}
+
 	//nolint:sqlclosecheck
 	insertNameStmt, err := txp.Preparex(`
 		INSERT INTO file_names(name)
@@ -301,6 +310,15 @@ func (s *folderDB) DropDevice(device protocol.DeviceID) error {
 		return wrap(err)
 	}
 
+	// The cascade removed every row the device had, which moves globals and
+	// changes every other device's needs in ways per-name maintenance does
+	// not see; rebuild the need tables in the background instead.
+	if s.needTrackingActive() {
+		if err := s.resetNeedTracking(txp); err != nil {
+			return wrap(err)
+		}
+	}
+
 	return wrap(tx.Commit())
 }
 
@@ -354,6 +372,15 @@ func (s *folderDB) DropAllFiles(device protocol.DeviceID) error {
 
 	if err := s.recalcGlobalForFolder(txp); err != nil {
 		return wrap(err)
+	}
+
+	// The device's rows are all gone: it now needs every global, and globals
+	// it held moved to other rows. Too broad for per-name maintenance; reset
+	// and let the background builder redo the need tables.
+	if s.needTrackingActive() {
+		if err := s.resetNeedTracking(txp); err != nil {
+			return wrap(err)
+		}
 	}
 	return wrap(tx.Commit())
 }
@@ -553,7 +580,7 @@ func (s *folderDB) recalcGlobalForFolder(txp *txPreparedStmts) error {
 func (s *folderDB) recalcGlobalForFile(txp *txPreparedStmts, file string) error {
 	//nolint:sqlclosecheck
 	selStmt, err := txp.Preparex(`
-		SELECT n.name, f.device_idx, f.sequence, f.modified, v.version, f.deleted, f.local_flags FROM files f
+		SELECT n.name, n.idx AS name_idx, f.device_idx, f.sequence, f.type, f.modified, f.size, v.version, f.deleted, f.local_flags FROM files f
 		INNER JOIN file_versions v ON v.idx = f.version_idx
 		INNER JOIN file_names n ON n.idx = f.name_idx
 		WHERE n.name = ?
@@ -566,7 +593,11 @@ func (s *folderDB) recalcGlobalForFile(txp *txPreparedStmts, file string) error 
 		return wrap(err)
 	}
 	if len(es) == 0 {
-		// shouldn't happen
+		// All rows for the name are gone; make sure the maintained need
+		// tables do not keep a stale contribution for it.
+		if s.needTrackingActive() {
+			return s.clearNeedForName(txp, file)
+		}
 		return nil
 	}
 
@@ -575,16 +606,16 @@ func (s *folderDB) recalcGlobalForFile(txp *txPreparedStmts, file string) error 
 
 	// The global version is the first one in the list that is not invalid,
 	// or just the first one in the list if all are invalid.
-	var global fileRow
-	globIdx := max(slices.IndexFunc(es, func(e fileRow) bool { return !e.IsInvalid() }), 0)
-	global = es[globIdx]
+	globRaw := slices.IndexFunc(es, func(e fileRow) bool { return !e.IsInvalid() })
+	globalValid := globRaw >= 0
+	global := es[max(globRaw, 0)]
 
 	// We "have" the file if the position in the list of versions is at the
 	// global version or better, or if the version is the same as the global
 	// file (we might be further down the list due to invalid flags), or if
 	// the global is deleted and we don't have it at all...
 	localIdx := slices.IndexFunc(es, func(e fileRow) bool { return e.DeviceIdx == s.localDeviceIdx })
-	hasLocal := localIdx >= 0 && localIdx <= globIdx || // have a better or equal version
+	hasLocal := localIdx >= 0 && localIdx <= max(globRaw, 0) || // have a better or equal version
 		localIdx >= 0 && es[localIdx].Version.Equal(global.Version.Vector) || // have an equal version but invalid/ignored
 		localIdx < 0 && global.Deleted // missing it, but the global is also deleted
 
@@ -621,6 +652,19 @@ func (s *folderDB) recalcGlobalForFile(txp *txPreparedStmts, file string) error 
 		return wrap(err)
 	}
 
+	// Maintain the incremental need tables (and the build journal while the
+	// initial build is running) from the rows already loaded above.
+	if s.needTrackingActive() {
+		if err := s.recalcNeedForFile(txp, global.NameIdx, es, global, globalValid); err != nil {
+			return err
+		}
+		if !s.needBuilt.Load() {
+			if err := s.journalNeedBuildName(txp, global.NameIdx); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -644,9 +688,11 @@ func (s *DB) folderIdxLocked(folderID string) (int64, error) {
 
 type fileRow struct {
 	Name       string
+	NameIdx    int64 `db:"name_idx"`
 	Version    dbVector
 	DeviceIdx  int64 `db:"device_idx"`
 	Sequence   int64
+	Type       protocol.FileInfoType `db:"type"`
 	Modified   int64
 	Size       int64
 	LocalFlags protocol.FlagLocal `db:"local_flags"`

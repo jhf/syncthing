@@ -8,6 +8,7 @@ package sqlite
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/syncthing/syncthing/lib/protocol"
@@ -28,6 +29,32 @@ type folderDB struct {
 	// needListCache holds the remote need list for the out-of-sync view. Same
 	// locking and invalidation contract as needCache, and invalidated with it.
 	needListCache needListCache
+
+	// needBuilt marks the incrementally maintained need_detail/need_totals
+	// tables as authoritative; until it is set (background build after
+	// upgrade, see folderdb_need.go) need reads fall back to the full-scan
+	// queries. needBuild coordinates the builder goroutine.
+	needBuilt atomic.Bool
+	needBuild needBuildState
+}
+
+// Close shuts the folder database down. The background need-table builder
+// (ensureNeedBuild) holds database handles while it runs, and on Windows an
+// open handle blocks removing the database file - observed in CI, where a
+// test's TempDir cleanup failed with "file being used" because the builder
+// was still mid-build when the pool closed. Bump the generation so the
+// builder aborts at its next chunk boundary, and wait for it to leave before
+// closing the pool.
+func (s *folderDB) Close() error {
+	s.needBuild.mu.Lock()
+	s.needBuild.gen++
+	for s.needBuild.running {
+		s.needBuild.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+		s.needBuild.mu.Lock()
+	}
+	s.needBuild.mu.Unlock()
+	return s.baseDB.Close()
 }
 
 func openFolderDB(folder, path string, deleteRetention time.Duration) (*folderDB, error) {
@@ -58,6 +85,12 @@ func openFolderDB(folder, path string, deleteRetention time.Duration) (*folderDB
 	}
 
 	_ = fdb.PutKV("folderID", []byte(folder))
+
+	// The need tracking tables are authoritative only if the background build
+	// completed; see folderdb_need.go.
+	if val, err := fdb.GetKV(needTrackingBuiltKey); err == nil && len(val) > 0 {
+		fdb.needBuilt.Store(true)
+	}
 
 	// Touch device IDs that should always exist and have a low index
 	// numbers, and will never change
