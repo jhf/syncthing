@@ -12,9 +12,9 @@
 
 KIND=custom
 BINARY=/Users/jhf/Projects/syncthing/custom-syncthing-darwin-arm64
-VERSION=v2.1.7-dev.52.gfb73048d-btrfs-scan-replay (STTRACE=model, A: fullScanActive guard skips nested full scans; B: fork heals UserDropped by journal replay)
+VERSION=v2.1.7-dev.54.g67c4ddad-btrfs-scan-replay (STTRACE=model + NOTIFY_DEBUG_HEAL, A: fullScanActive guard; B2: fork heals UserDropped by replay, mid-replay flags deferred to one follow-up heal at HistoryDone)
 BRANCH=feature/fsevents-scan-replay (fix/scan-resume + FSEvents journal replay; notify fork fsevents-replay @ 37a442f heal-by-replay via go.work replace)
-COMMIT=fb73048d (housekeeping) on 965fe8ea4 (fullScanActive nested-scan guard, teeth-tested); fork 37a442f (heal UserDropped by replay); parents: 664b9cac backendBuffer 65536, 093f3bf9 instrumentation, 46c1226b label fix
+COMMIT=67c4ddad on 965fe8ea4 (fullScanActive nested-scan guard, teeth-tested); fork 75296c8 (deferred mid-replay heal) on 0f37af6 (heal logging) on 37a442f (heal by replay); parents: 664b9cac backendBuffer 65536, 093f3bf9 instrumentation, 46c1226b label fix
 SOURCE=/Users/jhf/Projects/syncthing
 # SOURCE is the main checkout this time, which is safe: it was ON local/mac-scan-fix and clean
 # for the whole build, so gate 4 (vcs.revision == build-root HEAD) passed as ade04405b690. The
@@ -27,12 +27,12 @@ SOURCE=/Users/jhf/Projects/syncthing
 # machine and grew to 5733 entries. build.sh gate 4 refuses any artifact whose vcs.revision
 # disagrees with its build root, and gate 5 refuses a vcs.modified=true artifact.
 
-# Artifact identity (2026-10-11, dev.52):
+# Artifact identity (2026-10-11, dev.54):
 #   artifact  custom-syncthing-darwin-arm64
-#   sha256    11134a3dc5d4c3b56967715c5270445bdff40ce337da32d98313503e2fb12b14
-#   commit    fb73048d900b feature/btrfs-scan-replay (= 965fe8ea4 guard + housekeeping)
-#   notify    ../notify @ 37a442f (heal UserDropped by journal replay; on 79d5886
-#             non-blocking dispatch / 65536 buffers)
+#   sha256    325096259013bf1a8882ef4a18601132bc2cd492986571097a59f6fe21ae9346
+#   commit    67c4ddad0 feature/btrfs-scan-replay (= 965fe8ea4 guard + docs)
+#   notify    ../notify @ 75296c8 (deferred mid-replay heal; on 0f37af6 heal
+#             logging, 37a442f heal-by-replay, 79d5886 non-blocking dispatch/65536)
 #   new here  A: fullScanActive guard - a MustScanSubDirs/UserDropped escalation
 #             serviced between scan chunks no longer walks the tree a second time
 #             (965fe8ea4, teeth-tested). B: the fork restarts the stream from the

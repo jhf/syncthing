@@ -287,3 +287,34 @@ Deployed as dev.52 (fb73048d + guard; fork 37a442f; sha256
 /tmp/custom-serve-sttrace.log), full-scan cadence (`fullScanCount`),
 heal count, idle fraction. If fseventsd keeps flagging under load, the heal
 may need a rate limit.
+
+## 2026-10-11 15:42 - B2: mid-replay flags deferred, boot scan skipped, idle
+
+Instrumentation (NOTIFY_DEBUG_HEAL, fork 0f37af6) showed the first heal
+design churning: heals engaged (24 in 8 min) but every replay window
+contained NEW UserDropped-flagged records (0.2-4% of replayed records;
+firehose run proved them delivery-time drops: delivered IDs jump over
+holes at flagged records). Forwarded mid-replay flags kept feeding
+full-scan signals; making them heal immediately was worse (1757 stream
+restarts in 10 min, no convergence).
+
+Fix B2 (fork 75296c8, teeth-tested): mid-replay flagged records are
+stripped and collected (earliest hole start, highest flagged ID); ONE
+follow-up replay starts at HistoryDone covering all holes. Restart
+failure re-forwards a synthetic root rescan so nothing vanishes.
+Flagged FIRST record of a replay still forwards (journal may not reach
+the seed; only a full scan covers that).
+
+Result on dev.54 (sha 3250962...): "Skipping initial scan, resuming
+filesystem watching from the journal" - NO boot full scan at all. The
+replay drains the storm backlog (~1.7M events/min) with 0 forwarded
+flags, 0 root-scan signals, folder IDLE, targeted scans from replayed
+content only.
+
+Known limitation: the persisted watch watermark advances past unhealed
+holes; a restart before the follow-up heal completes loses those holes
+until the next periodic full scan (1h). Acceptable: holes are rare
+outside storm backlogs, and the window closes at HistoryDone.
+
+Open follow-up: fsevents stream latency is 0 + NoDefer in the fork;
+raising it may reduce the delivery-time drop rate itself.
