@@ -20,13 +20,13 @@ import (
 
 const ServiceTimeout = 10 * time.Second
 
-// ShutdownBudget is the time a folder may spend on its shutdown work (e.g.
-// pairing the btrfs baseline), shared by all of it. ShutdownServiceTimeout
-// is how long the supervisors on the folder path (main -> model -> folder
-// runners) wait before abandoning a stopping service: the budget plus a
-// bounded cleanup and margin. Before this the supervisors abandoned the
-// folder after ServiceTimeout, mid-pairing, and the process exited with
-// "Database failed to stop within 10s".
+// ShutdownBudget is the time a folder may spend on its shutdown work
+// (draining the watch queue, pairing the btrfs baseline), shared by all of
+// it. ShutdownServiceTimeout is how long the supervisors on the folder path
+// (main -> model -> folder runners) wait before abandoning a stopping
+// service: the budget plus a bounded cleanup and margin. Before this the
+// supervisors abandoned the folder after ServiceTimeout, mid-pairing, and
+// the process exited with "Database failed to stop within 10s".
 //
 // The budget is sized from measured pairing barriers on yarlung (20
 // pairings, 2026-11-25 to 11-27): median 0.28 s, but the barrier's rescan
