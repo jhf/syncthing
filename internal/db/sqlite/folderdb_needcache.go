@@ -129,6 +129,11 @@ func (s *folderDB) countNeed(device protocol.DeviceID, now time.Time) (db.Counts
 		return counts, false, err
 	}
 
+	if s.needBuilt.Load() {
+		// The maintained totals table answers directly, no cache needed.
+		counts, err := s.needTotalsFromDetail(device)
+		return counts, false, err
+	}
 	if counts, ok := s.needCache.get(device, now); ok {
 		return counts, true, nil
 	}
@@ -228,6 +233,19 @@ func (c *needListCache) invalidate() {
 // The order is applied here rather than in SQL because ordering by name makes
 // SQLite walk every name in the folder; see db.PullOrderUnspecified.
 func (s *folderDB) neededGlobalFilesCached(device protocol.DeviceID, now time.Time) ([]protocol.FileInfo, bool, error) {
+	if s.needBuilt.Load() && s.needDeviceKnown(device) {
+		// The maintained detail table is cheap enough to read directly.
+		it, errFn := s.neededGlobalFilesRemote(device, "")
+		files := slices.Collect(it)
+		if err := errFn(); err != nil {
+			return nil, false, err
+		}
+		slices.SortFunc(files, func(a, b protocol.FileInfo) int {
+			return strings.Compare(a.Name, b.Name)
+		})
+		return files, false, nil
+	}
+
 	if files, ok := s.needListCache.get(device, now); ok {
 		return files, true, nil
 	}
