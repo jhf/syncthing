@@ -12,9 +12,9 @@
 
 KIND=custom
 BINARY=/Users/jhf/Projects/syncthing/custom-syncthing-darwin-arm64
-VERSION=v2.1.7-dev.48.g664b9cac-btrfs-scan-replay (STTRACE=model, label fix + INF overflow logging + fork nonblocking dispatch/big buffers)
-BRANCH=feature/fsevents-scan-replay (fix/scan-resume + FSEvents journal replay; notify fork fsevents-replay incl. fbdebde bounded-history leak fix via go.work replace)
-COMMIT=664b9cac (backendBuffer 65536; notify fork 79d5886 non-blocking dispatch; parents: 093f3bf9 instrumentation, 46c1226b label fix)
+VERSION=v2.1.7-dev.52.gfb73048d-btrfs-scan-replay (STTRACE=model, A: fullScanActive guard skips nested full scans; B: fork heals UserDropped by journal replay)
+BRANCH=feature/fsevents-scan-replay (fix/scan-resume + FSEvents journal replay; notify fork fsevents-replay @ 37a442f heal-by-replay via go.work replace)
+COMMIT=fb73048d (housekeeping) on 965fe8ea4 (fullScanActive nested-scan guard, teeth-tested); fork 37a442f (heal UserDropped by replay); parents: 664b9cac backendBuffer 65536, 093f3bf9 instrumentation, 46c1226b label fix
 SOURCE=/Users/jhf/Projects/syncthing
 # SOURCE is the main checkout this time, which is safe: it was ON local/mac-scan-fix and clean
 # for the whole build, so gate 4 (vcs.revision == build-root HEAD) passed as ade04405b690. The
@@ -27,27 +27,20 @@ SOURCE=/Users/jhf/Projects/syncthing
 # machine and grew to 5733 entries. build.sh gate 4 refuses any artifact whose vcs.revision
 # disagrees with its build root, and gate 5 refuses a vcs.modified=true artifact.
 
-# Artifact identity (2026-10-08):
+# Artifact identity (2026-10-11, dev.52):
 #   artifact  custom-syncthing-darwin-arm64
-#   sha256    e508595f057e34fb482d15900fd175826367ec0130994ccce6183b0c66526442
-#   commit    ade04405b  local/mac-scan-fix (merge of local/mac-latest + fix/scan-resume)
-#   reports   "syncthing v2.1.7-dev.35.gfb1462c1-mac-scan-fix \"Hafnium Hornet\" (go1.26.4
-#              darwin-arm64) ... [noupgrade]"
-#   notify    github.com/fluffypony/notify v0.0.0-20260923145434-fbdebdee763b (the LOCAL-ONLY
-#             replace; this is the #10894 leak fix: 11.55MB inuse_space vs 131.92MB pre-pin)
-#   new here  the F2 scan work measured on the peer: chunked scans (abdff0286), pulls allowed
-#             during a re-scan once one initial scan is on record (a21fa3160), and watch events
-#             serviced between scan chunks (10779343e). The last is for this machine, which was
-#             measured scanning 100% of the time (folder_scan_seconds_total +30s per 30s) with
-#             watch events never processed.
-#   one-time  the first scan on this build is still gated (no initialScanDone marker in this
-#             machine's database yet); it is written when that scan completes, and every scan
-#             after a restart from then on lets pulls run.
-#   rollback  the previous binary is still at
-#             /Users/jhf/Projects/syncthing/syncthing-scan-and-gc (9273aba, sha256 in
-#             ops/custom-syncthing/BUILD-INFO); the previous custom build's identity is in
-#             git history for this file
-#   tooling   bash ops/custom-syncthing/build.sh HEAD darwin-arm64
+#   sha256    11134a3dc5d4c3b56967715c5270445bdff40ce337da32d98313503e2fb12b14
+#   commit    fb73048d900b feature/btrfs-scan-replay (= 965fe8ea4 guard + housekeeping)
+#   notify    ../notify @ 37a442f (heal UserDropped by journal replay; on 79d5886
+#             non-blocking dispatch / 65536 buffers)
+#   new here  A: fullScanActive guard - a MustScanSubDirs/UserDropped escalation
+#             serviced between scan chunks no longer walks the tree a second time
+#             (965fe8ea4, teeth-tested). B: the fork restarts the stream from the
+#             last examined ID on live UserDropped and strips the flags from replayed
+#             records, so a flagged batch heals by bounded journal replay instead of
+#             a 10-minute full walk (37a442f, teeth-tested).
+#   rollback  previous binary identity in git history for this file; dev.48 artifact
+#             sha in the dev.48 commit's version of this file
 HOME_DIR=$HOME/Library/Application Support/Syncthing
 LAUNCH=/Users/jhf/Projects/syncthing/tmp/run-custom-syncthing.sh
 
