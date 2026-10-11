@@ -12,9 +12,9 @@
 
 KIND=custom
 BINARY=/Users/jhf/Projects/syncthing/custom-syncthing-darwin-arm64
-VERSION=v2.1.7-dev.44.g093f3bf9-btrfs-scan-replay (STTRACE=model, label fix + INF overflow logging)
+VERSION=v2.1.7-dev.48.g664b9cac-btrfs-scan-replay (STTRACE=model, label fix + INF overflow logging + fork nonblocking dispatch/big buffers)
 BRANCH=feature/fsevents-scan-replay (fix/scan-resume + FSEvents journal replay; notify fork fsevents-replay incl. fbdebde bounded-history leak fix via go.work replace)
-COMMIT=093f3bf9 (INF overflow logging on top of 46c1226b label fix; revert both debug commits before upstreaming)
+COMMIT=664b9cac (backendBuffer 65536; notify fork 79d5886 non-blocking dispatch; parents: 093f3bf9 instrumentation, 46c1226b label fix)
 SOURCE=/Users/jhf/Projects/syncthing
 # SOURCE is the main checkout this time, which is safe: it was ON local/mac-scan-fix and clean
 # for the whole build, so gate 4 (vcs.revision == build-root HEAD) passed as ade04405b690. The
