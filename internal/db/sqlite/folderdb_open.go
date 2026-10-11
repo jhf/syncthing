@@ -38,6 +38,25 @@ type folderDB struct {
 	needBuild needBuildState
 }
 
+// Close shuts the folder database down. The background need-table builder
+// (ensureNeedBuild) holds database handles while it runs, and on Windows an
+// open handle blocks removing the database file - observed in CI, where a
+// test's TempDir cleanup failed with "file being used" because the builder
+// was still mid-build when the pool closed. Bump the generation so the
+// builder aborts at its next chunk boundary, and wait for it to leave before
+// closing the pool.
+func (s *folderDB) Close() error {
+	s.needBuild.mu.Lock()
+	s.needBuild.gen++
+	for s.needBuild.running {
+		s.needBuild.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+		s.needBuild.mu.Lock()
+	}
+	s.needBuild.mu.Unlock()
+	return s.baseDB.Close()
+}
+
 func openFolderDB(folder, path string, deleteRetention time.Duration) (*folderDB, error) {
 	pragmas := []string{
 		"journal_mode = WAL",
