@@ -7,18 +7,20 @@ angular.module('syncthing.core')
         var lastID = 0;
         var self = this;
 
-        function successFn(data) {
-            // When Syncthing restarts while the long polling connection is in
-            // progress the browser on some platforms returns a 200 (since the
-            // headers has been flushed with the return code 200), with no data.
-            // This basically means that the connection has been reset, and the call
-            // was not actually successful.
-            if (!data) {
-                errorFn(data);
-                return;
-            }
-            $rootScope.$broadcast(self.ONLINE);
+        // Transport note: the legacy path below polls with $http. Every $http
+        // completion is scheduled through $q -> $evalAsync -> $browser.defer ->
+        // setTimeout, and browsers clamp setTimeout in hidden tabs (1s at
+        // first, then budget throttling down to roughly one wakeup per minute).
+        // Measured effect on this GUI: StateChanged events observed in batches
+        // 27-188 s late in a background tab while the server long-poll flushed
+        // instantly. The fetch-based path therefore drives the event loop:
+        // fetch promises resolve as microtasks, which are not timer-throttled,
+        // and the batch is processed in one synchronous $apply. $http remains
+        // as a fallback for browsers without fetch.
 
+        function dispatchEvents(data) {
+            // Caller arranges digest context ($http: already in one; fetch:
+            // wrapped in $apply by the caller).
             if (lastID > 0) {   // not emit events from first response
                 data.forEach(function (event) {
                     if (debugEvents) {
@@ -28,10 +30,69 @@ angular.module('syncthing.core')
                 });
             }
 
-            var lastEvent = data.pop();
+            var lastEvent = data[data.length - 1];
             if (lastEvent) {
                 lastID = lastEvent.id;
             }
+        }
+
+        // ---- fetch transport (throttle-immune) ------------------------------
+
+        function fetchPoll(url) {
+            fetch(url, { credentials: 'same-origin' })
+                .then(function (response) {
+                    if (response.status === 403) {
+                        // Auth error - reload login page
+                        location.reload();
+                        return null;
+                    }
+                    if (!response.ok) {
+                        throw new Error('events: HTTP ' + response.status);
+                    }
+                    // An empty body (Syncthing restarted mid-poll) makes
+                    // response.json() throw, landing in fetchErrorFn below.
+                    return response.json();
+                })
+                .then(function (data) {
+                    if (data === null) {
+                        return; // 403 already handled
+                    }
+                    if (!data) {
+                        throw new Error('events: empty response');
+                    }
+                    $rootScope.$apply(function () {
+                        $rootScope.$broadcast(self.ONLINE);
+                        dispatchEvents(data);
+                    });
+                    fetchPoll(urlbase + '/events?since=' + lastID);
+                })
+                .catch(fetchErrorFn);
+        }
+
+        function fetchErrorFn(err) {
+            $rootScope.$apply(function () {
+                $rootScope.$broadcast(self.OFFLINE);
+            });
+            $timeout(function () {
+                fetchPoll(urlbase + '/events?limit=1');
+            }, 1000, false);
+        }
+
+        // ---- $http transport (legacy fallback) ------------------------------
+
+        function successFn(data) {
+            // When Syncthing restarts while the long polling connection is in
+            // progress the browser on some platforms returns a 200 (since the
+            // headers has been flushed with the return code 200), with no data.
+            // This basically means that the connection has been reset, and the
+            // call was not actually successful.
+            if (!data) {
+                errorFn(data);
+                return;
+            }
+            $rootScope.$broadcast(self.ONLINE);
+
+            dispatchEvents(data);
 
             $http.get(urlbase + '/events?since=' + lastID)
                 .success(successFn)
@@ -97,9 +158,13 @@ angular.module('syncthing.core')
             FOLDER_RESUMED: 'FolderResumed',   // Emitted when a folder is resumed
 
             start: function () {
-                $http.get(urlbase + '/events?limit=1')
-                    .success(successFn)
-                    .error(errorFn);
+                if (typeof fetch === 'function') {
+                    fetchPoll(urlbase + '/events?limit=1');
+                } else {
+                    $http.get(urlbase + '/events?limit=1')
+                        .success(successFn)
+                        .error(errorFn);
+                }
             }
         });
     }]);
