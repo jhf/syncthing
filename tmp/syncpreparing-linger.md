@@ -318,3 +318,69 @@ outside storm backlogs, and the window closes at HistoryDone.
 
 Open follow-up: fsevents stream latency is 0 + NoDefer in the fork;
 raising it may reduce the delivery-time drop rate itself.
+
+## 2026-10-11 19:40 - B3: flags are delivery-time annotations; lossy threshold
+
+Decisive overlap analysis (round-1 vs round-2 deferred flagged IDs): zero
+overlap, zero <= target. Drop flags are delivery-time annotations, never
+journaled; the ev[i].ID <= target strip case was dead code swallowing real
+holes. B3 (fork, committed): EVERY mid-replay flagged record (any ID) is
+stripped + deferred; live flags still heal immediately. Lossy threshold:
+pendingCount >= 64 at HistoryDone forwards ONE root rescan instead of a
+surgical follow-up that would re-replay millions and collect fresh holes.
+Teeth-tested (threshold disabled -> surgical follow-up runs -> test fails).
+
+Also fixed the B2-era test expectations: the fork's strip() dedups
+create-after-create per path, so a clean re-delivery of a created path is
+a no-op (semantically correct).
+
+## 2026-10-11 19:40 - UI lag: measured, root-caused, fixed
+
+Question: does "Scanning" linger in the UI past backend completion?
+Instrumentation added (dev.56, 0549cce4): GUI reports every observed folder
+state transition to POST /rest/debug/uistate (server logs when
+STGUISTATELOG=1) from BOTH the StateChanged event path (with server-side
+eventTime + globalID) and the db/status poll path.
+
+Measured: StateChanged events reached the background-tab GUI in batches
+27-188 s late; server long-poll flushes instantly (curl-verified, 0.03 s
+after event creation). Root cause in code: every $http completion is
+scheduled via $q -> $evalAsync -> $browser.defer -> setTimeout
+(angular.js:5342, 14622); hidden tabs get setTimeout clamped to ~1/min
+(budget throttling), and the re-poll is issued from inside the throttled
+digest, so the whole event loop runs at clamp speed.
+
+Fix (dev.58, committed): eventService.js long-polls with fetch()
+(microtask-scheduled, not timer-throttled) and processes each batch in one
+synchronous $rootScope.$apply(). $http loop kept as fallback. Periodic
+REST stat refreshes remain $http/throttled - cosmetic only.
+
+Bonus observability fix (dev.58, committed): scanning->idle transitions go
+through stateTracker.setError(nil), which never logged "Folder changed
+state" - the log showed folders scanning forever. Now logged when the state
+actually changes.
+
+## 2026-10-11 19:40 - boot behavior, two runs compared
+
+dev.56 boot (16:51, watermark 15 min stale, ~1.65M backlog): replay
+deferred 770 holes; 4 pre-proof flags forwarded (correctness: journal
+coverage unproven before first delivery); lossy threshold tripped (92
+holes) -> ONE root rescan -> full scan 16:52-18:51 (2h, system busy).
+Converged; idle since 18:51.
+
+dev.58 boot (18:51, fresh watermark): replay live in 1 SECOND. But boot
+storm: 5 stream restarts in 3.5 min (live-flag heals + pre-proof
+forwards), lossy at 18:55:52 (76 holes) -> full scan #1 (18:56-19:16).
+A live heal at ~19:05 started replay #6 from lastID=1712307319; it chased
+a fast-moving live tip (build activity) for 30+ min collecting 600+
+deferred holes - guaranteed lossy at HistoryDone -> full scan #2.
+Self-correcting (post-scan heals replay from lastID ~= tip, tiny ranges)
+but expensive tonight.
+
+Follow-ups identified:
+1. Persist the watch watermark on graceful shutdown and periodically, not
+   just opportunistically - a fresh watermark makes the boot backlog tiny
+   and the whole storm chain unlikely. THE highest-value fix.
+2. Consider rate-limiting live-heal restarts during storm windows.
+3. Stream latency 0 + NoDefer in the fork - raising it may reduce the
+   delivery-time drop rate itself (still open from B2).

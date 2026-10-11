@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/syncthing/syncthing/lib/config"
+	"github.com/syncthing/syncthing/lib/watchaggregator"
 )
 
 // drainWatchBatches mimics the folder Serve loop's watcher arm: scan each
@@ -127,5 +128,59 @@ func TestWatchReplaySkipsInitialScan(t *testing.T) {
 	}
 	if n := fB.fullScanCount.Load(); n != 0 {
 		t.Fatalf("full scan ran on the replay path: %d", n)
+	}
+}
+
+// TestDrainWatchQueueOnShutdown proves the shutdown flush: queued watch
+// batches are scanned and their journal position persisted, an empty queue
+// persists nothing, and a queued root rescan leaves the watermark alone.
+func TestDrainWatchQueueOnShutdown(t *testing.T) {
+	w, fcfg := newDefaultCfgWrapper(t)
+	dir := t.TempDir()
+	fcfg.FilesystemType = config.FilesystemTypeBasic
+	fcfg.Path = dir
+	fcfg.FSWatcherEnabled = true
+	if _, err := w.Modify(func(cfg *config.Configuration) { cfg.SetFolder(fcfg) }); err != nil {
+		t.Fatal(err)
+	}
+	m := setupModel(t, w)
+	m.cancel()
+	<-m.stopped
+	r, _ := m.folderRunners.Get(fcfg.ID)
+	fA := r.(*sendReceiveFolder).folder
+	ffs := fA.Filesystem()
+	ctx := t.Context()
+
+	// Empty queue: no watermark.
+	fA.drainWatchQueueOnShutdown()
+	if wm, _, err := fA.watchReplayWatermark(); err != nil || wm != 0 {
+		t.Fatalf("empty drain: watermark=%d, err=%v", wm, err)
+	}
+
+	// Detach the aggregator and substitute a buffered channel so batches
+	// can be queued synchronously.
+	fA.startWatch(ctx)
+	fA.stopWatch()
+	fA.watchMut.Lock()
+	fA.watchChan = make(chan watchaggregator.Batch, 4)
+	fA.watchMut.Unlock()
+
+	// A queued batch is scanned and its journal position persisted.
+	writeFile(t, ffs, "drain.txt", []byte("x"))
+	const fakeID = 1_234_567
+	fA.watchChan <- watchaggregator.Batch{Paths: []string{"drain.txt"}, MaxEventID: fakeID}
+	fA.drainWatchQueueOnShutdown()
+	if wm, _, err := fA.watchReplayWatermark(); err != nil || wm != fakeID {
+		t.Fatalf("after drain: watermark=%d, want %d, err=%v", wm, fakeID, err)
+	}
+	if _, ok := liveLocalNames(t, m.model, fcfg.ID)["drain.txt"]; !ok {
+		t.Fatal("drain.txt not indexed by shutdown drain")
+	}
+
+	// A queued root rescan cannot be drained cheaply: watermark unchanged.
+	fA.watchChan <- watchaggregator.Batch{Paths: []string{"."}, MaxEventID: fakeID + 100}
+	fA.drainWatchQueueOnShutdown()
+	if wm, _, err := fA.watchReplayWatermark(); err != nil || wm != fakeID {
+		t.Fatalf("root-rescan drain: watermark=%d, want unchanged %d, err=%v", wm, fakeID, err)
 	}
 }
