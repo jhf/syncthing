@@ -316,7 +316,7 @@ func (s *folderDB) neededGlobalFilesFromDetail(device protocol.DeviceID, selectO
 		LEFT JOIN blocklists bl ON bl.blocklist_hash = g.blocklist_hash
 		INNER JOIN devices d ON d.idx = nd.device_idx
 		WHERE d.device_id = ?
-	` + selectOpts).Queryx(device.String(), limit, offset))
+	`+selectOpts).Queryx(device.String(), limit, offset))
 	return itererr.Map(it, errFn, indirectFI.FileInfo)
 }
 
