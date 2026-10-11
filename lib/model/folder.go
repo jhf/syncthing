@@ -256,6 +256,7 @@ func (f *folder) Serve(ctx context.Context) error {
 
 		select {
 		case <-ctx.Done():
+			f.drainWatchQueueOnShutdown()
 			close(f.done)
 			f.shutdownBtrfsBaseline()
 			return nil
@@ -1852,6 +1853,62 @@ func (f *folder) persistWatchReplayWatermark(id uint64) {
 		return
 	}
 	f.lastReplayWatermark.Store(id)
+}
+
+// drainWatchQueueOnShutdown scans the watch batches still queued when the
+// folder shuts down, then persists the highest journal position they carry.
+// The watermark only ever advances behind completed scans, so without this
+// the position left behind at exit is stale by everything delivered but not
+// yet scanned - measured 15 min / 1.65M journal events on a busy machine,
+// which the next boot pays for as a long replay and its drop-flag storm.
+// A queued root rescan cannot be drained cheaply, so it skips the flush and
+// leaves the watermark behind; the next boot takes the lossy/full-scan
+// path, which is correct, just slower. Deferred batches (the pending set)
+// were observed before anything still queued and drain with them.
+func (f *folder) drainWatchQueueOnShutdown() {
+	paths, maxEventID := f.takeWatchPending()
+	if len(paths) == 1 && (paths[0] == "." || paths[0] == "") {
+		f.sl.Info("Not draining watch queue on shutdown: root rescan pending, watermark left behind")
+		return
+	}
+	var batches int
+	// The drain scan must not dequeue (and defer) batches mid-scan: nothing
+	// would scan them after it.
+	f.watchHold = true
+	defer func() { f.watchHold = false }()
+	for {
+		select {
+		case b := <-f.watchChan:
+			for _, p := range b.Paths {
+				if p == "." || p == "" {
+					f.sl.Info("Not draining watch queue on shutdown: root rescan queued, watermark left behind", "droppedBatches", batches)
+					return
+				}
+			}
+			batches++
+			paths = append(paths, b.Paths...)
+			if b.MaxEventID > maxEventID {
+				maxEventID = b.MaxEventID
+			}
+		default:
+			if maxEventID == 0 {
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			subs := unifySubs(paths, func(file string) bool {
+				_, ok, err := f.db.GetDeviceFile(f.folderID, protocol.LocalDeviceID, file)
+				return err == nil && ok
+			})
+			if err := f.scanSubdirs(ctx, subs); err != nil {
+				f.sl.Info("Shutdown watch-queue drain scan failed, watermark left behind", slogutil.Error(err))
+				return
+			}
+			f.persistWatchReplayWatermark(maxEventID)
+			f.sl.Info("Drained watch queue before shutdown", "batches", batches, "paths", len(subs), "watermark", maxEventID)
+			return
+		}
+	}
 }
 
 // scanOnWatchErr schedules a full scan immediately if an error occurred while watching.
