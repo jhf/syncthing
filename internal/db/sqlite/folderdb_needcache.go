@@ -41,9 +41,14 @@ type needCountEntry struct {
 // a folder with millions of files, and the folder summary service asks for it
 // repeatedly for every remote device. It is only correct as long as it is
 // invalidated whenever the files table changes.
+//
+// The epoch guards against losing an invalidation that lands while a
+// recomputation is in flight: the query reads a snapshot from its start, so a
+// result computed across a write is stale and must not be stored as valid.
 type needCountCache struct {
 	mut     sync.Mutex
 	entries map[protocol.DeviceID]needCountEntry
+	epoch   uint64
 }
 
 // get returns a usable entry. An invalidated entry is still served until
@@ -67,9 +72,25 @@ func (c *needCountCache) get(device protocol.DeviceID, now time.Time) (db.Counts
 	return entry.counts, true
 }
 
-func (c *needCountCache) put(device protocol.DeviceID, counts db.Counts, now time.Time) {
+// snapshot returns the current epoch for put-if-unchanged checks after a
+// slow recomputation.
+func (c *needCountCache) snapshot() uint64 {
 	c.mut.Lock()
 	defer c.mut.Unlock()
+	return c.epoch
+}
+
+// put stores a freshly computed entry, unless the cache was invalidated while
+// the computation was running. In that case the queried snapshot predates a
+// write, the result is stale, and the existing entry stays invalid so the next
+// request past the minimum-recompute floor recomputes instead of serving the
+// stale value for the rest of the TTL.
+func (c *needCountCache) put(device protocol.DeviceID, counts db.Counts, now time.Time, epoch uint64) {
+	c.mut.Lock()
+	defer c.mut.Unlock()
+	if epoch != c.epoch {
+		return
+	}
 	if c.entries == nil {
 		c.entries = make(map[protocol.DeviceID]needCountEntry)
 	}
@@ -82,6 +103,7 @@ func (c *needCountCache) put(device protocol.DeviceID, counts db.Counts, now tim
 func (c *needCountCache) invalidate() {
 	c.mut.Lock()
 	defer c.mut.Unlock()
+	c.epoch++
 	for device, entry := range c.entries {
 		entry.invalid = true
 		c.entries[device] = entry
@@ -111,11 +133,12 @@ func (s *folderDB) countNeed(device protocol.DeviceID, now time.Time) (db.Counts
 		return counts, true, nil
 	}
 
+	epoch := s.needCache.snapshot()
 	counts, err := s.needSizeRemote(device)
 	if err != nil {
 		return counts, false, err
 	}
-	s.needCache.put(device, counts, now)
+	s.needCache.put(device, counts, now, epoch)
 	return counts, false, nil
 }
 
@@ -139,6 +162,7 @@ type needListEntry struct {
 type needListCache struct {
 	mut     sync.Mutex
 	entries map[protocol.DeviceID]needListEntry
+	epoch   uint64
 }
 
 // get returns a usable entry, name-sorted. An invalidated entry is still served
@@ -161,12 +185,25 @@ func (c *needListCache) get(device protocol.DeviceID, now time.Time) ([]protocol
 	return entry.files, true
 }
 
-// put stores a list. The caller's slice is kept as-is: it is built locally and
-// never mutated afterwards, and copying a large list on every index update would
-// cost more than the lookups it saves.
-func (c *needListCache) put(device protocol.DeviceID, files []protocol.FileInfo, now time.Time) {
+// snapshot returns the current epoch for put-if-unchanged checks after a
+// slow recomputation.
+func (c *needListCache) snapshot() uint64 {
 	c.mut.Lock()
 	defer c.mut.Unlock()
+	return c.epoch
+}
+
+// put stores a list under the same epoch rule as needCountCache.put: a list
+// computed across an invalidation is stale and must not become the valid
+// cached value. The caller's slice is kept as-is: it is built locally and
+// never mutated afterwards, and copying a large list on every index update
+// would cost more than the lookups it saves.
+func (c *needListCache) put(device protocol.DeviceID, files []protocol.FileInfo, now time.Time, epoch uint64) {
+	c.mut.Lock()
+	defer c.mut.Unlock()
+	if epoch != c.epoch {
+		return
+	}
 	if c.entries == nil {
 		c.entries = make(map[protocol.DeviceID]needListEntry)
 	}
@@ -176,6 +213,7 @@ func (c *needListCache) put(device protocol.DeviceID, files []protocol.FileInfo,
 func (c *needListCache) invalidate() {
 	c.mut.Lock()
 	defer c.mut.Unlock()
+	c.epoch++
 	for device, entry := range c.entries {
 		entry.invalid = true
 		c.entries[device] = entry
@@ -194,6 +232,7 @@ func (s *folderDB) neededGlobalFilesCached(device protocol.DeviceID, now time.Ti
 		return files, true, nil
 	}
 
+	epoch := s.needListCache.snapshot()
 	it, errFn := s.AllNeededGlobalFiles(device, db.PullOrderUnspecified, 0, 0)
 	files := slices.Collect(it)
 	if err := errFn(); err != nil {
@@ -203,6 +242,6 @@ func (s *folderDB) neededGlobalFilesCached(device protocol.DeviceID, now time.Ti
 		return strings.Compare(a.Name, b.Name)
 	})
 
-	s.needListCache.put(device, files, now)
+	s.needListCache.put(device, files, now, epoch)
 	return files, false, nil
 }
