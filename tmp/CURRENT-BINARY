@@ -8,20 +8,21 @@
 
 KIND=custom
 BINARY=/Users/jhf/Projects/syncthing/custom-syncthing-darwin-arm64.dev62
-VERSION=v2.1.7-dev.62.ge6d29b4f-btrfs-scan-replay
-BRANCH=feature/btrfs-scan-replay (dev.61 = d540ac569 need-tracking tables + notify df43a3b lossy-verdict live re-arm fix + e6d29b4f3 sqlite busy_timeout)
-COMMIT=e6d29b4f3
+VERSION=v2.1.7-dev.62.g5fa9f75a-btrfs-scan-replay
+BRANCH=feature/btrfs-scan-replay (dev.61 = d540ac569 need-tracking tables + notify df43a3b lossy-verdict live re-arm fix + e6d29b4f3 sqlite busy_timeout + 50db385b7 GC self-deadlock fix)
+COMMIT=5fa9f75a0
 SOURCE=/Users/jhf/Projects/syncthing
 
-# Artifact identity (2026-10-12, rebuilt 17:35 UTC):
+# Artifact identity (2026-10-12, rebuilt 17:59 UTC):
 #   artifact  custom-syncthing-darwin-arm64.dev62
-#   sha256    86373c93a22e921e819f6fac0523419a047e1d3165c149f555f74bc06104aa52
-#   commit    e6d29b4f3 feature/btrfs-scan-replay (clean tree at build)
-#   reports   "syncthing v2.1.7-dev.62.ge6d29b4f-btrfs-scan-replay \"Hafnium Hornet\"
+#   sha256    e74d3d3fd619a823c6110a7d3a03919f6703938c4e64f2966401a717a6e5df69
+#   commit    5fa9f75a0 feature/btrfs-scan-replay (clean tree at build)
+#   reports   "syncthing v2.1.7-dev.62.g5fa9f75a-btrfs-scan-replay \"Hafnium Hornet\"
 #              (go1.26.4 darwin-arm64) jhf@jhf-macbook-pro.local [noupgrade]"
 #   yarlung   custom-syncthing-linux-amd64.dev62 (same commit, CGO_ENABLED=0)
-#             sha256 3594eafa41282638348d3b7d1892e14602f1b0f5c470a5afdf48b37f2de7d80d
+#             sha256 8ca1a0c3e2a7d6d8d65992258ae85d8da0b851079e6090792b0acf8a451ac629
 #             staged in-repo; upload to yarlung ~/syncthing-custom/ at deploy time.
+#             yarlung is the deadlock site: deploy there first if only one happens.
 #             The busy_timeout fix matters most there: modernc driver defaults
 #             to zero, which is what killed six YMIQQYL connections at 13:56.
 #   REBUILD   The first dev.62 (sha256 c2b68bba..., stamped g9a12095a) was
