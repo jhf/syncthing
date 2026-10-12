@@ -33,3 +33,16 @@ invariants discussed in the #10868 comment thread.
 - `TestGarbageCollectionBlocksInChunks`: 3 blocks removed in chunks of 2.
 - `TestBlocklistRetiredInGCNotInUpdate`: 20-file update leaves the blocklist
   untouched until the GC hook runs.
+## Companion commit: sqlite busy_timeout
+
+Chunked GC deliberately releases `updateLock` between chunks, which makes the
+GC a second writer on the folder database file. On modernc (nocgo) builds
+`busy_timeout` defaults to zero, so an index update racing a live GC chunk
+failed instantly with SQLITE_BUSY, and the protocol layer treats any handler
+error as connection-fatal: observed live on a Linux receiver, six consecutive
+connections killed in 13 s with `handling index-update for home: update:
+deviceidxlocked: database is locked` while a background writer held the lock
+in bursts. The final commit in this PR sets `busy_timeout(5000)` on both
+driver DSNs (the mattn cgo driver already has a nonzero default) with
+teeth-verified tests: removed, they fail with `database is locked (5)
+(SQLITE_BUSY)`.

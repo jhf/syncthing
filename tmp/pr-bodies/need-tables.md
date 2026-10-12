@@ -77,3 +77,16 @@ On the live 2.8M-name folder snapshot:
 - `perf(db): stop ordering need lists by name in SQL` — ordering by name makes
   SQLite walk every name in the folder; callers sort in memory instead.
 - `perf(model): stop ordering the send-only need list in SQL` — same.
+## Companion commit: sqlite busy_timeout
+
+The background build writes its 100k-name chunks in transactions that do not
+hold `updateLock`, so during the first post-upgrade boot the build is a second
+writer on the folder database file. On modernc (nocgo) builds `busy_timeout`
+defaults to zero: an incoming index update whose first statement raced a live
+build chunk failed instantly with SQLITE_BUSY, which the protocol layer treats
+as connection-fatal. Observed live on a Linux receiver running this branch:
+six consecutive connections killed in 13 s (`handling index-update for home:
+update: deviceidxlocked: database is locked`) during the initial build. The
+final commit in this PR sets `busy_timeout(5000)` on both driver DSNs (the
+mattn cgo driver already has a nonzero default), with teeth-verified tests:
+removed, they fail with `database is locked (5) (SQLITE_BUSY)`.
