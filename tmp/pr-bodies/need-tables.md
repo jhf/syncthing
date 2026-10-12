@@ -90,3 +90,19 @@ update: deviceidxlocked: database is locked`) during the initial build. The
 final commit in this PR sets `busy_timeout(5000)` on both driver DSNs (the
 mattn cgo driver already has a nonzero default), with teeth-verified tests:
 removed, they fail with `database is locked (5) (SQLITE_BUSY)`.
+
+## Post-review fix: GC self-deadlock (caught by production telemetry)
+
+The first live run of this branch deadlocked within hours: the periodic GC
+calls `garbageCollectOldDeletedLocked` with `updateLock` already held, and
+the need-tables branch of that function re-acquired it. sync.Mutex is not
+reentrant, so the GC service deadlocked against itself while holding the
+lock; every later `Update` (folder scans, incoming index updates) wedged
+behind it, and a peer connection whose dispatcher was parked in `Update`
+when the peer went away could not finish `internalClose`, leaving a phantom
+"primary" connection (frozen counters, no kernel socket) and a silent sync
+stall. Diagnosed from a support-bundle goroutine dump: GC service, folder
+scan, and connection dispatcher all parked on the same mutex, the holder
+being the GC goroutine itself. The fix (no re-lock; the caller holds it) is
+squashed into the main commit, with a regression test that deadlocks on
+timeout when the re-lock is restored.
