@@ -13,6 +13,13 @@ import (
 )
 
 const (
-	dbDriver      = "sqlite3"
-	commonOptions = "_fk=true&_rt=true&_sync=1&_txlock=immediate"
+	dbDriver = "sqlite3"
+	// busy_timeout, pinned explicitly rather than relying on the driver
+	// default: two writers on the same database file are legitimate (e.g. an
+	// index update racing the background need-tracking build or a chunked
+	// GC pass). Without a timeout the second writer fails instantly with
+	// SQLITE_BUSY, which the protocol layer treats as connection-fatal. Five
+	// seconds is far above any single chunk or batch commit, low enough that
+	// a genuinely stuck lock still surfaces as an error.
+	commonOptions = "_fk=true&_rt=true&_sync=1&_txlock=immediate&_busy_timeout=5000"
 )
