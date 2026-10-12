@@ -8,17 +8,23 @@
 
 KIND=custom
 BINARY=/Users/jhf/Projects/syncthing/custom-syncthing-darwin-arm64.dev62
-VERSION=v2.1.7-dev.62.g9a12095a-btrfs-scan-replay
+VERSION=v2.1.7-dev.62.g1a07bd4a-btrfs-scan-replay
 BRANCH=feature/btrfs-scan-replay (dev.61 = d540ac569 need-tracking tables + notify df43a3b lossy-verdict live re-arm fix)
-COMMIT=9a12095a9
+COMMIT=1a07bd4a0
 SOURCE=/Users/jhf/Projects/syncthing
 
-# Artifact identity (2026-10-12):
+# Artifact identity (2026-10-12, rebuilt 17:12 UTC):
 #   artifact  custom-syncthing-darwin-arm64.dev62
-#   sha256    c2b68bba2a08d819c1aa6166f9996f157788d8ed8ff4fa7ef05d3d7efe262bb1
-#   commit    9a12095a9 feature/btrfs-scan-replay (main checkout, clean tree at build)
-#   reports   "syncthing v2.1.7-dev.62.g9a12095a-btrfs-scan-replay \"Hafnium Hornet\"
+#   sha256    1852e4ffcc1f2ff65c7b6bdc3dd111fddae1861bff6ed882334ef6fee4c4abad
+#   commit    1a07bd4a0 feature/btrfs-scan-replay (clean tree at build)
+#   reports   "syncthing v2.1.7-dev.62.g1a07bd4a-btrfs-scan-replay \"Hafnium Hornet\"
 #              (go1.26.4 darwin-arm64) jhf@jhf-macbook-pro.local [noupgrade]"
+#   REBUILD   The first dev.62 (sha256 c2b68bba..., stamped g9a12095a) was
+#             misbuilt: the checkout still sat on upstream/btrfs-replay (the
+#             unit branch lacks the need tables, gc robustness, lstatexists,
+#             gui fetch-events) when the binary was compiled at 16:55; the
+#             forced -version stamp hid it. Discarded before ever running.
+#             This rebuild is from the real fork branch tip.
 #   notify    ../notify (devel) via go.work replace — carries df43a3b:
 #             lossy-replay verdict now restores w.live. Without it the watcher stuck
 #             in live=false limbo after one lossy verdict and silently deferred every
