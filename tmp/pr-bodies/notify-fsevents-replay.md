@@ -24,6 +24,10 @@ PR target: syncthing/notify
   last delivered event ID and suppresses the rescan flag if replay covers the
   gap. Holes raised *during* replay are tracked and healed by one follow-up
   replay at HistoryDone; a lossy threshold keeps degenerate cases bounded.
+- The lossy verdict re-arms live per-flag heals (found via production
+  telemetry: without it the watch stuck in a non-live limbo that silently
+  suppressed every later drop signal — 15,627 flags deferred over 57 minutes
+  before a restart).
 
 Consumers that don't use replay are unaffected (flags forward as before).
 Consumers that do (syncthing, via WatchReplayArgs) turn a minutes-long full
