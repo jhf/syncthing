@@ -35,6 +35,9 @@ func (s *folderDB) CountNeed(device protocol.DeviceID) (db.Counts, error) {
 	if device == protocol.LocalDeviceID {
 		return s.needSizeLocal()
 	}
+	if s.needBuilt.Load() && s.needDeviceKnown(device) {
+		return s.needTotalsFromDetail(device)
+	}
 	return s.needSizeRemote(device)
 }
 

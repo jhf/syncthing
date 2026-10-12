@@ -226,17 +226,68 @@ func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB) error {
 	// them) and they were deleted more than MaxDeletedFileAge ago.
 	// Keep the local high-water mark reachable by the index sender.
 	l.DebugContext(ctx, "Forgetting deleted files", "retention", fdb.deleteRetention)
-	res, err := fdb.stmt(`
-		DELETE FROM files
-		WHERE deleted
+	// The predicate shared by the pre-select and the delete: old, deleted,
+	// unneeded rows, except the local index-sender high-water mark and
+	// receive-encrypted entries (whose fixed timestamp says nothing about
+	// deletion age). Positional placeholders so it works through both the
+	// templated stmt path and a raw transaction.
+	const oldDeletedPredicate = `
+		deleted
 			AND modified != ?
 			AND modified < ?
-			AND local_flags & {{.FlagLocalNeeded}} == 0
+			AND local_flags & ? == 0
 			AND sequence NOT IN (
-				SELECT sequence FROM indexids WHERE device_idx = {{.LocalDeviceIdx}}
+				SELECT sequence FROM indexids WHERE device_idx = ?
 			)
-	`).Exec(recvEncModified, time.Now().Add(-fdb.deleteRetention).UnixNano())
+	`
+	cutoff := time.Now().Add(-fdb.deleteRetention).UnixNano()
+	if !fdb.needBuilt.Load() {
+		res, err := fdb.stmt(`DELETE FROM files WHERE `+oldDeletedPredicate).Exec(recvEncModified, cutoff, protocol.FlagLocalNeeded, fdb.localDeviceIdx)
+		if err != nil {
+			return wrap(err)
+		}
+		if aff, err := res.RowsAffected(); err == nil {
+			l.DebugContext(ctx, "Removed old deleted file records", "affected", aff)
+		}
+		return nil
+	}
+
+	// With the need tables maintained, dropping rows must be followed by a
+	// per-name recalc: the dropped row may have carried the global flag or
+	// been the row that satisfied a device's need. The caller already holds
+	// updateLock (hence the Locked suffix): re-taking it here self-deadlocks
+	// the GC service and wedges every later Update, which was observed live
+	// as a phantom connection whose dispatcherLoop blocked in Update forever.
+	tx, err := fdb.sql.BeginTxx(ctx, nil)
 	if err != nil {
+		return wrap(err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	txp := &txPreparedStmts{Tx: tx}
+	var names []string
+	if err := txp.Select(&names, `
+		SELECT DISTINCT n.name FROM files f
+		INNER JOIN file_names n ON n.idx = f.name_idx
+		WHERE f.deleted
+			AND f.modified != ?
+			AND f.modified < ?
+			AND f.local_flags & ? = 0
+			AND f.sequence NOT IN (
+				SELECT sequence FROM indexids WHERE device_idx = ?
+			)
+	`, recvEncModified, cutoff, protocol.FlagLocalNeeded, fdb.localDeviceIdx); err != nil {
+		return wrap(err)
+	}
+	res, err := txp.Exec(`DELETE FROM files WHERE `+oldDeletedPredicate, recvEncModified, cutoff, protocol.FlagLocalNeeded, fdb.localDeviceIdx)
+	if err != nil {
+		return wrap(err)
+	}
+	for _, name := range names {
+		if err := fdb.recalcGlobalForFile(txp, name); err != nil {
+			return wrap(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return wrap(err)
 	}
 	if aff, err := res.RowsAffected(); err == nil {

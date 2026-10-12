@@ -329,6 +329,7 @@ func (s *DB) CountNeed(folder string, device protocol.DeviceID) (db.Counts, erro
 	if err != nil {
 		return db.Counts{}, err
 	}
+	fdb.ensureNeedBuild()
 	return fdb.CountNeed(device)
 }
 
