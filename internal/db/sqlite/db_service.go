@@ -263,9 +263,10 @@ func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB) error {
 	// per-name recalc: the dropped row may have carried the global flag or
 	// been the row that satisfied a device's need. Receive-encrypted rows
 	// (fixed sentinel timestamp) and rows still referenced by the index
-	// sender's high-water mark are never dropped.
-	fdb.updateLock.Lock()
-	defer fdb.updateLock.Unlock()
+	// sender's high-water mark are never dropped. The caller already holds
+	// updateLock (hence the Locked suffix): re-taking it here self-deadlocks
+	// the GC service and wedges every later Update, which was observed live
+	// as a phantom connection whose dispatcherLoop blocked in Update forever.
 	tx, err := fdb.sql.BeginTxx(ctx, nil)
 	if err != nil {
 		return wrap(err)
