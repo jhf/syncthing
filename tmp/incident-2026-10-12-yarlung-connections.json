@@ -1,0 +1,64 @@
+{
+  "connections": {
+    "YMIQQYL-P73T2UL-POUXDLS-IH6OPVS-QOBHJCS-ZJYMWNT-BF2DW7B-SVGONQB": {
+      "at": "2026-10-12T19:43:23Z",
+      "inBytesTotal": 2623424,
+      "outBytesTotal": 129957,
+      "startedAt": "2026-10-12T19:01:35Z",
+      "connected": true,
+      "paused": false,
+      "clientVersion": "v2.1.7-dev.61.gd540ac56-btrfs-scan-replay",
+      "address": "51.175.176.229:54779",
+      "type": "tcp-server",
+      "isLocal": false,
+      "crypto": "TLS1.3-TLS_AES_128_GCM_SHA256",
+      "primary": {
+        "at": "2026-10-12T19:43:23Z",
+        "inBytesTotal": 878,
+        "outBytesTotal": 98868,
+        "startedAt": "2026-10-12T19:01:35Z",
+        "address": "51.175.176.229:54779",
+        "type": "tcp-server",
+        "isLocal": false,
+        "crypto": "TLS1.3-TLS_AES_128_GCM_SHA256"
+      },
+      "secondary": [
+        {
+          "at": "2026-10-12T19:43:23Z",
+          "inBytesTotal": 2622000,
+          "outBytesTotal": 30485,
+          "startedAt": "2026-10-12T19:01:35Z",
+          "address": "51.175.176.229:44852",
+          "type": "tcp-server",
+          "isLocal": false,
+          "crypto": "TLS1.3-TLS_AES_128_GCM_SHA256"
+        },
+        {
+          "at": "2026-10-12T19:43:23Z",
+          "inBytesTotal": 314,
+          "outBytesTotal": 380,
+          "startedAt": "2026-10-12T19:01:55Z",
+          "address": "51.175.176.229:28804",
+          "type": "tcp-server",
+          "isLocal": false,
+          "crypto": "TLS1.3-TLS_AES_128_GCM_SHA256"
+        },
+        {
+          "at": "2026-10-12T19:43:23Z",
+          "inBytesTotal": 232,
+          "outBytesTotal": 224,
+          "startedAt": "2026-10-12T19:11:36Z",
+          "address": "51.175.176.229:24808",
+          "type": "tcp-server",
+          "isLocal": false,
+          "crypto": "TLS1.3-TLS_AES_128_GCM_SHA256"
+        }
+      ]
+    }
+  },
+  "total": {
+    "at": "2026-10-12T19:43:23Z",
+    "inBytesTotal": 22632856,
+    "outBytesTotal": 178799
+  }
+}

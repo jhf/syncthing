@@ -1,0 +1,562 @@
+File: syncthing-dev61-linux-amd64
+Build ID: 31b4aad926a129c985769ccf646a47191af8b473
+Type: goroutine
+Time: 2026-10-12 21:47:05 CEST
+-----------+-------------------------------------------------------
+        11   runtime.gopark
+             runtime.selectgo
+             github.com/thejerf/suture/v4.(*Supervisor).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         3   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv1
+             github.com/syncthing/syncthing/lib/svcutil.doneService.Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         3   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv1
+             github.com/syncthing/syncthing/lib/connections.(*service).handleHellos.func1
+-----------+-------------------------------------------------------
+         3   runtime.gopark
+             runtime.netpollblock
+             internal/poll.runtime_pollWait
+             internal/poll.(*pollDesc).wait
+             internal/poll.(*pollDesc).waitRead (inline)
+             internal/poll.(*FD).Read
+             net.(*netFD).Read
+             net.(*conn).Read
+             crypto/tls.(*atLeastReader).Read
+             bytes.(*Buffer).ReadFrom
+             crypto/tls.(*Conn).readFromUntil
+             crypto/tls.(*Conn).readRecordOrCCS
+             crypto/tls.(*Conn).readRecord (inline)
+             crypto/tls.(*Conn).Read
+             github.com/syncthing/syncthing/lib/connections.(*limitedReader).Read
+             github.com/syncthing/syncthing/lib/protocol.(*countingReader).Read
+             io.ReadAtLeast
+             io.ReadFull (inline)
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).readHeader
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).readMessage
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).readerLoop
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func1
+-----------+-------------------------------------------------------
+         3   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).dispatcherLoop
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func2
+-----------+-------------------------------------------------------
+         3   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).writerLoop
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func3
+-----------+-------------------------------------------------------
+         3   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).pingSender
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func4
+-----------+-------------------------------------------------------
+         3   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).pingReceiver
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func5
+-----------+-------------------------------------------------------
+         2   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv2
+             github.com/syncthing/notify.(*inotify).send
+-----------+-------------------------------------------------------
+         2   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv2
+             github.com/syncthing/syncthing/lib/events.(*bufferedSubscription).pollingLoop
+-----------+-------------------------------------------------------
+         2   runtime.gopark
+             runtime.selectgo
+             github.com/thejerf/suture/v4.(*Supervisor).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).ServeBackground.func1
+-----------+-------------------------------------------------------
+         2   runtime.gopark
+             runtime.selectgo
+             database/sql.(*DB).connectionOpener
+-----------+-------------------------------------------------------
+         2   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/beacon.(*cast).Recv
+             github.com/syncthing/syncthing/lib/discover.(*localClient).recvAnnouncements
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         2   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/discover.(*globalClient).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         2   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/discover.(*localClient).sendLocalAnnouncements
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         2   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/model.addTimeUntilCancelled
+-----------+-------------------------------------------------------
+         1   runtime.notetsleepg
+             os/signal.signal_recv
+             os/signal.loop
+-----------+-------------------------------------------------------
+         1   runtime.goroutineProfileWithLabels
+             runtime.pprof_goroutineProfileWithLabels
+             runtime/pprof.writeRuntimeProfile
+             runtime/pprof.writeGoroutine
+             runtime/pprof.(*Profile).WriteTo
+             github.com/syncthing/syncthing/lib/api.(*service).getSupportBundle
+             net/http.HandlerFunc.ServeHTTP
+             net/http.(*ServeMux).ServeHTTP
+             github.com/syncthing/syncthing/lib/api.(*service).Serve.(*Router).Handler.func7
+             github.com/julienschmidt/httprouter.(*Router).ServeHTTP
+             github.com/syncthing/syncthing/lib/api.(*service).Serve.noCacheMiddleware.func8
+             net/http.HandlerFunc.ServeHTTP
+             net/http.(*ServeMux).ServeHTTP
+             github.com/syncthing/syncthing/lib/api.(*csrfManager).ServeHTTP
+             github.com/syncthing/syncthing/lib/api.(*service).Serve.withDetailsMiddleware.func10
+             net/http.HandlerFunc.ServeHTTP
+             github.com/syncthing/syncthing/lib/api.(*basicAuthAndSessionMiddleware).ServeHTTP
+             github.com/syncthing/syncthing/lib/api.(*service).Serve.corsMiddleware.func14
+             net/http.HandlerFunc.ServeHTTP
+             github.com/syncthing/syncthing/lib/api.(*service).Serve.localhostMiddleware.func15
+             net/http.HandlerFunc.ServeHTTP
+             github.com/syncthing/syncthing/lib/api.(*service).Serve.debugMiddleware.func16
+             net/http.HandlerFunc.ServeHTTP
+             net/http.serverHandler.ServeHTTP
+             net/http.(*conn).serve
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv1
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).internalClose.func1
+             sync.(*Once).doSlow
+             sync.(*Once).Do (inline)
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).internalClose
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).pingReceiver
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func5
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv1
+             github.com/syncthing/syncthing/lib/beacon.writeBroadcasts.func1
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv1
+             github.com/syncthing/syncthing/lib/beacon.readBroadcasts.func1
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv1
+             github.com/syncthing/syncthing/lib/beacon.writeMulticasts.func1
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv1
+             github.com/syncthing/syncthing/lib/beacon.readMulticasts.func1
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv1
+             github.com/syncthing/syncthing/lib/discover.(*globalClient).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv1
+             github.com/syncthing/syncthing/lib/discover.(*manager).serve
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv1
+             github.com/syncthing/syncthing/lib/model.(*folder).Scan (inline)
+             github.com/syncthing/syncthing/lib/model.(*sendReceiveFolder).pullScannerRoutine
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv1
+             github.com/syncthing/syncthing/lib/syncthing.(*App).wait
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv1
+             github.com/syncthing/syncthing/lib/syncthing.(*App).Wait (inline)
+             main.(*serveCmd).syncthingMain
+             main.(*serveCmd).Run
+             reflect.Value.call
+             reflect.Value.Call
+             github.com/alecthomas/kong.callAnyFunction
+             github.com/alecthomas/kong.callFunction
+             github.com/alecthomas/kong.(*Context).RunNode
+             github.com/alecthomas/kong.(*Context).Run
+             main.main
+             runtime.main
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv1
+             main.setupSignalHandling.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv1
+             main.setupSignalHandling.func1
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv2
+             github.com/syncthing/notify.(*nonrecursiveTree).dispatch
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv2
+             github.com/syncthing/notify.(*nonrecursiveTree).internal
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.chanrecv
+             runtime.chanrecv2
+             github.com/syncthing/syncthing/lib/fs.(*caseFilesystemRegistry).cleaner
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.netpollblock
+             internal/poll.runtime_pollWait
+             internal/poll.(*pollDesc).wait
+             internal/poll.(*pollDesc).waitRead (inline)
+             internal/poll.(*FD).Read
+             net.(*netFD).Read
+             net.(*conn).Read
+             crypto/tls.(*atLeastReader).Read
+             bytes.(*Buffer).ReadFrom
+             crypto/tls.(*Conn).readFromUntil
+             crypto/tls.(*Conn).readRecordOrCCS
+             crypto/tls.(*Conn).readRecord (inline)
+             crypto/tls.(*Conn).Read
+             io.ReadAtLeast
+             io.ReadFull (inline)
+             github.com/syncthing/syncthing/lib/relay/protocol.ReadMessage
+             github.com/syncthing/syncthing/lib/relay/client.messageReader
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.netpollblock
+             internal/poll.runtime_pollWait
+             internal/poll.(*pollDesc).wait
+             internal/poll.(*pollDesc).waitRead (inline)
+             internal/poll.(*FD).Read
+             net.(*netFD).Read
+             net.(*conn).Read
+             github.com/syncthing/syncthing/lib/tlsutil.(*UnionedConnection).Read
+             net/http.(*connReader).backgroundRead
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.netpollblock
+             internal/poll.runtime_pollWait
+             internal/poll.(*pollDesc).wait
+             internal/poll.(*pollDesc).waitRead (inline)
+             internal/poll.(*FD).ReadFromInet4
+             net.(*netFD).readFromInet4
+             net.(*UDPConn).readFrom
+             net.(*UDPConn).readFromUDP
+             net.(*UDPConn).ReadFrom
+             github.com/syncthing/syncthing/lib/beacon.readBroadcasts
+             github.com/syncthing/syncthing/lib/beacon.NewBroadcast.func1
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.netpollblock
+             internal/poll.runtime_pollWait
+             internal/poll.(*pollDesc).wait
+             internal/poll.(*pollDesc).waitRead (inline)
+             internal/poll.(*FD).Accept
+             net.(*netFD).accept
+             net.(*TCPListener).accept
+             net.(*TCPListener).Accept
+             github.com/syncthing/syncthing/lib/tlsutil.(*DowngradingListener).AcceptNoWrapTLS
+             github.com/syncthing/syncthing/lib/tlsutil.(*DowngradingListener).Accept
+             net/http.(*Server).Serve
+             github.com/syncthing/syncthing/lib/api.(*service).Serve.func1
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.netpollblock
+             internal/poll.runtime_pollWait
+             internal/poll.(*pollDesc).wait
+             internal/poll.(*pollDesc).waitRead (inline)
+             internal/poll.(*FD).Accept
+             net.(*netFD).accept
+             net.(*TCPListener).accept
+             net.(*TCPListener).Accept
+             github.com/syncthing/syncthing/lib/connections.(*tcpListener).serve
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.netpollblock
+             internal/poll.runtime_pollWait
+             internal/poll.(*pollDesc).wait
+             internal/poll.(*pollDesc).waitRead (inline)
+             internal/poll.(*FD).RawRead
+             net.(*rawConn).Read
+             golang.org/x/net/internal/socket.(*syscaller).recvmmsg
+             golang.org/x/net/internal/socket.(*Conn).recvMsgs
+             golang.org/x/net/internal/socket.(*Conn).RecvMsgs (inline)
+             golang.org/x/net/ipv4.(*payloadHandler).ReadBatch
+             github.com/quic-go/quic-go.(*oobConn).ReadPacket
+             github.com/quic-go/quic-go.(*Transport).listen
+             github.com/quic-go/quic-go.(*Transport).init.func1.1
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.netpollblock
+             internal/poll.runtime_pollWait
+             internal/poll.(*pollDesc).wait
+             internal/poll.(*pollDesc).waitRead (inline)
+             internal/poll.(*FD).RawRead
+             net.(*rawConn).Read
+             golang.org/x/net/internal/socket.(*Conn).recvMsg
+             golang.org/x/net/internal/socket.(*Conn).RecvMsg (inline)
+             golang.org/x/net/ipv6.(*payloadHandler).ReadFrom
+             github.com/syncthing/syncthing/lib/beacon.readMulticasts
+             github.com/syncthing/syncthing/lib/beacon.NewMulticast.func1
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/thejerf/suture/v4.(*Supervisor).Serve
+             github.com/syncthing/syncthing/lib/model.(*serviceMap[go.shape.string,go.shape.*uint8]).Serve (inline)
+             github.com/syncthing/syncthing/lib/model.(*indexHandlerRegistry).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/thejerf/suture/v4.(*Supervisor).Serve
+             github.com/syncthing/syncthing/lib/model.(*serviceMap[go.shape.[32]uint8,go.shape.*uint8]).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/thejerf/suture/v4.(*Supervisor).Serve
+             github.com/syncthing/syncthing/lib/model.(*serviceMap[go.shape.string,go.shape.ea9d58f5b4abf4e3e6efe19427f3292d3b0b462d8b86ae759d93ab85a7b8dee7]).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/fs.(*BasicFilesystem).watchLoop
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/events.(*logger).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/config.(*wrapper).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/watchaggregator.(*aggregator).mainLoop
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/watchaggregator.(*aggregator).notify
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/quic-go/quic-go.(*baseServer).run
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/quic-go/quic-go.(*baseServer).runSendQueue
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/quic-go/quic-go.(*baseServer).accept
+             github.com/quic-go/quic-go.(*baseServer).Accept (inline)
+             github.com/quic-go/quic-go.(*Listener).Accept
+             github.com/syncthing/syncthing/lib/connections.(*quicListener).serve
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/quic-go/quic-go.(*Transport).runSendQueue
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/nat.(*Service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/stun.(*Service).stunKeepAlive
+             github.com/syncthing/syncthing/lib/stun.(*Service).runStunForServer
+             github.com/syncthing/syncthing/lib/stun.(*Service).Serve
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/relay/client.(*staticClient).serve
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/syncthing/syncthing/lib/relay/client.(*dynamicClient).serve
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/syncthing/syncthing/lib/connections.(*relayListener).serve
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/beacon.writeBroadcasts
+             github.com/syncthing/syncthing/lib/beacon.NewBroadcast.func2
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/beacon.writeMulticasts
+             github.com/syncthing/syncthing/lib/beacon.NewMulticast.func2
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/connections.(*relayListener).handleInvitations
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/connections.(*service).handleConns
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/connections.(*service).handleHellos
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/connections.(*service).connect
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/model.(*folder).monitorWatch
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/model.(*folderSummaryService).listenForUpdates
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/model.(*folderSummaryService).calculateSummaries
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/model.(*indexHandler).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/model.(*indexHandler).Serve.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/model.(*model).serve
+             github.com/syncthing/syncthing/lib/svcutil.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/model.(*ProgressEmitter).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/ur.(*failureHandler).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/ur.(*Service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.selectgo
+             github.com/syncthing/syncthing/lib/api.(*service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.goparkunlock (inline)
+             runtime.semacquire1
+             internal/sync.runtime_SemacquireMutex
+             internal/sync.(*Mutex).lockSlow
+             internal/sync.(*Mutex).Lock (inline)
+             sync.(*Mutex).Lock (inline)
+             github.com/syncthing/syncthing/internal/db/sqlite.garbageCollectOldDeletedLocked
+             github.com/syncthing/syncthing/internal/db/sqlite.(*Service).periodic.func2.1
+             github.com/syncthing/syncthing/internal/db/sqlite.(*Service).periodic.func2
+             github.com/syncthing/syncthing/internal/db/sqlite.(*DB).forEachFolder
+             github.com/syncthing/syncthing/internal/db/sqlite.(*Service).periodic
+             github.com/syncthing/syncthing/internal/db/sqlite.(*Service).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.goparkunlock (inline)
+             runtime.semacquire1
+             internal/sync.runtime_SemacquireMutex
+             internal/sync.(*Mutex).lockSlow
+             internal/sync.(*Mutex).Lock (inline)
+             sync.(*Mutex).Lock (inline)
+             github.com/syncthing/syncthing/internal/db/sqlite.(*folderDB).Update
+             github.com/syncthing/syncthing/internal/db/sqlite.(*DB).Update
+             github.com/syncthing/syncthing/internal/db.metricsDB.Update
+             github.com/syncthing/syncthing/lib/model.(*folder).updateLocals
+             github.com/syncthing/syncthing/lib/model.(*folder).updateLocalsFromScanning
+             github.com/syncthing/syncthing/lib/model.(*folder).scanSubdirs.(*folder).newScanBatch.func4
+             github.com/syncthing/syncthing/lib/model.(*FileInfoBatch).Flush
+             github.com/syncthing/syncthing/lib/model.(*scanBatch).Flush
+             github.com/syncthing/syncthing/lib/model.(*folder).scanSubdirs
+             github.com/syncthing/syncthing/lib/model.(*folder).serviceQueuedWatch
+             github.com/syncthing/syncthing/lib/model.(*folder).scanSubdirs
+             github.com/syncthing/syncthing/lib/model.(*folder).scanTimerFired
+             github.com/syncthing/syncthing/lib/model.(*folder).Serve
+             github.com/thejerf/suture/v4.(*Supervisor).runService.func2
+-----------+-------------------------------------------------------
+         1   runtime.gopark
+             runtime.goparkunlock (inline)
+             runtime.semacquire1
+             internal/sync.runtime_SemacquireMutex
+             internal/sync.(*Mutex).lockSlow
+             internal/sync.(*Mutex).Lock (inline)
+             sync.(*Mutex).Lock (inline)
+             github.com/syncthing/syncthing/internal/db/sqlite.(*folderDB).Update
+             github.com/syncthing/syncthing/internal/db/sqlite.(*DB).Update
+             github.com/syncthing/syncthing/internal/db.metricsDB.Update
+             github.com/syncthing/syncthing/lib/model.(*indexHandler).receive
+             github.com/syncthing/syncthing/lib/model.(*indexHandlerRegistry).ReceiveIndex
+             github.com/syncthing/syncthing/lib/model.(*model).handleIndex
+             github.com/syncthing/syncthing/lib/model.(*model).IndexUpdate
+             github.com/syncthing/syncthing/lib/protocol.(*connectionWrappingModel).IndexUpdate
+             github.com/syncthing/syncthing/lib/protocol.encryptedModel.IndexUpdate
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).handleIndexUpdate
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).dispatcherLoop
+             github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func2
+-----------+-------------------------------------------------------
+         1   syscall.Syscall6
+             golang.org/x/sys/unix.EpollWait
+             github.com/syncthing/notify.(*inotify).loop
+-----------+-------------------------------------------------------
