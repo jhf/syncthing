@@ -8,7 +8,11 @@
 
 package fs
 
-import "github.com/syncthing/notify"
+import (
+	"time"
+
+	"github.com/syncthing/notify"
+)
 
 // watchEventClass is the watch loop's verdict for a backend failure-flag
 // event; only the FSEvents backend produces non-OK classes.
@@ -44,3 +48,9 @@ func CurrentWatchEventID() uint64 { return 0 }
 
 // WatchReplayArmed is false without journal support.
 func WatchReplayArmed() bool { return false }
+
+// SetWatchPollOnly is a no-op without journal support.
+func SetWatchPollOnly(time.Duration) {}
+
+// SetWatchIgnoreSelf is a no-op without journal support.
+func SetWatchIgnoreSelf(bool) {}
