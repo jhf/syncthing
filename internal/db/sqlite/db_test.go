@@ -1410,9 +1410,7 @@ func TestBlocklistGCFullScanInterruptedKeepsFlag(t *testing.T) {
 	}
 	runGC := func() {
 		t.Helper()
-		fdb.updateLock.Lock()
-		err := garbageCollectBlocklistsAndBlocksLocked(context.Background(), fdb)
-		fdb.updateLock.Unlock()
+		err := garbageCollectBlocklistsAndBlocks(context.Background(), fdb)
 		if err != nil {
 			t.Fatal(err)
 		}
