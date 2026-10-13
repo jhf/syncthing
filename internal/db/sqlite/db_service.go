@@ -31,6 +31,14 @@ const (
 	gcChunkSize = 100_000 // approximate number of rows to process in a single gc query
 )
 
+// gcRetiredBatchSize bounds one retired-blocklist GC batch; a var so
+// tests can force multiple batches.
+var gcRetiredBatchSize = 10_000
+
+// gcRetiredBatchHook, when set, runs between retired-GC batches with
+// updateLock released. Tests only.
+var gcRetiredBatchHook func()
+
 // gcMaxRuntime is the max time to spend on gc, per table, per run. It is a var
 // rather than a const so tests can force the interrupted path.
 var gcMaxRuntime = 5 * time.Minute
@@ -124,10 +132,8 @@ func (s *Service) periodic(ctx context.Context) error {
 	t1 := time.Now()
 	defer func() { slog.DebugContext(ctx, "Periodic done in", "t1", time.Since(t1), "t0t1", t1.Sub(t0)) }()
 
-	s.sdb.updateLock.Lock()
-	err := tidy(ctx, s.sdb.sql)
-	s.sdb.updateLock.Unlock()
-	if err != nil {
+	// tidy needs no lock; see the folder-GC tidy call below.
+	if err := tidy(ctx, s.sdb.sql); err != nil {
 		return err
 	}
 
@@ -155,7 +161,8 @@ func (s *Service) periodic(ctx context.Context) error {
 		}
 
 		// Run the GC steps, in a function to be able to use a deferred
-		// unlock.
+		// unlock. Only the live-table steps need updateLock; the blocklist
+		// GC releases it internally per chunk/batch.
 		if err := func() error {
 			fdb.updateLock.Lock()
 			defer fdb.updateLock.Unlock()
@@ -163,14 +170,20 @@ func (s *Service) periodic(ctx context.Context) error {
 			if err := garbageCollectOldDeletedLocked(ctx, fdb); err != nil {
 				return wrap(err)
 			}
-			if err := garbageCollectNamesAndVersions(ctx, fdb); err != nil {
-				return wrap(err)
-			}
-			if err := garbageCollectBlocklistsAndBlocksLocked(ctx, fdb); err != nil {
-				return wrap(err)
-			}
-			return tidy(ctx, fdb.sql)
+			return garbageCollectNamesAndVersions(ctx, fdb)
 		}(); err != nil {
+			return wrap(err)
+		}
+
+		if err := garbageCollectBlocklistsAndBlocks(ctx, fdb); err != nil {
+			return wrap(err)
+		}
+
+		// tidy runs unlocked: ANALYZE on a multi-million-row folder takes
+		// many minutes, and holding updateLock across it wedges every
+		// Update behind it (observed live on yarlung 2026-10-13 as a ~10
+		// minute stall that parked a connection dispatcher).
+		if err := tidy(ctx, fdb.sql); err != nil {
 			return wrap(err)
 		}
 
@@ -255,7 +268,11 @@ func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB) error {
 	return nil
 }
 
-func garbageCollectBlocklistsAndBlocksLocked(ctx context.Context, fdb *folderDB) error {
+// garbageCollectBlocklistsAndBlocks removes blocklists and blocks not
+// referred to by any files. The caller must NOT hold updateLock: the queue
+// and full-scan paths acquire it per batch/chunk and release it between
+// them so a long GC run does not wedge folder updates.
+func garbageCollectBlocklistsAndBlocks(ctx context.Context, fdb *folderDB) error {
 	// Remove blocklists not referred to by any files, then the blocks that
 	// belonged to those hashes. File updates record retired hashes in
 	// gc_retired_blocklists so the common path does not scan live tables.
@@ -265,9 +282,6 @@ func garbageCollectBlocklistsAndBlocksLocked(ctx context.Context, fdb *folderDB)
 	// transaction so a 5 minute time limit does not leave a multi-GB WAL from
 	// one uncommitted DELETE, and so the folder lock can be released between
 	// chunks.
-	fdb.updateLock.Unlock()
-	defer fdb.updateLock.Lock()
-
 	conn, err := fdb.sql.Connx(ctx)
 	if err != nil {
 		return wrap(err)
@@ -323,64 +337,135 @@ func garbageCollectBlocklistsAndBlocksLocked(ctx context.Context, fdb *folderDB)
 	return meta.PutBool(gcNeedsFullScanKey, false)
 }
 
+// garbageCollectRetiredBlocklists processes the retirement queue in batches,
+// holding updateLock only for one batch at a time. The NOT EXISTS predicates
+// must be serialized against file updates (hence the lock), but a single
+// unbatched transaction over a large queue holds the lock for many minutes on
+// a multi-million-name folder, wedging every Update behind it; observed live
+// on yarlung 2026-10-13 as a ~10 minute stall that parked a connection
+// dispatcher long enough to recreate the phantom-connection state. The blocks
+// delete is index-driven (schema 61), so a batch costs milliseconds.
 func garbageCollectRetiredBlocklists(ctx context.Context, fdb *folderDB, conn *sqlx.Conn) error {
-	l := slog.With("folder", fdb.folderID, "fdb", fdb.baseName, "table", "gc_retired_blocklists")
+	l := slog.With("folder", fdb.folderID, "db", fdb.baseName, "table", "gc_retired_blocklists")
 	t0 := time.Now()
+	var totalLists, totalBlocks int64
 
-	fdb.updateLock.Lock()
-	tx, err := conn.BeginTxx(ctx, nil)
-	if err != nil {
+	for {
+		fdb.updateLock.Lock()
+
+		var batch [][]byte
+		if err := conn.SelectContext(ctx, &batch, `SELECT blocklist_hash FROM gc_retired_blocklists ORDER BY blocklist_hash LIMIT ?`, gcRetiredBatchSize); err != nil {
+			fdb.updateLock.Unlock()
+			return wrap(err, "select retired batch")
+		}
+		if len(batch) == 0 {
+			fdb.updateLock.Unlock()
+			break
+		}
+
+		tx, err := conn.BeginTxx(ctx, nil)
+		if err != nil {
+			fdb.updateLock.Unlock()
+			return wrap(err)
+		}
+
+		in, args := blobInClause(batch)
+		deletedLists, err := execRowsAffected(ctx, tx, `
+			DELETE FROM blocklists
+			WHERE blocklist_hash IN (`+in+`)
+			  AND NOT EXISTS (
+				SELECT 1 FROM files WHERE files.blocklist_hash = blocklists.blocklist_hash
+			  )`, args)
+		if err != nil {
+			_ = tx.Rollback()
+			fdb.updateLock.Unlock()
+			return wrap(err, "delete retired blocklists")
+		}
+		totalLists += deletedLists
+
+		deletedBlocks, err := execRowsAffected(ctx, tx, `
+			DELETE FROM blocks
+			WHERE blocklist_hash IN (`+in+`)
+			  AND NOT EXISTS (
+				SELECT 1 FROM files WHERE files.blocklist_hash = blocks.blocklist_hash
+			  )`, args)
+		if err != nil {
+			_ = tx.Rollback()
+			fdb.updateLock.Unlock()
+			return wrap(err, "delete retired blocks")
+		}
+		totalBlocks += deletedBlocks
+
+		// A queue row is done when nothing remains in either table; rows
+		// still referenced stay queued for a later run. Restricting the
+		// cleanup to the batch keeps the statement small.
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM gc_retired_blocklists
+			WHERE blocklist_hash IN (`+in+`)
+			AND NOT EXISTS (
+				SELECT 1 FROM blocklists WHERE blocklists.blocklist_hash = gc_retired_blocklists.blocklist_hash
+			)
+			AND NOT EXISTS (
+				SELECT 1 FROM blocks WHERE blocks.blocklist_hash = gc_retired_blocklists.blocklist_hash
+			)`, args...); err != nil {
+			_ = tx.Rollback()
+			fdb.updateLock.Unlock()
+			return wrap(err, "delete retired queue")
+		}
+
+		if err := tx.Commit(); err != nil {
+			fdb.updateLock.Unlock()
+			return wrap(err, "commit retired gc")
+		}
 		fdb.updateLock.Unlock()
-		return wrap(err)
+
+		// Hashes whose blocklists are still referenced never leave the
+		// queue; if a whole batch made no progress we would spin on it
+		// forever, so stop and let the next periodic run retry.
+		if deletedLists == 0 && deletedBlocks == 0 {
+			l.DebugContext(ctx, "Retired GC batch made no progress, deferring rest to next run", "batch", len(batch))
+			break
+		}
+
+		// Test hook: runs with updateLock released, between batches. Lets
+		// tests deterministically interleave an update. Nil in production.
+		if gcRetiredBatchHook != nil {
+			gcRetiredBatchHook()
+		}
 	}
 
-	res, err := tx.ExecContext(ctx, `
-		DELETE FROM blocklists
-		WHERE blocklist_hash IN (SELECT blocklist_hash FROM gc_retired_blocklists)
-		  AND NOT EXISTS (
-			SELECT 1 FROM files WHERE files.blocklist_hash = blocklists.blocklist_hash
-		  )`)
-	if err != nil {
-		_ = tx.Rollback()
-		fdb.updateLock.Unlock()
-		return wrap(err, "delete retired blocklists")
-	}
-	deletedLists, _ := res.RowsAffected()
-
-	res, err = tx.ExecContext(ctx, `
-		DELETE FROM blocks
-		WHERE blocklist_hash IN (SELECT blocklist_hash FROM gc_retired_blocklists)
-		  AND NOT EXISTS (
-			SELECT 1 FROM files WHERE files.blocklist_hash = blocks.blocklist_hash
-		  )`)
-	if err != nil {
-		_ = tx.Rollback()
-		fdb.updateLock.Unlock()
-		return wrap(err, "delete retired blocks")
-	}
-	deletedBlocks, _ := res.RowsAffected()
-
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM gc_retired_blocklists
-		WHERE NOT EXISTS (
-			SELECT 1 FROM blocklists WHERE blocklists.blocklist_hash = gc_retired_blocklists.blocklist_hash
-		)
-		AND NOT EXISTS (
-			SELECT 1 FROM blocks WHERE blocks.blocklist_hash = gc_retired_blocklists.blocklist_hash
-		)`); err != nil {
-		_ = tx.Rollback()
-		fdb.updateLock.Unlock()
-		return wrap(err, "delete retired queue")
-	}
-
-	if err := tx.Commit(); err != nil {
-		fdb.updateLock.Unlock()
-		return wrap(err, "commit retired gc")
-	}
-	fdb.updateLock.Unlock()
-
-	l.DebugContext(ctx, "Retired GC", "runtime", time.Since(t0), "blocklists", deletedLists, "blocks", deletedBlocks)
+	l.DebugContext(ctx, "Retired GC", "runtime", time.Since(t0), "blocklists", totalLists, "blocks", totalBlocks)
 	return nil
+}
+
+// blobInClause returns an "?, ?, ..." placeholder string with one slot per
+// blob and the blobs as args, for IN clauses. Batches are bounded by
+// gcRetiredBatchSize, well under SQLITE_MAX_VARIABLE_NUMBER.
+func blobInClause(blobs [][]byte) (string, []any) {
+	var sb strings.Builder
+	args := make([]any, 0, len(blobs))
+	for i, b := range blobs {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString("?")
+		args = append(args, b)
+	}
+	return sb.String(), args
+}
+
+// execRowsAffected runs a statement and reports affected rows, folding the
+// RowsAffected error into the exec error.
+func execRowsAffected(ctx context.Context, tx *sqlx.Tx, query string, args []any) (int64, error) {
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // garbageCollectOrphanBlocklistsFull scans every blocklist with the NOT EXISTS
