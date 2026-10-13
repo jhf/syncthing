@@ -639,3 +639,76 @@ func (fakeEventInfo) Event() notify.Event {
 func (fakeEventInfo) Sys() any {
 	return nil
 }
+
+// TestWatchBarrierCanaryPassesTempFilter pins the control-plane exception:
+// the ignore matcher auto-ignores the temp prefix (ignore.Match), and the
+// watch filter drops ignored events - but a barrier canary's event must
+// reach the consumer, or folder.watchBarrier can never observe it and every
+// btrfs baseline pairing times out (observed live on yarlung 2026-10-13:
+// "watch barrier not reached" after 2 minutes, canary event filtered).
+//
+// Teeth: without the IsWatchBarrierCanary exception in watchLoop, the
+// canary event is filtered like any temp file and the test times out.
+func TestWatchBarrierCanaryPassesTempFilter(t *testing.T) {
+	if build.IsOpenBSD {
+		t.Skip(failsOnOpenBSD)
+	}
+	name := "barriercanary"
+	if err := testFs.MkdirAll(name, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer testFs.RemoveAll(name)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// A matcher replicating ignore.Matcher's temp branch (ignore.go:
+	// IsTemporary -> IgnoreAndSkip, unconditional on patterns). lib/ignore
+	// imports lib/fs, so the real Matcher cannot be used here.
+	matcher := tempIgnoringMatcher{}
+	eventChan, errChan, err := testFs.Watch(name, matcher, ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A regular temp file's event must NOT come through.
+	createTestFile(name, ".syncthing.regular.tmp")
+	select {
+	case ev := <-eventChan:
+		if filepath.Base(ev.Name) == ".syncthing.regular.tmp" {
+			t.Fatal("regular temp file event passed the filter")
+		}
+	case <-time.After(2 * time.Second):
+	case err := <-errChan:
+		t.Fatal("watch error:", err)
+	}
+
+	// The barrier canary's event MUST come through.
+	createTestFile(name, WatchBarrierCanaryPrefix+"deadbeef.tmp")
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case ev := <-eventChan:
+			if filepath.Base(ev.Name) == WatchBarrierCanaryPrefix+"deadbeef.tmp" {
+				return // canary observed: barrier can pass
+			}
+		case err := <-errChan:
+			t.Fatal("watch error:", err)
+		case <-deadline:
+			t.Fatal("barrier canary event filtered or lost")
+		}
+	}
+}
+
+// tempIgnoringMatcher replicates ignore.Matcher's built-in temp-file rule
+// for watch filter tests.
+type tempIgnoringMatcher struct{}
+
+func (tempIgnoringMatcher) Match(name string) ignoreresult.R {
+	if IsTemporary(name) {
+		return ignoreresult.IgnoreAndSkip
+	}
+	return ignoreresult.NotIgnored
+}
+
+func (tempIgnoringMatcher) SkipIgnoredDirs() bool { return false }
