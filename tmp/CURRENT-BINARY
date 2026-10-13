@@ -7,19 +7,19 @@
 # Do not start Syncthing.app while this custom serve is running.
 
 KIND=custom
-BINARY=/Users/jhf/Projects/syncthing/custom-syncthing-darwin-arm64.dev83
-VERSION=v2.1.7-dev.83.g0c6a4799-btrfs-scan-replay
-BRANCH=feature/btrfs-scan-replay (dev.83 = dev.64 + 0c6a4799a btrfs baseline: canary-barrier pairing replaces 2s quiet guess, runtime baseline refresh after full scans, rate-limited 10min)
-COMMIT=0c6a4799a
+BINARY=/Users/jhf/Projects/syncthing/custom-syncthing-darwin-arm64.dev85
+VERSION=v2.1.7-dev.85.g612a598e-btrfs-scan-replay
+BRANCH=feature/btrfs-scan-replay (dev.85 = dev.83 + 612a598e3 barrier canary passes watch ignore filter + notify 9a7d1df: replay-wide drop deferral, 1s FSEvents stream latency)
+COMMIT=612a598e3
 SOURCE=/Users/jhf/Projects/syncthing
 
 # Artifact identity (2026-10-13):
-#   artifact  custom-syncthing-darwin-arm64.dev83
-#   sha256    2a4aca41af731dccf0485b64164f47a3651aa3618888f5218701563c9822cd09
+#   artifact  custom-syncthing-darwin-arm64.dev85
+#   sha256    561da693ef81c63a4c74bb4b1733ea125104085885dd2e78a87fef47c5daa88a
 #   commit    0c6a4799a feature/btrfs-scan-replay (clean tree at build)
 #   cgo       yes (25 FSEvent symbols; plain `go run build.go`, no CGO_ENABLED=0)
-#   yarlung   custom-syncthing-linux-amd64.dev83 (same commit, CGO_ENABLED=0)
-#             sha256 06f9a652bb58a4ce7a5e4c9a7284b9f4236f6d67af6d906146ac41f368f7ae25
+#   yarlung   custom-syncthing-linux-amd64.dev85 (same commit, CGO_ENABLED=0)
+#             sha256 d9e419ce039628fcaf8d34c44c49effb970edfd8fcf64c904063f1542310d7d0
 #             built via direct go build + build.go ldflags (GOBIN in go env
 #             breaks `go run build.go -goos linux`: cannot install
 #             cross-compiled binaries when GOBIN is set)
@@ -29,7 +29,7 @@ SOURCE=/Users/jhf/Projects/syncthing
 #             wall-clock quiet guess that could false-positive on in-flight
 #             events. dev.83: declarative FIFO canary barrier + runtime
 #             refresh after every full scan (>=10min apart).
-#   rollback  dev.64 binary at custom-syncthing-darwin-arm64.dev64; point BINARY
+#   rollback  dev.83 binary at custom-syncthing-darwin-arm64.dev83; point BINARY
 #             above at it and re-run tmp/run-custom-syncthing.sh.
 
 HOME_DIR=$HOME/Library/Application Support/Syncthing
