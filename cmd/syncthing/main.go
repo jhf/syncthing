@@ -437,6 +437,13 @@ func (c *serveCmd) syncthingMain() {
 	// early etc. will have it available.
 	slog.Info(build.LongVersion) //nolint:sloglint
 
+	// Syncthing already knows its own writes (its database lives inside the
+	// watched home tree, and every pulled file), so self-events are pure
+	// journaling+delivery overhead on a busy tree. Opt in to server-side
+	// filtering; the library default stays upstream-compatible so in-process
+	// watcher tests keep seeing their own writes. No-op off darwin.
+	fs.SetWatchIgnoreSelf(true)
+
 	// Ensure that we have a certificate and key.
 	cert, err := syncthing.LoadOrGenerateCertificate(
 		locations.Get(locations.CertFile),
