@@ -777,8 +777,38 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 	f.ScanCompleted()
 	if subDirs == nil || (len(subDirs) == 1 && subDirs[0] == "") {
 		f.fullScanOK.Store(true)
+		f.armWatchReplayAfterFullScan(ctx)
 	}
 	return nil
+}
+
+// armWatchReplayAfterFullScan enables journal replay once a full scan has
+// completed, when boot-time arming (tryArmWatchReplay) did not - e.g. the
+// persisted watermark had aged past maxWatchReplayAge after an overnight
+// gap. A completed full scan makes the database complete as of the
+// journal's current position, which is all arming requires; without this
+// re-arm every fseventsd drop flag for the rest of the process lifetime
+// escalates to a full rescan, and on a busy tree drops arrive faster than
+// scans complete, so scanning never stops (measured 2026-10-13: ~22
+// drops/min against ~20 min scans, 5566 folder state transitions in
+// 2h47m). With replay armed, a drop flag heals by replaying the journal
+// gap instead.
+func (f *folder) armWatchReplayAfterFullScan(ctx context.Context) {
+	if !fs.WatchReplaySupported() {
+		return
+	}
+	cur := fs.CurrentWatchEventID()
+	if cur == 0 {
+		return
+	}
+	// The watermark only advances behind completed scans; a completed full
+	// scan covers the journal up to now.
+	f.persistWatchReplayWatermark(cur)
+	if fs.WatchReplayArmed() {
+		return
+	}
+	fs.SetWatchReplaySince(cur)
+	f.sl.InfoContext(ctx, "Armed filesystem journal replay after completed full scan", "eventID", cur)
 }
 
 const maxToRemove = 1000

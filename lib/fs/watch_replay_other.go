@@ -41,3 +41,6 @@ func ResetWatchReplay() {}
 
 // CurrentWatchEventID returns zero without journal support.
 func CurrentWatchEventID() uint64 { return 0 }
+
+// WatchReplayArmed is false without journal support.
+func WatchReplayArmed() bool { return false }

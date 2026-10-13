@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/syncthing/syncthing/lib/config"
+	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/watchaggregator"
 )
 
@@ -38,6 +39,12 @@ func drainWatchBatches(ctx context.Context, f *folder) {
 // changes that happened while it was down. Phase 1 doubles as the control:
 // without a watermark the same code must do (and count) a full scan.
 func TestWatchReplaySkipsInitialScan(t *testing.T) {
+	// Replay state is process-global and other tests' completed scans arm
+	// it (scan completion arms replay now); start from a clean, disarmed
+	// baseline so this test's watcher does not replay history first.
+	fs.ResetWatchReplay()
+	t.Cleanup(fs.ResetWatchReplay)
+
 	w, fcfg := newDefaultCfgWrapper(t)
 	dir := t.TempDir()
 	fcfg.FilesystemType = config.FilesystemTypeBasic
@@ -55,9 +62,13 @@ func TestWatchReplaySkipsInitialScan(t *testing.T) {
 	ffs := fA.Filesystem()
 	ctx := t.Context()
 
-	// --- Phase 1: first ever run. No watermark exists, so arming must
-	// refuse and an explicit initial full scan must happen (control; the
-	// model setup may already have scanned on its own, so compare deltas).
+	// --- Phase 1: with no recorded watermark, arming must refuse and an
+	// explicit initial full scan must happen (control). The model's
+	// background scan on this tiny dir may already have persisted a
+	// watermark (scan completion now records one), so clear it for
+	// deterministic no-watermark semantics.
+	must(t, m.sdb.DeleteKV(watchReplayWatermarkKVPrefix+fcfg.ID))
+	fA.lastReplayWatermark.Store(0)
 	if fA.tryArmWatchReplay(ctx) {
 		t.Fatal("armed replay without a recorded watermark")
 	}
@@ -135,6 +146,9 @@ func TestWatchReplaySkipsInitialScan(t *testing.T) {
 // batches are scanned and their journal position persisted, an empty queue
 // persists nothing, and a queued root rescan leaves the watermark alone.
 func TestDrainWatchQueueOnShutdown(t *testing.T) {
+	fs.ResetWatchReplay()
+	t.Cleanup(fs.ResetWatchReplay)
+
 	w, fcfg := newDefaultCfgWrapper(t)
 	dir := t.TempDir()
 	fcfg.FilesystemType = config.FilesystemTypeBasic
@@ -150,6 +164,12 @@ func TestDrainWatchQueueOnShutdown(t *testing.T) {
 	fA := r.(*sendReceiveFolder).folder
 	ffs := fA.Filesystem()
 	ctx := t.Context()
+
+	// The model's background scan on this tiny dir may already have
+	// persisted a watermark (scan completion records one now); clear it
+	// so the empty-drain check starts from nothing.
+	must(t, m.sdb.DeleteKV(watchReplayWatermarkKVPrefix+fcfg.ID))
+	fA.lastReplayWatermark.Store(0)
 
 	// Empty queue: no watermark.
 	fA.drainWatchQueueOnShutdown()
@@ -182,5 +202,57 @@ func TestDrainWatchQueueOnShutdown(t *testing.T) {
 	fA.drainWatchQueueOnShutdown()
 	if wm, _, err := fA.watchReplayWatermark(); err != nil || wm != fakeID {
 		t.Fatalf("root-rescan drain: watermark=%d, want unchanged %d, err=%v", wm, fakeID, err)
+	}
+}
+
+// TestWatchReplayArmsAfterFullScan covers the boot-time miss: when the
+// persisted watermark is too old (or absent) and tryArmWatchReplay rightly
+// refuses, the first completed full scan must arm replay by itself.
+// Otherwise every fseventsd drop flag for the whole process lifetime
+// escalates to a full rescan; on a busy tree drops arrive faster than
+// scans complete and scanning never stops (measured 2026-10-13: ~22
+// drops/min against ~20 min scans, an endless scan loop).
+//
+// Teeth: without the arming call in scanSubdirs, WatchReplayArmed stays
+// false after the scan and the test fails.
+func TestWatchReplayArmsAfterFullScan(t *testing.T) {
+	// Replay state is process-global in the notify layer; start disarmed
+	// and leave no arming behind for other tests.
+	fs.ResetWatchReplay()
+	t.Cleanup(fs.ResetWatchReplay)
+
+	w, fcfg := newDefaultCfgWrapper(t)
+	dir := t.TempDir()
+	fcfg.FilesystemType = config.FilesystemTypeBasic
+	fcfg.Path = dir
+	if _, err := w.Modify(func(cfg *config.Configuration) { cfg.SetFolder(fcfg) }); err != nil {
+		t.Fatal(err)
+	}
+	m := setupModel(t, w)
+	m.cancel()
+	<-m.stopped
+	r, _ := m.folderRunners.Get(fcfg.ID)
+	f := r.(*sendReceiveFolder).folder
+	ctx := t.Context()
+
+	// The folder's background initial scan on the tiny test dir may already
+	// have run (and, with the fix, armed replay). Simulate the boot-time
+	// miss instead: replay disarmed, as when the watermark was too old for
+	// tryArmWatchReplay.
+	fs.ResetWatchReplay()
+	if fs.WatchReplayArmed() {
+		t.Fatal("replay still armed after reset; test precondition broken")
+	}
+
+	if err := f.scanTimerFired(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if !fs.WatchReplayArmed() {
+		t.Fatal("replay not armed after completed full scan")
+	}
+	wm, _, err := f.watchReplayWatermark()
+	if err != nil || wm == 0 {
+		t.Fatalf("no watermark persisted by full scan: %d, %v", wm, err)
 	}
 }

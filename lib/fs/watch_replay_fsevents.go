@@ -98,3 +98,8 @@ func ResetWatchReplay() { notify.ResetSinceEventID() }
 // position greater than this means the journal was reset (e.g. the volume
 // was reformatted) and the persisted value is meaningless.
 func CurrentWatchEventID() uint64 { return notify.CurrentEventID() }
+
+// WatchReplayArmed reports whether drop flags are currently healed by
+// journal replay (true) or forwarded to the consumer for a full rescan
+// (false).
+func WatchReplayArmed() bool { return notify.ReplayEnabled() }
