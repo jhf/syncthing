@@ -72,8 +72,12 @@ type folder struct {
 	versionCleanupTimer    *time.Timer
 
 	// btrfs scan replay state; serve goroutine only (folder_btrfs.go).
+	// btrfsChecked/btrfsOK cache the one-time btrfs replay eligibility check.
 	btrfsChecked bool
 	btrfsOK      bool
+	// lastBtrfsRefresh is the last successful runtime baseline pairing,
+	// rate-limiting refreshes (Serve goroutine only).
+	lastBtrfsRefresh time.Time
 	// btrfsCleanStart is set at Serve start when the previous shutdown left
 	// a paired, provably consistent baseline+index (see folder_btrfs.go).
 	btrfsCleanStart bool
@@ -785,6 +789,7 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 	if subDirs == nil || (len(subDirs) == 1 && subDirs[0] == "") {
 		f.fullScanOK.Store(true)
 		f.armWatchReplayAfterFullScan(ctx)
+		f.refreshBtrfsBaseline(ctx)
 	}
 	return nil
 }
