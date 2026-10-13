@@ -1,0 +1,1269 @@
+goroutine 313284 [running]:
+runtime/pprof.writeGoroutineStacks({0x1515e40, 0x251744518ff0})
+	runtime/pprof/pprof.go:819 +0x6b
+runtime/pprof.writeGoroutine({0x1515e40?, 0x251744518ff0?}, 0x25173b1187b8?)
+	runtime/pprof/pprof.go:782 +0x25
+runtime/pprof.(*Profile).WriteTo(0x1f6bab0?, {0x1515e40?, 0x251744518ff0?}, 0xc?)
+	runtime/pprof/pprof.go:408 +0x149
+net/http/pprof.handler.ServeHTTP({0x251732a6cee1, 0x9}, {0x151e020, 0x251744518ff0}, 0x25173b5a8000)
+	net/http/pprof/pprof.go:273 +0x52a
+net/http/pprof.Index({0x151e020, 0x251744518ff0}, 0x25173b5a8000?)
+	net/http/pprof/pprof.go:397 +0xda
+net/http.HandlerFunc.ServeHTTP(0x1f8ce40?, {0x151e020?, 0x251744518ff0?}, 0x7651f6?)
+	net/http/server.go:2286 +0x29
+net/http.(*ServeMux).ServeHTTP(0x48a9b9?, {0x151e020, 0x251744518ff0}, 0x25173b5a8000)
+	net/http/server.go:2828 +0x1c7
+net/http.serverHandler.ServeHTTP({0x25173395f400?}, {0x151e020?, 0x251744518ff0?}, 0x1?)
+	net/http/server.go:3311 +0x8e
+net/http.(*conn).serve(0x2517426881b0, {0x151fe90, 0x251729d92240})
+	net/http/server.go:2073 +0x650
+created by net/http.(*Server).Serve in goroutine 51
+	net/http/server.go:3464 +0x485
+
+goroutine 1 [chan receive, 35 minutes]:
+github.com/syncthing/syncthing/lib/syncthing.(*App).Wait(...)
+	github.com/syncthing/syncthing/lib/syncthing/syncthing.go:369
+main.(*serveCmd).syncthingMain(0x251729d98e00)
+	github.com/syncthing/syncthing/cmd/syncthing/main.go:604 +0x17e8
+main.(*serveCmd).Run(0x251729d98e00)
+	github.com/syncthing/syncthing/cmd/syncthing/main.go:309 +0x538
+reflect.Value.call({0x116fce0?, 0x251729d98e00?, 0x251729c87808?}, {0x127da66, 0x4}, {0x251729c878e8, 0x0, 0x116fce0?})
+	reflect/value.go:586 +0xf0c
+reflect.Value.Call({0x116fce0?, 0x251729d98e00?, 0x4ce585?}, {0x251729c878e8?, 0x1001729c9b680?, 0x707c1dfcff50?})
+	reflect/value.go:369 +0xb9
+github.com/alecthomas/kong.callAnyFunction({0x116fce0?, 0x251729d98e00?, 0x110efc0?}, 0x251729cbfec0)
+	github.com/alecthomas/kong@v1.16.1/callbacks.go:256 +0x8a5
+github.com/alecthomas/kong.callFunction({0x116fce0?, 0x251729d98e00?, 0x0?}, 0x251729cbfec0)
+	github.com/alecthomas/kong@v1.16.1/callbacks.go:213 +0x1f6
+github.com/alecthomas/kong.(*Context).RunNode(0x251729d80f00, 0x251729dd12c0, {0x0, 0x0, 0x0})
+	github.com/alecthomas/kong@v1.16.1/context.go:866 +0x93e
+github.com/alecthomas/kong.(*Context).Run(0x251729d80f00, {0x0?, 0x0?, 0x0?})
+	github.com/alecthomas/kong@v1.16.1/context.go:895 +0x13c
+main.main()
+	github.com/syncthing/syncthing/cmd/syncthing/main.go:239 +0x356
+
+goroutine 19 [chan receive]:
+github.com/syncthing/notify.(*nonrecursiveTree).dispatch(0x2517297c62a0, 0x2517297fa070)
+	github.com/syncthing/notify@v0.0.0-20250528144937-c7027d4f7465/tree_nonrecursive.go:36 +0x5a
+created by github.com/syncthing/notify.newNonrecursiveTree in goroutine 1
+	github.com/syncthing/notify@v0.0.0-20250528144937-c7027d4f7465/tree_nonrecursive.go:29 +0x12a
+
+goroutine 20 [chan receive, 3 minutes]:
+github.com/syncthing/notify.(*nonrecursiveTree).internal(0x2517297c62a0, 0x2517297fa0e0)
+	github.com/syncthing/notify@v0.0.0-20250528144937-c7027d4f7465/tree_nonrecursive.go:81 +0x4d
+created by github.com/syncthing/notify.newNonrecursiveTree in goroutine 1
+	github.com/syncthing/notify@v0.0.0-20250528144937-c7027d4f7465/tree_nonrecursive.go:30 +0x178
+
+goroutine 129 [select, 35 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251729af0b40, {0x151fec8?, 0x251729e400a0?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 114
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 81 [select, 35 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251729d96780, {0x151fec8?, 0x251729c9b950?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/thejerf/suture/v4.(*Supervisor).ServeBackground.func1()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:297 +0x28
+created by github.com/thejerf/suture/v4.(*Supervisor).ServeBackground in goroutine 1
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:296 +0xb8
+
+goroutine 82 [select]:
+github.com/syncthing/syncthing/lib/events.(*logger).Serve(0x25172977da40, {0x151fec8, 0x251729c9b9f0})
+	github.com/syncthing/syncthing/lib/events/events.go:300 +0x153
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 81
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 83 [select, 35 minutes]:
+github.com/syncthing/syncthing/lib/config.(*wrapper).Serve(0x251729bae808, {0x151fec8, 0x251729c9bbd0})
+	github.com/syncthing/syncthing/lib/config/wrapper.go:247 +0x15c
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 81
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 32 [select, 35 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251729af0000, {0x151fec8?, 0x251729eae320?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 97
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 89 [select, 35 minutes]:
+database/sql.(*DB).connectionOpener(0x251729cd0820, {0x151fec8, 0x251729c9be00})
+	database/sql/sql.go:1261 +0x89
+created by database/sql.OpenDB in goroutine 1
+	database/sql/sql.go:841 +0x130
+
+goroutine 113 [select, 35 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251729af0500, {0x151fec8?, 0x251729eaebe0?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 97
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 41 [chan receive, 35 minutes]:
+main.setupSignalHandling.func1()
+	github.com/syncthing/syncthing/cmd/syncthing/main.go:627 +0x25
+created by main.setupSignalHandling in goroutine 1
+	github.com/syncthing/syncthing/cmd/syncthing/main.go:626 +0xa7
+
+goroutine 116 [select, 5 minutes]:
+github.com/syncthing/syncthing/lib/ur.(*Service).Serve(0x251729ec8980, {0x151fec8, 0x251729eaed70})
+	github.com/syncthing/syncthing/lib/ur/usage_report.go:379 +0x1c5
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 97
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 92 [select, 35 minutes]:
+database/sql.(*DB).connectionOpener(0x251729e12dd0, {0x151fec8, 0x251729e04be0})
+	database/sql/sql.go:1261 +0x89
+created by database/sql.OpenDB in goroutine 1
+	database/sql/sql.go:841 +0x130
+
+goroutine 40 [syscall, 35 minutes]:
+os/signal.signal_recv()
+	runtime/sigqueue.go:152 +0x98
+os/signal.loop()
+	os/signal/signal_unix.go:23 +0x13
+created by os/signal.Notify.func1.1 in goroutine 1
+	os/signal/signal.go:152 +0x1f
+
+goroutine 114 [select, 35 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251729af0780, {0x151fec8?, 0x251729eaec80?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 97
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 96 [chan receive, 35 minutes]:
+main.setupSignalHandling.func2()
+	github.com/syncthing/syncthing/cmd/syncthing/main.go:636 +0x25
+created by main.setupSignalHandling in goroutine 1
+	github.com/syncthing/syncthing/cmd/syncthing/main.go:635 +0x156
+
+goroutine 97 [select, 35 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251729d968c0, {0x151fec8?, 0x251729e41860?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/thejerf/suture/v4.(*Supervisor).ServeBackground.func1()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:297 +0x28
+created by github.com/thejerf/suture/v4.(*Supervisor).ServeBackground in goroutine 1
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:296 +0xb8
+
+goroutine 98 [chan receive, 35 minutes]:
+github.com/syncthing/syncthing/lib/syncthing.(*App).wait(0x251729e62580, 0x0?)
+	github.com/syncthing/syncthing/lib/syncthing/syncthing.go:333 +0x35
+created by github.com/syncthing/syncthing/lib/syncthing.(*App).Start in goroutine 1
+	github.com/syncthing/syncthing/lib/syncthing/syncthing.go:108 +0x188
+
+goroutine 99 [select]:
+github.com/syncthing/syncthing/lib/ur.(*failureHandler).Serve(0x251729e64840, {0x151fec8, 0x251729e41900})
+	github.com/syncthing/syncthing/lib/ur/failurereporting.go:88 +0x35a
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 97
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 100 [select, 10 minutes]:
+github.com/syncthing/syncthing/internal/db/sqlite.(*Service).Serve(0x251729e25840, {0x151fec8, 0x251729e419a0})
+	github.com/syncthing/syncthing/internal/db/sqlite/db_service.go:90 +0x21d
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 97
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 101 [chan receive]:
+github.com/syncthing/syncthing/lib/events.(*bufferedSubscription).pollingLoop(0x251729e41a40)
+	github.com/syncthing/syncthing/lib/events/events.go:500 +0x58
+created by github.com/syncthing/syncthing/lib/events.NewBufferedSubscription in goroutine 1
+	github.com/syncthing/syncthing/lib/events/events.go:495 +0x116
+
+goroutine 50 [chan receive]:
+github.com/syncthing/syncthing/lib/events.(*bufferedSubscription).pollingLoop(0x251729eae000)
+	github.com/syncthing/syncthing/lib/events/events.go:500 +0x58
+created by github.com/syncthing/syncthing/lib/events.NewBufferedSubscription in goroutine 1
+	github.com/syncthing/syncthing/lib/events/events.go:495 +0x116
+
+goroutine 51 [IO wait]:
+internal/poll.runtime_pollWait(0x707c1dfcd000, 0x72)
+	runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0x251729d81e80?, 0x900000036?, 0x0)
+	internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.(*pollDesc).waitRead(...)
+	internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Accept(0x251729d81e80)
+	internal/poll/fd_unix.go:613 +0x28c
+net.(*netFD).accept(0x251729d81e80)
+	net/fd_unix.go:150 +0x29
+net.(*TCPListener).accept(0x25172a01c180)
+	net/tcpsock_posix.go:159 +0x1b
+net.(*TCPListener).Accept(0x25172a01c180)
+	net/tcpsock.go:387 +0x30
+net/http.(*Server).Serve(0x251729b9eb00, {0x151e690, 0x25172a01c180})
+	net/http/server.go:3434 +0x30c
+net/http.(*Server).ListenAndServe(0x251729b9eb00)
+	net/http/server.go:3360 +0x72
+net/http.ListenAndServe(...)
+	net/http/server.go:3675
+github.com/syncthing/syncthing/lib/syncthing.(*App).startup.func1()
+	github.com/syncthing/syncthing/lib/syncthing/syncthing.go:170 +0x110
+created by github.com/syncthing/syncthing/lib/syncthing.(*App).startup in goroutine 1
+	github.com/syncthing/syncthing/lib/syncthing/syncthing.go:167 +0x77b
+
+goroutine 53 [select, 35 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251729af0280, {0x151fec8?, 0x2517298160a0?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/syncthing/syncthing/lib/model.(*serviceMap[...]).Serve(...)
+	github.com/syncthing/syncthing/lib/model/service_map.go:135
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 32
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 54 [select, 3 minutes]:
+github.com/syncthing/syncthing/lib/model.(*ProgressEmitter).Serve(0x2517297faa80, {0x151fec8, 0x251729816140})
+	github.com/syncthing/syncthing/lib/model/progressemitter.go:73 +0x169
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 32
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 55 [select, 10 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251729af03c0, {0x151fec8?, 0x2517298161e0?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/syncthing/syncthing/lib/model.(*serviceMap[...]).Serve(...)
+	github.com/syncthing/syncthing/lib/model/service_map.go:135
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 32
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 56 [select, 10 minutes]:
+github.com/syncthing/syncthing/lib/model.(*model).serve(0x2517298124e0, {0x151fec8, 0x251729816280})
+	github.com/syncthing/syncthing/lib/model/model.go:282 +0x33f
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x251729eb7020, {0x151fec8, 0x251729816280})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 32
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 42 [chan receive]:
+github.com/syncthing/syncthing/lib/fs.(*caseFilesystemRegistry).cleaner(0x1f8b900)
+	github.com/syncthing/syncthing/lib/fs/casefs.go:112 +0x70
+created by github.com/syncthing/syncthing/lib/fs.(*caseFilesystemRegistry).get.func1 in goroutine 56
+	github.com/syncthing/syncthing/lib/fs/casefs.go:92 +0x56
+
+goroutine 57 [chan receive, 35 minutes]:
+github.com/syncthing/syncthing/lib/discover.(*manager).serve(0x2517296da000, {0x151fec8, 0x2517298163c0})
+	github.com/syncthing/syncthing/lib/discover/manager.go:75 +0xd6
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x251729eb71d0, {0x151fec8, 0x2517298163c0})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 113
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 130 [select, 35 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251729af0c80, {0x151fec8?, 0x251729e40140?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 114
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 131 [select, 35 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251729af0dc0, {0x151fec8?, 0x251729e401e0?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 114
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 132 [select]:
+github.com/syncthing/syncthing/lib/connections.(*service).connect(0x251729af08c0, {0x151fec8, 0x251729e40280})
+	github.com/syncthing/syncthing/lib/connections/service.go:495 +0x3b4
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x251729e64540, {0x151fec8, 0x251729e40280})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 114
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 133 [select, 10 minutes]:
+github.com/syncthing/syncthing/lib/connections.(*service).handleConns(0x251729af08c0, {0x151fec8, 0x251729e40320})
+	github.com/syncthing/syncthing/lib/connections/service.go:245 +0xdf
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x251729e64570, {0x151fec8, 0x251729e40320})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 114
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 134 [select, 10 minutes]:
+github.com/syncthing/syncthing/lib/connections.(*service).handleHellos(0x251729af08c0, {0x151fec8, 0x251729e403c0})
+	github.com/syncthing/syncthing/lib/connections/service.go:366 +0x10c
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x251729e645a0, {0x151fec8, 0x251729e403c0})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 114
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 135 [select, 4 minutes]:
+github.com/syncthing/syncthing/lib/nat.(*Service).Serve(0x2517297fabd0, {0x151fec8, 0x251729e40460})
+	github.com/syncthing/syncthing/lib/nat/service.go:71 +0x192
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 114
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 136 [chan receive, 35 minutes]:
+github.com/syncthing/syncthing/lib/svcutil.doneService.Serve(0x251729eb2910, {0x151fec8?, 0x251729e40500?})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:152 +0x2d
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 114
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 137 [select]:
+github.com/syncthing/syncthing/lib/relay/client.(*staticClient).serve(0x25172ddde910, {0x151fec8, 0x251729e405f0})
+	github.com/syncthing/syncthing/lib/relay/client/static.go:80 +0x6e5
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x25172de8e810, {0x151fec8, 0x251729e405f0})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/syncthing/syncthing/lib/relay/client.(*dynamicClient).serve(0x251729d3c000, {0x151fec8, 0x251729e405f0})
+	github.com/syncthing/syncthing/lib/relay/client/dynamic.go:100 +0xab1
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x251729b08ae0, {0x151fec8, 0x251729e405f0})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/syncthing/syncthing/lib/connections.(*relayListener).serve(0x2517297a4240, {0x151fec8, 0x251729e405f0})
+	github.com/syncthing/syncthing/lib/connections/relay_listen.go:67 +0x46b
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x251729e64090, {0x151fec8, 0x251729e405f0})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 130
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 145 [IO wait]:
+internal/poll.runtime_pollWait(0x707c1dfccc00, 0x72)
+	runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0x25172982e280?, 0x251729739570?, 0x0)
+	internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.(*pollDesc).waitRead(...)
+	internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Accept(0x25172982e280)
+	internal/poll/fd_unix.go:613 +0x28c
+net.(*netFD).accept(0x25172982e280)
+	net/fd_unix.go:150 +0x29
+net.(*TCPListener).accept(0x251729e02000)
+	net/tcpsock_posix.go:159 +0x1b
+net.(*TCPListener).Accept(0x251729e02000)
+	net/tcpsock.go:387 +0x30
+github.com/syncthing/syncthing/lib/connections.(*tcpListener).serve(0x251729db20b0, {0x151fec8, 0x251729c9a050})
+	github.com/syncthing/syncthing/lib/connections/tcp_listen.go:119 +0x928
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x251729eb7c20, {0x151fec8, 0x251729c9a050})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 129
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 58 [select, 35 minutes]:
+github.com/quic-go/quic-go.(*baseServer).accept(0x251729ec4ea0, {0x151fec8, 0x251729816500})
+	github.com/quic-go/quic-go@v0.61.0/server.go:334 +0xa5
+github.com/quic-go/quic-go.(*baseServer).Accept(...)
+	github.com/quic-go/quic-go@v0.61.0/server.go:330
+github.com/quic-go/quic-go.(*Listener).Accept(0x2517297a4090?, {0x151fec8?, 0x251729816500?})
+	github.com/quic-go/quic-go@v0.61.0/server.go:131 +0x25
+github.com/syncthing/syncthing/lib/connections.(*quicListener).serve(0x251729db2160, {0x151fec8, 0x251729816500})
+	github.com/syncthing/syncthing/lib/connections/quic_listen.go:164 +0xd0b
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x251729e64480, {0x151fec8, 0x251729816500})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 131
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 138 [select]:
+github.com/syncthing/syncthing/lib/connections.(*relayListener).handleInvitations(0x2517297a4240, {0x151fec8, 0x251729e40820}, {0x1526cc0, 0x251729d3c000})
+	github.com/syncthing/syncthing/lib/connections/relay_listen.go:77 +0x125
+created by github.com/syncthing/syncthing/lib/connections.(*relayListener).serve in goroutine 137
+	github.com/syncthing/syncthing/lib/connections/relay_listen.go:65 +0x445
+
+goroutine 59 [select, 2 minutes]:
+github.com/syncthing/syncthing/lib/stun.(*Service).stunKeepAlive(0x2517298165a0, {0x151fec8, 0x2517298165f0}, {0x1299199, 0x17}, 0x25172ee0e120)
+	github.com/syncthing/syncthing/lib/stun/stun.go:227 +0x636
+github.com/syncthing/syncthing/lib/stun.(*Service).runStunForServer(0x2517298165a0, {0x151fec8, 0x2517298165f0}, {0x1299199, 0x17})
+	github.com/syncthing/syncthing/lib/stun/stun.go:184 +0x5be
+github.com/syncthing/syncthing/lib/stun.(*Service).Serve(0x2517298165a0, {0x151fec8, 0x2517298165f0})
+	github.com/syncthing/syncthing/lib/stun/stun.go:112 +0x3af
+created by github.com/syncthing/syncthing/lib/connections.(*quicListener).serve in goroutine 58
+	github.com/syncthing/syncthing/lib/connections/quic_listen.go:110 +0x55f
+
+goroutine 102 [chan receive, 35 minutes]:
+github.com/syncthing/syncthing/lib/discover.(*globalClient).Serve(0x2517297fabd0?, {0x151fec8, 0x251729e040f0})
+	github.com/syncthing/syncthing/lib/discover/global.go:223 +0x10b
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 113
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 48 [select, 34 minutes]:
+github.com/syncthing/syncthing/lib/model.(*folder).monitorWatch(0x25172a300008, {0x151fec8, 0x251729db82d0})
+	github.com/syncthing/syncthing/lib/model/folder.go:1539 +0x231
+created by github.com/syncthing/syncthing/lib/model.(*folder).startWatch in goroutine 45
+	github.com/syncthing/syncthing/lib/model/folder.go:1510 +0x1ac
+
+goroutine 313241 [select]:
+github.com/syncthing/syncthing/lib/scanner.(*parallelHasher).hashFiles(0x251735323200, {0x151fec8, 0x25173c231ea0})
+	github.com/syncthing/syncthing/lib/scanner/blockqueue.go:105 +0x14f
+created by github.com/syncthing/syncthing/lib/scanner.newParallelHasher in goroutine 45
+	github.com/syncthing/syncthing/lib/scanner/blockqueue.go:88 +0x11f
+
+goroutine 117 [select, 35 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251729af0f00, {0x151fec8?, 0x251729eaee60?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 97
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 60 [select]:
+github.com/syncthing/syncthing/lib/model.(*folderSummaryService).listenForUpdates(0x2517297fb110, {0x151fec8, 0x251729816690})
+	github.com/syncthing/syncthing/lib/model/folder_summary.go:219 +0x18f
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x251729e64de0, {0x151fec8, 0x251729816690})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 117
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 61 [select]:
+github.com/syncthing/syncthing/lib/model.(*folderSummaryService).calculateSummaries(0x2517297fb110, {0x151fec8, 0x251729816730})
+	github.com/syncthing/syncthing/lib/model/folder_summary.go:321 +0xf5
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x251729e64e10, {0x151fec8, 0x251729816730})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 117
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 9 [select, 34 minutes]:
+github.com/syncthing/syncthing/lib/discover.(*globalClient).Serve(0x251729dae070, {0x151fec8, 0x251729c94230})
+	github.com/syncthing/syncthing/lib/discover/global.go:236 +0x1e6
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 113
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 103 [IO wait, 2 minutes]:
+internal/poll.runtime_pollWait(0x707c1dfcce00, 0x72)
+	runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0x251729d80000?, 0x510041cf00?, 0x0)
+	internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.(*pollDesc).waitRead(...)
+	internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).RawRead(0x251729d80000, 0x25172a008340)
+	internal/poll/fd_unix.go:710 +0x125
+net.(*rawConn).Read(0x251729d02038, 0x8?)
+	net/rawconn.go:44 +0x36
+golang.org/x/net/internal/socket.(*syscaller).recvmmsg(0x25172984fa28, {0x151e720?, 0x251729d02038?}, {0x251729f5a000?, 0x15098d0?, 0x0?}, 0x4001729ed6c38?)
+	golang.org/x/net@v0.58.0/internal/socket/mmsghdr_unix.go:120 +0x70
+golang.org/x/net/internal/socket.(*Conn).recvMsgs(0x251729d88080, {0x25172981a608, 0x8, 0x8}, 0x0)
+	golang.org/x/net@v0.58.0/internal/socket/rawconn_mmsg.go:24 +0x165
+golang.org/x/net/internal/socket.(*Conn).RecvMsgs(...)
+	golang.org/x/net@v0.58.0/internal/socket/socket.go:268
+golang.org/x/net/ipv4.(*payloadHandler).ReadBatch(0x251729e04240, {0x25172981a608?, 0x251729dc8248?, 0x0?}, 0x0?)
+	golang.org/x/net@v0.58.0/ipv4/batch.go:80 +0x57
+github.com/quic-go/quic-go.(*oobConn).ReadPacket(0x251729c2a090)
+	github.com/quic-go/quic-go@v0.61.0/sys_conn_oob.go:174 +0x762
+github.com/quic-go/quic-go.(*Transport).listen(0x25172a020120, {0x152c270, 0x251729c2a090})
+	github.com/quic-go/quic-go@v0.61.0/transport.go:529 +0x75
+github.com/quic-go/quic-go.(*Transport).init.func1.1()
+	github.com/quic-go/quic-go@v0.61.0/transport.go:421 +0x65
+created by github.com/quic-go/quic-go.(*Transport).init.func1 in goroutine 58
+	github.com/quic-go/quic-go@v0.61.0/transport.go:419 +0x405
+
+goroutine 104 [select, 35 minutes]:
+github.com/quic-go/quic-go.(*Transport).runSendQueue(0x25172a020120)
+	github.com/quic-go/quic-go@v0.61.0/transport.go:442 +0xef
+created by github.com/quic-go/quic-go.(*Transport).init.func1 in goroutine 58
+	github.com/quic-go/quic-go@v0.61.0/transport.go:427 +0x445
+
+goroutine 10 [select, 34 minutes]:
+github.com/syncthing/syncthing/lib/discover.(*globalClient).Serve(0x251729dae0e0, {0x151fec8, 0x251729c94320})
+	github.com/syncthing/syncthing/lib/discover/global.go:236 +0x1e6
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 113
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 11 [select, 35 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251729832140, {0x151fec8?, 0x251729c94460?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 113
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 43 [select, 35 minutes]:
+github.com/syncthing/syncthing/lib/api.(*service).Serve(0x251729af1040, {0x151fec8, 0x251729816af0})
+	github.com/syncthing/syncthing/lib/api/api.go:447 +0x2fb7
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 97
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 162 [chan receive, 35 minutes]:
+github.com/syncthing/syncthing/lib/beacon.readMulticasts.func1()
+	github.com/syncthing/syncthing/lib/beacon/multicast.go:125 +0x35
+created by github.com/syncthing/syncthing/lib/beacon.readMulticasts in goroutine 150
+	github.com/syncthing/syncthing/lib/beacon/multicast.go:124 +0x24b
+
+goroutine 62 [select, 35 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251729832640, {0x151fec8?, 0x251729816cd0?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 113
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 118 [select, 35 minutes]:
+github.com/quic-go/quic-go.(*baseServer).run(0x251729ec4ea0)
+	github.com/quic-go/quic-go@v0.61.0/server.go:299 +0x10a
+created by github.com/quic-go/quic-go.newServer in goroutine 58
+	github.com/quic-go/quic-go@v0.61.0/server.go:285 +0x525
+
+goroutine 119 [select, 35 minutes]:
+github.com/quic-go/quic-go.(*baseServer).runSendQueue(0x251729ec4ea0)
+	github.com/quic-go/quic-go@v0.61.0/server.go:312 +0x195
+created by github.com/quic-go/quic-go.newServer in goroutine 58
+	github.com/quic-go/quic-go@v0.61.0/server.go:286 +0x567
+
+goroutine 146 [select, 35 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251729832780, {0x151fec8?, 0x251729c9a190?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 62
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 147 [select, 35 minutes]:
+github.com/syncthing/syncthing/lib/beacon.(*cast).Recv(0x251729c9a280?)
+	github.com/syncthing/syncthing/lib/beacon/beacon.go:92 +0x73
+github.com/syncthing/syncthing/lib/discover.(*localClient).recvAnnouncements(0x251729d95180, {0x151fec8, 0x251729c9a280})
+	github.com/syncthing/syncthing/lib/discover/local.go:176 +0xfe
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x25172a0187e0, {0x151fec8, 0x251729c9a280})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 62
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 148 [select]:
+github.com/syncthing/syncthing/lib/discover.(*localClient).sendLocalAnnouncements(0x251729d95180, {0x151fec8, 0x251729c9a320})
+	github.com/syncthing/syncthing/lib/discover/local.go:157 +0x12a
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x25172a018810, {0x151fec8, 0x251729c9a320})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 62
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 12 [select, 35 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251729832280, {0x151fec8?, 0x251729eaf4f0?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 11
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 13 [select]:
+github.com/syncthing/syncthing/lib/beacon.(*cast).Recv(0x2517297be240?)
+	github.com/syncthing/syncthing/lib/beacon/beacon.go:92 +0x73
+github.com/syncthing/syncthing/lib/discover.(*localClient).recvAnnouncements(0x251729d94640, {0x151fec8, 0x251729c945f0})
+	github.com/syncthing/syncthing/lib/discover/local.go:176 +0xfe
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x25172979ec90, {0x151fec8, 0x251729c945f0})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 11
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 14 [select]:
+github.com/syncthing/syncthing/lib/discover.(*localClient).sendLocalAnnouncements(0x251729d94640, {0x151fec8, 0x251729c94690})
+	github.com/syncthing/syncthing/lib/discover/local.go:157 +0x12a
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x25172979ecc0, {0x151fec8, 0x251729c94690})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 11
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 149 [chan receive, 35 minutes]:
+github.com/syncthing/syncthing/lib/svcutil.doneService.Serve(0x251729d863a0, {0x151fec8?, 0x251729c9a410?})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:152 +0x2d
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 146
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 150 [IO wait, 35 minutes]:
+internal/poll.runtime_pollWait(0x707c1dfcc800, 0x72)
+	runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0x251729b2c580?, 0x707c1dc426c8?, 0x0)
+	internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.(*pollDesc).waitRead(...)
+	internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).RawRead(0x251729b2c580, 0x251729e40f00)
+	internal/poll/fd_unix.go:710 +0x125
+net.(*rawConn).Read(0x251729baa158, 0x0?)
+	net/rawconn.go:44 +0x36
+golang.org/x/net/internal/socket.(*Conn).recvMsg(0x251729e242c0, 0x251729d3c060, 0x0)
+	golang.org/x/net@v0.58.0/internal/socket/rawconn_msg.go:27 +0x125
+golang.org/x/net/internal/socket.(*Conn).RecvMsg(...)
+	golang.org/x/net@v0.58.0/internal/socket/socket.go:248
+golang.org/x/net/ipv6.(*payloadHandler).ReadFrom(0x251729e40ec0, {0x25172a290000, 0x10000, 0x10000})
+	golang.org/x/net@v0.58.0/ipv6/payload_cmsg.go:31 +0x254
+github.com/syncthing/syncthing/lib/beacon.readMulticasts({0x151fec8, 0x251729c9a500}, 0x251729dae3f0, {0x251729dc3608, 0x12})
+	github.com/syncthing/syncthing/lib/beacon/multicast.go:168 +0x6df
+github.com/syncthing/syncthing/lib/beacon.NewMulticast.func1({0x151fec8?, 0x251729c9a500?})
+	github.com/syncthing/syncthing/lib/beacon/multicast.go:25 +0x2d
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x25172a018780, {0x151fec8, 0x251729c9a500})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 146
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 151 [select]:
+github.com/syncthing/syncthing/lib/beacon.writeMulticasts({0x151fec8, 0x251729c9a5a0}, 0x251729d3ab60, {0x251729dc3608?, 0x0?})
+	github.com/syncthing/syncthing/lib/beacon/multicast.go:60 +0x2ec
+github.com/syncthing/syncthing/lib/beacon.NewMulticast.func2({0x151fec8?, 0x251729c9a5a0?})
+	github.com/syncthing/syncthing/lib/beacon/multicast.go:28 +0x2d
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x25172a0187b0, {0x151fec8, 0x251729c9a5a0})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 146
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 152 [chan receive, 35 minutes]:
+github.com/syncthing/syncthing/lib/beacon.writeMulticasts.func1()
+	github.com/syncthing/syncthing/lib/beacon/multicast.go:48 +0x35
+created by github.com/syncthing/syncthing/lib/beacon.writeMulticasts in goroutine 151
+	github.com/syncthing/syncthing/lib/beacon/multicast.go:47 +0x234
+
+goroutine 163 [chan receive, 35 minutes]:
+github.com/syncthing/syncthing/lib/svcutil.doneService.Serve(0x251729d86260, {0x151fec8?, 0x251729eae050?})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:152 +0x2d
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 12
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 164 [IO wait]:
+internal/poll.runtime_pollWait(0x707c1dc5d600, 0x72)
+	runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0x25172982e500?, 0x251729fa5dd8?, 0x0)
+	internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.(*pollDesc).waitRead(...)
+	internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).ReadFromInet4(0x25172982e500, {0x251729fa5dd8, 0x10000, 0x10000}, 0x251729fa5c70)
+	internal/poll/fd_unix.go:241 +0x208
+net.(*netFD).readFromInet4(0x25172982e500, {0x251729fa5dd8?, 0xc2aba4078669ad65?, 0x251729fb5e60?}, 0x251729cc6f00?)
+	net/fd_posix.go:79 +0x25
+net.(*UDPConn).readFrom(0x30?, {0x251729fa5dd8?, 0x251729b1da40?, 0x0?}, 0x251743271ad0)
+	net/udpsock_posix.go:52 +0x19b
+net.(*UDPConn).readFromUDP(0x251729baa160, {0x251729fa5dd8?, 0x251729fb5ddc?, 0x2?}, 0x2?)
+	net/udpsock.go:146 +0x30
+net.(*UDPConn).ReadFrom(0x251729baa160, {0x251729fa5dd8, 0x10000, 0x10000})
+	net/udpsock.go:155 +0x4a
+github.com/syncthing/syncthing/lib/beacon.readBroadcasts({0x151fec8, 0x251729eae0f0}, 0x251729dae2a0, 0x5223)
+	github.com/syncthing/syncthing/lib/beacon/broadcast.go:143 +0x1d7
+github.com/syncthing/syncthing/lib/beacon.NewBroadcast.func1({0x151fec8?, 0x251729eae0f0?})
+	github.com/syncthing/syncthing/lib/beacon/broadcast.go:24 +0x29
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x25172979ec00, {0x151fec8, 0x251729eae0f0})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 12
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 165 [select]:
+github.com/syncthing/syncthing/lib/beacon.writeBroadcasts({0x151fec8, 0x251729eae190}, 0x251729d3a5b0, 0x5223)
+	github.com/syncthing/syncthing/lib/beacon/broadcast.go:47 +0x21d
+github.com/syncthing/syncthing/lib/beacon.NewBroadcast.func2({0x151fec8?, 0x251729eae190?})
+	github.com/syncthing/syncthing/lib/beacon/broadcast.go:27 +0x29
+github.com/syncthing/syncthing/lib/svcutil.(*service).Serve(0x25172979ec30, {0x151fec8, 0x251729eae190})
+	github.com/syncthing/syncthing/lib/svcutil/svcutil.go:130 +0xc3
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 12
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 598 [IO wait]:
+internal/poll.runtime_pollWait(0x707c1dc8c400, 0x72)
+	runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0x25172de92080?, 0x25172e234000?, 0x0)
+	internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.(*pollDesc).waitRead(...)
+	internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Read(0x25172de92080, {0x25172e234000, 0xa80, 0xa80})
+	internal/poll/fd_unix.go:165 +0x2ae
+net.(*netFD).Read(0x25172de92080, {0x25172e234000?, 0x25172e234000?, 0x5?})
+	net/fd_posix.go:68 +0x25
+net.(*conn).Read(0x251729cd29d8, {0x25172e234000?, 0x707c1ce6fb58?, 0x707c64aa84e8?})
+	net/net.go:196 +0x45
+crypto/tls.(*atLeastReader).Read(0x251748bb7890, {0x25172e234000?, 0x251729f80b40?, 0x251729e51a80?})
+	crypto/tls/conn.go:815 +0x3b
+bytes.(*Buffer).ReadFrom(0x25172ec21428, {0x15162a0, 0x251748bb7890})
+	bytes/buffer.go:229 +0x98
+crypto/tls.(*Conn).readFromUntil(0x25172ec21188, {0x15171e0, 0x251729cd29d8}, 0x251729e51c40?)
+	crypto/tls/conn.go:837 +0xde
+crypto/tls.(*Conn).readRecordOrCCS(0x25172ec21188, 0x0)
+	crypto/tls/conn.go:626 +0x3db
+crypto/tls.(*Conn).readRecord(...)
+	crypto/tls/conn.go:588
+crypto/tls.(*Conn).Read(0x25172ec21188, {0x251747b3a090, 0xc, 0x4905a9?})
+	crypto/tls/conn.go:1393 +0x145
+io.ReadAtLeast({0x1519480, 0x25172ec21188}, {0x251747b3a090, 0xc, 0xc}, 0xc)
+	io/io.go:335 +0x8e
+io.ReadFull(...)
+	io/io.go:354
+github.com/syncthing/syncthing/lib/relay/protocol.ReadMessage({0x1519480, 0x25172ec21188})
+	github.com/syncthing/syncthing/lib/relay/protocol/protocol.go:80 +0x7d
+github.com/syncthing/syncthing/lib/relay/client.messageReader({0x151fec8, 0x251729e405f0}, {0x152ddd0, 0x25172ec21188}, 0x25172c0cd730, 0x25172ccf2230)
+	github.com/syncthing/syncthing/lib/relay/client/static.go:240 +0xa7
+created by github.com/syncthing/syncthing/lib/relay/client.(*staticClient).serve in goroutine 137
+	github.com/syncthing/syncthing/lib/relay/client/static.go:75 +0x609
+
+goroutine 166 [chan receive, 35 minutes]:
+github.com/syncthing/syncthing/lib/beacon.writeBroadcasts.func1()
+	github.com/syncthing/syncthing/lib/beacon/broadcast.go:41 +0x2c
+created by github.com/syncthing/syncthing/lib/beacon.writeBroadcasts in goroutine 165
+	github.com/syncthing/syncthing/lib/beacon/broadcast.go:40 +0x18e
+
+goroutine 105 [chan receive, 35 minutes]:
+github.com/syncthing/syncthing/lib/beacon.readBroadcasts.func1()
+	github.com/syncthing/syncthing/lib/beacon/broadcast.go:137 +0x2c
+created by github.com/syncthing/syncthing/lib/beacon.readBroadcasts in goroutine 164
+	github.com/syncthing/syncthing/lib/beacon/broadcast.go:136 +0x1ae
+
+goroutine 159 [IO wait]:
+internal/poll.runtime_pollWait(0x707c1dc5d000, 0x72)
+	runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0x251729b2c800?, 0x251729e4ebd0?, 0x0)
+	internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.(*pollDesc).waitRead(...)
+	internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Accept(0x251729b2c800)
+	internal/poll/fd_unix.go:613 +0x28c
+net.(*netFD).accept(0x251729b2c800)
+	net/fd_unix.go:150 +0x29
+net.(*TCPListener).accept(0x251729d8a740)
+	net/tcpsock_posix.go:159 +0x1b
+net.(*TCPListener).Accept(0x251729d8a740)
+	net/tcpsock.go:387 +0x30
+github.com/syncthing/syncthing/lib/tlsutil.(*DowngradingListener).AcceptNoWrapTLS(0x20?)
+	github.com/syncthing/syncthing/lib/tlsutil/tlsutil.go:241 +0x1f
+github.com/syncthing/syncthing/lib/tlsutil.(*DowngradingListener).Accept(0x25172a01e090)
+	github.com/syncthing/syncthing/lib/tlsutil/tlsutil.go:222 +0x1c
+net/http.(*Server).Serve(0x251729bd8300, {0x151f210, 0x25172a01e090})
+	net/http/server.go:3434 +0x30c
+github.com/syncthing/syncthing/lib/api.(*service).Serve.func1()
+	github.com/syncthing/syncthing/lib/api/api.go:439 +0x45
+created by github.com/syncthing/syncthing/lib/api.(*service).Serve in goroutine 43
+	github.com/syncthing/syncthing/lib/api/api.go:437 +0x2eef
+
+goroutine 45 [select]:
+github.com/syncthing/syncthing/lib/model.(*folder).scanSubdirsChangedAndNew(0x25172a300008, {0x151fec8, 0x25172a08a780}, {0x0, 0x0, 0x0}, 0x251729ccca80, {0x25172e8b5c00, 0x3e}, 0xee6b280)
+	github.com/syncthing/syncthing/lib/model/folder.go:981 +0x645
+github.com/syncthing/syncthing/lib/model.(*folder).scanSubdirs(0x25172a300008, {0x151fec8, 0x25172a08a780}, {0x0, 0x0, 0x0})
+	github.com/syncthing/syncthing/lib/model/folder.go:713 +0x97d
+github.com/syncthing/syncthing/lib/model.(*folder).scanTimerFired(0x25172a300008, {0x151fec8, 0x25172a08a780})
+	github.com/syncthing/syncthing/lib/model/folder.go:1419 +0x45
+github.com/syncthing/syncthing/lib/model.(*folder).Serve(0x25172a300008, {0x151fec8, 0x25172a08a780})
+	github.com/syncthing/syncthing/lib/model/folder.go:277 +0x996
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 53
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 265834 [chan receive, 3 minutes]:
+github.com/syncthing/syncthing/lib/model.(*folder).Scan(...)
+	github.com/syncthing/syncthing/lib/model/folder.go:375
+github.com/syncthing/syncthing/lib/model.(*sendReceiveFolder).pullScannerRoutine(0x251729e08ea0, {0x151fec8, 0x25172a08a780}, 0x251736eb0e70)
+	github.com/syncthing/syncthing/lib/model/folder_sendrecv.go:1876 +0x35f
+created by github.com/syncthing/syncthing/lib/model.(*sendReceiveFolder).pull in goroutine 45
+	github.com/syncthing/syncthing/lib/model/folder_sendrecv.go:174 +0x111
+
+goroutine 210 [select]:
+github.com/syncthing/syncthing/lib/model.addTimeUntilCancelled({0x151fec8, 0x251729db8960}, {0x1528240, 0x25172a087920})
+	github.com/syncthing/syncthing/lib/model/util.go:84 +0x199
+created by github.com/syncthing/syncthing/lib/model.(*folder).scanSubdirs in goroutine 45
+	github.com/syncthing/syncthing/lib/model/folder.go:657 +0x53a
+
+goroutine 189 [syscall]:
+syscall.Syscall6(0x119, 0x20, 0x251729e4977c, 0x1, 0xffffffffffffffff, 0x0, 0x0)
+	syscall/syscall_linux.go:96 +0x39
+golang.org/x/sys/unix.EpollWait(0x251729980000?, {0x251729e4977c?, 0x1?, 0x1?}, 0xffffffffffffffff?)
+	golang.org/x/sys@v0.47.0/unix/zsyscall_linux.go:710 +0x4f
+github.com/syncthing/notify.(*inotify).loop(0x251729980000, 0x251729c3ef50)
+	github.com/syncthing/notify@v0.0.0-20250528144937-c7027d4f7465/watcher_inotify.go:189 +0x51
+created by github.com/syncthing/notify.(*inotify).lazyinit in goroutine 48
+	github.com/syncthing/notify@v0.0.0-20250528144937-c7027d4f7465/watcher_inotify.go:129 +0x10a
+
+goroutine 190 [chan receive]:
+github.com/syncthing/notify.(*inotify).send(0x251729980000, 0x251729c3ef50)
+	github.com/syncthing/notify@v0.0.0-20250528144937-c7027d4f7465/watcher_inotify.go:249 +0x3f
+created by github.com/syncthing/notify.(*inotify).lazyinit in goroutine 48
+	github.com/syncthing/notify@v0.0.0-20250528144937-c7027d4f7465/watcher_inotify.go:132 +0x1ba
+
+goroutine 191 [chan receive]:
+github.com/syncthing/notify.(*inotify).send(0x251729980000, 0x251729c3ef50)
+	github.com/syncthing/notify@v0.0.0-20250528144937-c7027d4f7465/watcher_inotify.go:249 +0x3f
+created by github.com/syncthing/notify.(*inotify).lazyinit in goroutine 48
+	github.com/syncthing/notify@v0.0.0-20250528144937-c7027d4f7465/watcher_inotify.go:132 +0x1ba
+
+goroutine 56668 [select, 2 minutes]:
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).pingReceiver(0x251744b105a0)
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:1049 +0x168
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func5()
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:307 +0x1c
+created by github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start in goroutine 56
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:306 +0x253
+
+goroutine 66910 [select]:
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).pingSender(0x2517472ff0e0)
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:1024 +0xbc
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func4()
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:303 +0x1c
+created by github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start in goroutine 56
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:302 +0x211
+
+goroutine 25673 [IO wait]:
+internal/poll.runtime_pollWait(0x707c1dc8bc00, 0x72)
+	runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0x251737c5c400?, 0x25173d63e000?, 0x0)
+	internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.(*pollDesc).waitRead(...)
+	internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Read(0x251737c5c400, {0x25173d63e000, 0xc000, 0xc000})
+	internal/poll/fd_unix.go:165 +0x2ae
+net.(*netFD).Read(0x251737c5c400, {0x25173d63e000?, 0x12492e0?, 0x1?})
+	net/fd_posix.go:68 +0x25
+net.(*conn).Read(0x251729d02660, {0x25173d63e000?, 0x707c1c242b40?, 0x707c64aa96d8?})
+	net/net.go:196 +0x45
+crypto/tls.(*atLeastReader).Read(0x251740bd0360, {0x25173d63e000?, 0x25172bb54b40?, 0x251739b33a90?})
+	crypto/tls/conn.go:815 +0x3b
+bytes.(*Buffer).ReadFrom(0x25173284c2a8, {0x15162a0, 0x251740bd0360})
+	bytes/buffer.go:229 +0x98
+crypto/tls.(*Conn).readFromUntil(0x25173284c008, {0x15171e0, 0x251729d02660}, 0x251739b33c50?)
+	crypto/tls/conn.go:837 +0xde
+crypto/tls.(*Conn).readRecordOrCCS(0x25173284c008, 0x0)
+	crypto/tls/conn.go:626 +0x3db
+crypto/tls.(*Conn).readRecord(...)
+	crypto/tls/conn.go:588
+crypto/tls.(*Conn).Read(0x25173284c008, {0x25173c22c93c, 0x2, 0x866a75?})
+	crypto/tls/conn.go:1393 +0x145
+github.com/syncthing/syncthing/lib/connections.(*limitedReader).Read(0x25173b5e3110, {0x25173c22c93c?, 0x0?, 0x251739b33da0?})
+	github.com/syncthing/syncthing/lib/connections/limiter.go:234 +0x2a
+github.com/syncthing/syncthing/lib/protocol.(*countingReader).Read(0x25173b5e3170, {0x25173c22c93c?, 0x1516ba0?, 0x251739b33f70?})
+	github.com/syncthing/syncthing/lib/protocol/counting.go:29 +0x29
+io.ReadAtLeast({0x1516c80, 0x25173b5e3170}, {0x25173c22c93c, 0x2, 0x4}, 0x2)
+	io/io.go:335 +0x8e
+io.ReadFull(...)
+	io/io.go:354
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).readHeader(0x25173c428000, {0x25173c22c93c, 0x4, 0x2?})
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:580 +0x85
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).readMessage(0x25173c428000, {0x25173c22c93c, 0x4, 0x4})
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:515 +0x27
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).readerLoop(0x25173c428000)
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:412 +0x5d
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func1()
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:290 +0x1c
+created by github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start in goroutine 56
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:289 +0x14b
+
+goroutine 66909 [select]:
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).writerLoop(0x2517472ff0e0)
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:759 +0x2cf
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func3()
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:299 +0x1c
+created by github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start in goroutine 56
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:298 +0x1cf
+
+goroutine 313244 [sync.WaitGroup.Wait]:
+sync.runtime_SemacquireWaitGroup(0x251731c67f10?, 0x20?)
+	runtime/sema.go:114 +0x2e
+sync.(*WaitGroup).Wait(0x251735323248)
+	sync/waitgroup.go:206 +0x85
+github.com/syncthing/syncthing/lib/scanner.(*parallelHasher).closeWhenDone(0x251735323200, {0x151fec8, 0x25173c231ea0})
+	github.com/syncthing/syncthing/lib/scanner/blockqueue.go:157 +0x45
+created by github.com/syncthing/syncthing/lib/scanner.newParallelHasher in goroutine 45
+	github.com/syncthing/syncthing/lib/scanner/blockqueue.go:91 +0x1d3
+
+goroutine 56666 [select, 1 minutes]:
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).writerLoop(0x251744b105a0)
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:759 +0x2cf
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func3()
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:299 +0x1c
+created by github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start in goroutine 56
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:298 +0x1cf
+
+goroutine 313243 [select]:
+github.com/syncthing/syncthing/lib/scanner.(*parallelHasher).hashFiles(0x251735323200, {0x151fec8, 0x25173c231ea0})
+	github.com/syncthing/syncthing/lib/scanner/blockqueue.go:105 +0x14f
+created by github.com/syncthing/syncthing/lib/scanner.newParallelHasher in goroutine 45
+	github.com/syncthing/syncthing/lib/scanner/blockqueue.go:88 +0x11f
+
+goroutine 25677 [select, 2 minutes]:
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).pingReceiver(0x25173c428000)
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:1049 +0x168
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func5()
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:307 +0x1c
+created by github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start in goroutine 56
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:306 +0x253
+
+goroutine 25676 [select]:
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).pingSender(0x25173c428000)
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:1024 +0xbc
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func4()
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:303 +0x1c
+created by github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start in goroutine 56
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:302 +0x211
+
+goroutine 56662 [chan receive, 10 minutes]:
+github.com/syncthing/syncthing/lib/connections.(*service).handleHellos.func1()
+	github.com/syncthing/syncthing/lib/connections/service.go:432 +0x3f
+created by github.com/syncthing/syncthing/lib/connections.(*service).handleHellos in goroutine 134
+	github.com/syncthing/syncthing/lib/connections/service.go:431 +0x15cc
+
+goroutine 23205 [select, 10 minutes]:
+github.com/syncthing/syncthing/lib/model.(*indexHandler).Serve.func2()
+	github.com/syncthing/syncthing/lib/model/indexhandler.go:175 +0x69
+created by github.com/syncthing/syncthing/lib/model.(*indexHandler).Serve in goroutine 25746
+	github.com/syncthing/syncthing/lib/model/indexhandler.go:174 +0x268
+
+goroutine 313240 [select]:
+github.com/syncthing/syncthing/lib/scanner.(*parallelHasher).hashFiles(0x251735323200, {0x151fec8, 0x25173c231ea0})
+	github.com/syncthing/syncthing/lib/scanner/blockqueue.go:105 +0x14f
+created by github.com/syncthing/syncthing/lib/scanner.newParallelHasher in goroutine 45
+	github.com/syncthing/syncthing/lib/scanner/blockqueue.go:88 +0x11f
+
+goroutine 25675 [select]:
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).writerLoop(0x25173c428000)
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:759 +0x2cf
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func3()
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:299 +0x1c
+created by github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start in goroutine 56
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:298 +0x1cf
+
+goroutine 313239 [syscall]:
+syscall.Syscall6(0x11, 0x2b, 0x707c1c9f8028, 0x1000, 0x13b82b000, 0x0, 0x0)
+	syscall/syscall_linux.go:96 +0x39
+modernc.org/libc.___syscall_cp(0x2517310e0258?, 0x400d5f60b?, 0x2517310e0270?, 0x2517310e0278?, 0xe03af3?, 0x707c1de50000?, 0x2517310e02f0?, 0x2517310e02a8?)
+	modernc.org/libc@v1.74.4/syscall_musl.go:15 +0x35
+modernc.org/libc.Xpread(0x25172dd99080, 0x310e02b8?, 0xe96adc?, 0x2517310e0330?, 0x707c1cd12ba0?)
+	modernc.org/libc@v1.74.4/ccgo_linux_amd64.go:150084 +0x32
+modernc.org/sqlite/lib._seekAndRead(0x25172dd99080, 0x707c1b5709b0, 0x0?, 0x12?, 0x0?)
+	modernc.org/sqlite@v1.57.0/lib/sqlite_g_0000000000003e80.go:455 +0x78
+modernc.org/sqlite/lib._unixRead(0x25172dd99080, 0x707c1b5709b0, 0x25170013b82c?, 0x1afb0020?, 0x25172dd99080?)
+	modernc.org/sqlite@v1.57.0/lib/sqlite_g_0000000000003ea8.go:137 +0xde
+modernc.org/sqlite/lib._sqlite3OsRead(...)
+	modernc.org/sqlite@v1.57.0/lib/sqlite.go:34674
+modernc.org/sqlite/lib._readDbPage(0x25172dd99080, 0x707c1c9f9060)
+	modernc.org/sqlite@v1.57.0/lib/sqlite_g_000000000001fea8.go:8765 +0x11d
+modernc.org/sqlite/lib._getPageNormal(0x25172dd99080, 0x707c1b570828, 0x13b82c, 0x707c1c445020, 0x2)
+	modernc.org/sqlite@v1.57.0/lib/sqlite_g_000000000001fea8.go:6530 +0x230
+modernc.org/sqlite/lib._sqlite3PagerGet(...)
+	modernc.org/sqlite@v1.57.0/lib/sqlite.go:35026
+modernc.org/sqlite/lib._getAndInitPage(0x25172dd99080, 0x707c1cbc7328, 0x13b82c, 0x707c1db2bf40, 0x2)
+	modernc.org/sqlite@v1.57.0/lib/sqlite_g_000000000001ffff.go:3523 +0xb4
+modernc.org/sqlite/lib._moveToChild(0x25172dd99080, 0x707c1db2beb8?, 0x99?)
+	modernc.org/sqlite@v1.57.0/lib/sqlite_g_000000000001feab.go:10010 +0xb3
+modernc.org/sqlite/lib._sqlite3BtreeTableMoveto(0x25172dd99080, 0x707c1db2beb8, 0x2d721eb, 0x0, 0x707c1d7d4518)
+	modernc.org/sqlite@v1.57.0/lib/sqlite_g_000000000001dfff.go:584 +0x4aa
+modernc.org/sqlite/lib._sqlite3VdbeExec(0x25172dd99080, 0x707c1d890a28)
+	modernc.org/sqlite@v1.57.0/lib/sqlite_linux_amd64.go:22974 +0x2d07
+modernc.org/sqlite/lib._sqlite3Step(0x25172dd99080, 0x707c1d890a28)
+	modernc.org/sqlite@v1.57.0/lib/sqlite_g_000000000001deab.go:3968 +0x6c
+modernc.org/sqlite/lib.Xsqlite3_step(0x25172dd99080, 0x707c1d890a28)
+	modernc.org/sqlite@v1.57.0/lib/sqlite.go:11977 +0xab
+modernc.org/sqlite.(*conn).step(0x251748ad03c0, 0x707c1d890a28)
+	modernc.org/sqlite@v1.57.0/conn.go:435 +0x31
+modernc.org/sqlite.(*stmt).query(0x251747faad68, {0x151fcf0, 0x1fb8ae0}, {0x25173fac5360, 0x2, 0x2})
+	modernc.org/sqlite@v1.57.0/stmt.go:337 +0x225
+modernc.org/sqlite.(*stmt).QueryContext(0x2517310e11a0?, {0x151fcf0?, 0x1fb8ae0?}, {0x25173fac5360?, 0x109d9e0?, 0x0?})
+	modernc.org/sqlite@v1.57.0/stmt.go:489 +0x25
+database/sql.ctxDriverStmtQuery({0x151fcf0, 0x1fb8ae0}, {0x1520950, 0x251747faad68}, {0x25173fac5360, 0x2, 0x251748911900?})
+	database/sql/ctxutil.go:82 +0xa3
+database/sql.rowsiFromStatement({0x151fcf0, 0x1fb8ae0}, {0x151f060, 0x251748ad03c0}, 0x251748911900, {0x25172a902680, 0x2, 0x2})
+	database/sql/sql.go:2848 +0x14f
+database/sql.(*Stmt).QueryContext.func1(0x28?)
+	database/sql/sql.go:2798 +0xc5
+database/sql.(*DB).retry(0x117310e13c0?, 0x2517310e13c8)
+	database/sql/sql.go:1576 +0x42
+database/sql.(*Stmt).QueryContext(0x251729b92b40, {0x151fcf0, 0x1fb8ae0}, {0x25172a902680, 0x2, 0x2})
+	database/sql/sql.go:2792 +0x151
+database/sql.(*Stmt).Query(...)
+	database/sql/sql.go:2838
+github.com/jmoiron/sqlx.(*qStmt).QueryRowx(0x25172f18de08, {0x2517310e14b8?, 0x425de5?}, {0x25172a902680?, 0x1228f80?, 0x251746867b01?})
+	github.com/jmoiron/sqlx@v1.4.0/sqlx.go:567 +0x35
+github.com/jmoiron/sqlx.Get({0x151e4b0?, 0x25172f18de08?}, {0x10f1ea0, 0x25173fac5310}, {0x0?, 0x48b265?}, {0x25172a902680?, 0x109de20?, 0x25172fce4f01?})
+	github.com/jmoiron/sqlx@v1.4.0/sqlx.go:692 +0x44
+github.com/jmoiron/sqlx.(*Stmt).Get(0x251729eb1a88, {0x10f1ea0, 0x25173fac5310}, {0x25172a902680, 0x2, 0x2})
+	github.com/jmoiron/sqlx@v1.4.0/sqlx.go:526 +0x8f
+github.com/syncthing/syncthing/internal/db/sqlite.(*folderDB).GetDeviceFile(_, {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, ...}, ...)
+	github.com/syncthing/syncthing/internal/db/sqlite/folderdb_local.go:37 +0x1b5
+github.com/syncthing/syncthing/internal/db/sqlite.(*DB).GetDeviceFile(_, {_, _}, {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, ...}, ...)
+	github.com/syncthing/syncthing/internal/db/sqlite/db_folderdb.go:134 +0x16c
+github.com/syncthing/syncthing/internal/db.metricsDB.GetDeviceFile({{_, _}}, {_, _}, {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, ...}, ...)
+	github.com/syncthing/syncthing/internal/db/metrics.go:226 +0x15e
+github.com/syncthing/syncthing/lib/model.cFiler.CurrentFile({{_, _}, {_, _}}, {_, _})
+	github.com/syncthing/syncthing/lib/model/folder.go:2068 +0xd7
+github.com/syncthing/syncthing/lib/scanner.(*walker).walkDir(0x25172ee46820, {0x151fec8, 0x25173c231ea0}, {0x25172fce4c80, 0x37}, {0x152fd28, 0x251746867b20}, 0x25172eb54540)
+	github.com/syncthing/syncthing/lib/scanner/walk.go:634 +0xa4
+github.com/syncthing/syncthing/lib/scanner.(*walker).handleItem(0x25172ee46820, {0x151fec8, 0x25173c231ea0}, {0x25172fce4c80, 0x37}, {0x152fd28, 0x251746867b20}, 0x25172eb54460, 0x25172eb54540)
+	github.com/syncthing/syncthing/lib/scanner/walk.go:547 +0x24b
+github.com/syncthing/syncthing/lib/scanner.(*walker).walkAndHashFiles.func1({0x25172fce4c80, 0x37}, {0x152fd28, 0x251746867b20}, {0x0, 0x0})
+	github.com/syncthing/syncthing/lib/scanner/walk.go:488 +0x8d6
+github.com/syncthing/syncthing/lib/fs.(*walkFilesystem).walk(0x251729e18510, {0x25172fce4c80, 0x37}, {0x152fd28, 0x251746867b20}, 0x25173fac4000, 0x0)
+	github.com/syncthing/syncthing/lib/fs/walkfs.go:92 +0x119
+github.com/syncthing/syncthing/lib/fs.(*walkFilesystem).walk(0x251729e18510, {0x25172cf5af30, 0x30}, {0x152fd28, 0x251746867200}, 0x25173fac4000, 0x0)
+	github.com/syncthing/syncthing/lib/fs/walkfs.go:132 +0x55b
+github.com/syncthing/syncthing/lib/fs.(*walkFilesystem).walk(0x251729e18510, {0x25172cfd6ed0, 0x29}, {0x152fd28, 0x2517467efef0}, 0x25173fac4000, 0x0)
+	github.com/syncthing/syncthing/lib/fs/walkfs.go:132 +0x55b
+github.com/syncthing/syncthing/lib/fs.(*walkFilesystem).walk(0x251729e18510, {0x25172cfd66f0, 0x25}, {0x152fd28, 0x2517467efbc0}, 0x25173fac4000, 0x0)
+	github.com/syncthing/syncthing/lib/fs/walkfs.go:132 +0x55b
+github.com/syncthing/syncthing/lib/fs.(*walkFilesystem).walk(0x251729e18510, {0x251738b2c258, 0x12}, {0x152fd28, 0x251745584870}, 0x25173fac4000, 0x0)
+	github.com/syncthing/syncthing/lib/fs/walkfs.go:132 +0x55b
+github.com/syncthing/syncthing/lib/fs.(*walkFilesystem).walk(0x251729e18510, {0x25173d48f9e0, 0xc}, {0x152fd28, 0x2517455847e0}, 0x25173fac4000, 0x0)
+	github.com/syncthing/syncthing/lib/fs/walkfs.go:132 +0x55b
+github.com/syncthing/syncthing/lib/fs.(*walkFilesystem).walk(0x251729e18510, {0x25173d48f888, 0x4}, {0x152fd28, 0x251745584630}, 0x25173fac4000, 0x0)
+	github.com/syncthing/syncthing/lib/fs/walkfs.go:132 +0x55b
+github.com/syncthing/syncthing/lib/fs.(*walkFilesystem).walk(0x251729e18510, {0x150ac78, 0x1}, {0x152fd28, 0x251744ed74c0}, 0x25173fac4000, 0x0)
+	github.com/syncthing/syncthing/lib/fs/walkfs.go:132 +0x55b
+github.com/syncthing/syncthing/lib/fs.(*walkFilesystem).Walk(0x251729e18510, {0x150ac78, 0x1}, 0x25173fac4000)
+	github.com/syncthing/syncthing/lib/fs/walkfs.go:158 +0x98
+github.com/syncthing/syncthing/lib/fs.(*caseFilesystem).Walk(0x25172a01ae60, {0x150ac78, 0x1}, 0x25173fac4000)
+	github.com/syncthing/syncthing/lib/fs/casefs.go:361 +0x7a
+github.com/syncthing/syncthing/lib/scanner.(*walker).scan(0x25172ee46820, {0x151fec8, 0x25173c231ea0}, 0x25172eb54460, 0x25172eb54540)
+	github.com/syncthing/syncthing/lib/scanner/walk.go:324 +0x96
+created by github.com/syncthing/syncthing/lib/scanner.(*walker).walk in goroutine 45
+	github.com/syncthing/syncthing/lib/scanner/walk.go:154 +0x195
+
+goroutine 66907 [IO wait]:
+internal/poll.runtime_pollWait(0x707c1dc8c200, 0x72)
+	runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0x25174736fb80?, 0x251748074000?, 0x0)
+	internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.(*pollDesc).waitRead(...)
+	internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Read(0x25174736fb80, {0x251748074000, 0xa000, 0xa000})
+	internal/poll/fd_unix.go:165 +0x2ae
+net.(*netFD).Read(0x25174736fb80, {0x251748074000?, 0x251729d01008?, 0x251746c48260?})
+	net/fd_posix.go:68 +0x25
+net.(*conn).Read(0x2517473028f8, {0x251748074000?, 0x707c1d0206e8?, 0x707c64aa72f8?})
+	net/net.go:196 +0x45
+crypto/tls.(*atLeastReader).Read(0x251740890ff0, {0x251748074000?, 0x251731bdd860?, 0x251734185a90?})
+	crypto/tls/conn.go:815 +0x3b
+bytes.(*Buffer).ReadFrom(0x251747320d28, {0x15162a0, 0x251740890ff0})
+	bytes/buffer.go:229 +0x98
+crypto/tls.(*Conn).readFromUntil(0x251747320a88, {0x15171e0, 0x2517473028f8}, 0x251734185c50?)
+	crypto/tls/conn.go:837 +0xde
+crypto/tls.(*Conn).readRecordOrCCS(0x251747320a88, 0x0)
+	crypto/tls/conn.go:626 +0x3db
+crypto/tls.(*Conn).readRecord(...)
+	crypto/tls/conn.go:588
+crypto/tls.(*Conn).Read(0x251747320a88, {0x251747aace30, 0x2, 0x866a75?})
+	crypto/tls/conn.go:1393 +0x145
+github.com/syncthing/syncthing/lib/connections.(*limitedReader).Read(0x2517473ecdb0, {0x251747aace30?, 0x0?, 0x251734185da0?})
+	github.com/syncthing/syncthing/lib/connections/limiter.go:234 +0x2a
+github.com/syncthing/syncthing/lib/protocol.(*countingReader).Read(0x2517473ece10, {0x251747aace30?, 0x1516bc0?, 0x251734185f70?})
+	github.com/syncthing/syncthing/lib/protocol/counting.go:29 +0x29
+io.ReadAtLeast({0x1516c80, 0x2517473ece10}, {0x251747aace30, 0x2, 0x4}, 0x2)
+	io/io.go:335 +0x8e
+io.ReadFull(...)
+	io/io.go:354
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).readHeader(0x2517472ff0e0, {0x251747aace30, 0x4, 0x2?})
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:580 +0x85
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).readMessage(0x2517472ff0e0, {0x251747aace30, 0x4, 0x4})
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:515 +0x27
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).readerLoop(0x2517472ff0e0)
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:412 +0x5d
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func1()
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:290 +0x1c
+created by github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start in goroutine 56
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:289 +0x14b
+
+goroutine 25674 [select]:
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).dispatcherLoop(0x25173c428000)
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:439 +0x10d
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func2()
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:294 +0x1c
+created by github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start in goroutine 56
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:293 +0x18d
+
+goroutine 66911 [select, 1 minutes]:
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).pingReceiver(0x2517472ff0e0)
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:1049 +0x168
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func5()
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:307 +0x1c
+created by github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start in goroutine 56
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:306 +0x253
+
+goroutine 25745 [select, 10 minutes]:
+github.com/thejerf/suture/v4.(*Supervisor).Serve(0x251736980640, {0x151fec8?, 0x25173c230c80?})
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:354 +0x448
+github.com/syncthing/syncthing/lib/model.(*serviceMap[...]).Serve(...)
+	github.com/syncthing/syncthing/lib/model/service_map.go:135
+github.com/syncthing/syncthing/lib/model.(*indexHandlerRegistry).Serve(0x0?, {0x151fec8?, 0x25173c230c80?})
+	github.com/syncthing/syncthing/lib/model/indexhandler.go:524 +0x25
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 55
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 56667 [select]:
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).pingSender(0x251744b105a0)
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:1024 +0xbc
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func4()
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:303 +0x1c
+created by github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start in goroutine 56
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:302 +0x211
+
+goroutine 66908 [select]:
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).dispatcherLoop(0x2517472ff0e0)
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:439 +0x10d
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func2()
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:294 +0x1c
+created by github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start in goroutine 56
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:293 +0x18d
+
+goroutine 3588 [select]:
+github.com/syncthing/syncthing/lib/watchaggregator.(*aggregator).mainLoop(0x251729838fc8, 0x251729c3eee0, 0x251729c52000, 0x251729c52070, {0x1536b10, 0x251729bae808}, {0x151e570, 0x25172977da40})
+	github.com/syncthing/syncthing/lib/watchaggregator/aggregator.go:190 +0x432
+created by github.com/syncthing/syncthing/lib/watchaggregator.AggregateWithFlush in goroutine 48
+	github.com/syncthing/syncthing/lib/watchaggregator/aggregator.go:174 +0x18b
+
+goroutine 56665 [select, 1 minutes]:
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).dispatcherLoop(0x251744b105a0)
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:439 +0x10d
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func2()
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:294 +0x1c
+created by github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start in goroutine 56
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:293 +0x18d
+
+goroutine 313285 [runnable]:
+syscall.Syscall(0x0, 0xb, 0x25173395f421, 0x1)
+	syscall/syscall_linux.go:74 +0x25
+syscall.read(0x251744a8fe80?, {0x25173395f421?, 0x25173b132f00?, 0x0?})
+	syscall/zsyscall_linux_amd64.go:736 +0x38
+syscall.Read(...)
+	syscall/syscall_unix.go:183
+internal/poll.ignoringEINTRIO(...)
+	internal/poll/fd_unix.go:738
+internal/poll.(*FD).Read(0x251744a8fe80, {0x25173395f421, 0x1, 0x1})
+	internal/poll/fd_unix.go:161 +0x21d
+net.(*netFD).Read(0x251744a8fe80, {0x25173395f421?, 0x0?, 0x0?})
+	net/fd_posix.go:68 +0x25
+net.(*conn).Read(0x251739dbea78, {0x25173395f421?, 0x0?, 0x0?})
+	net/net.go:196 +0x45
+net/http.(*connReader).backgroundRead(0x25173395f400)
+	net/http/server.go:702 +0x33
+created by net/http.(*connReader).startBackgroundRead in goroutine 313284
+	net/http/server.go:698 +0xb6
+
+goroutine 313242 [select]:
+github.com/syncthing/syncthing/lib/scanner.(*parallelHasher).hashFiles(0x251735323200, {0x151fec8, 0x25173c231ea0})
+	github.com/syncthing/syncthing/lib/scanner/blockqueue.go:105 +0x14f
+created by github.com/syncthing/syncthing/lib/scanner.newParallelHasher in goroutine 45
+	github.com/syncthing/syncthing/lib/scanner/blockqueue.go:88 +0x11f
+
+goroutine 8237 [chan receive, 4 minutes]:
+github.com/syncthing/syncthing/lib/model.(*folder).Scan(...)
+	github.com/syncthing/syncthing/lib/model/folder.go:375
+github.com/syncthing/syncthing/lib/model.(*sendReceiveFolder).pullScannerRoutine(0x251729e08ea0, {0x151fec8, 0x25172a08a780}, 0x25173f8a5340)
+	github.com/syncthing/syncthing/lib/model/folder_sendrecv.go:1876 +0x35f
+created by github.com/syncthing/syncthing/lib/model.(*sendReceiveFolder).pull in goroutine 45
+	github.com/syncthing/syncthing/lib/model/folder_sendrecv.go:174 +0x111
+
+goroutine 25703 [chan receive, 10 minutes]:
+github.com/syncthing/syncthing/lib/connections.(*service).handleHellos.func1()
+	github.com/syncthing/syncthing/lib/connections/service.go:432 +0x3f
+created by github.com/syncthing/syncthing/lib/connections.(*service).handleHellos in goroutine 134
+	github.com/syncthing/syncthing/lib/connections/service.go:431 +0x15cc
+
+goroutine 25746 [select]:
+github.com/syncthing/syncthing/lib/model.(*indexHandler).Serve(0x25173be7b880, {0x151fec8, 0x25173c230f50})
+	github.com/syncthing/syncthing/lib/model/indexhandler.go:213 +0x4c5
+github.com/thejerf/suture/v4.(*Supervisor).runService.func2()
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:570 +0xd4
+created by github.com/thejerf/suture/v4.(*Supervisor).runService in goroutine 25745
+	github.com/thejerf/suture/v4@v4.0.6/supervisor.go:544 +0x189
+
+goroutine 66253 [chan receive, 10 minutes]:
+github.com/syncthing/syncthing/lib/connections.(*service).handleHellos.func1()
+	github.com/syncthing/syncthing/lib/connections/service.go:432 +0x3f
+created by github.com/syncthing/syncthing/lib/connections.(*service).handleHellos in goroutine 134
+	github.com/syncthing/syncthing/lib/connections/service.go:431 +0x15cc
+
+goroutine 56664 [IO wait, 1 minutes]:
+internal/poll.runtime_pollWait(0x707c1dc5d400, 0x72)
+	runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0x251744b1cc00?, 0x251745f86000?, 0x0)
+	internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.(*pollDesc).waitRead(...)
+	internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Read(0x251744b1cc00, {0x251745f86000, 0xa000, 0xa000})
+	internal/poll/fd_unix.go:165 +0x2ae
+net.(*netFD).Read(0x251744b1cc00, {0x251745f86000?, 0x251729c06808?, 0x251729719960?})
+	net/fd_posix.go:68 +0x25
+net.(*conn).Read(0x25174473bde0, {0x251745f86000?, 0x707c1c1981c0?, 0x707c64ab6000?})
+	net/net.go:196 +0x45
+crypto/tls.(*atLeastReader).Read(0x251743655500, {0x251745f86000?, 0x25173f8c0d20?, 0x25172ee42a90?})
+	crypto/tls/conn.go:815 +0x3b
+bytes.(*Buffer).ReadFrom(0x25173e62c2a8, {0x15162a0, 0x251743655500})
+	bytes/buffer.go:229 +0x98
+crypto/tls.(*Conn).readFromUntil(0x25173e62c008, {0x15171e0, 0x25174473bde0}, 0x25172ee42c50?)
+	crypto/tls/conn.go:837 +0xde
+crypto/tls.(*Conn).readRecordOrCCS(0x25173e62c008, 0x0)
+	crypto/tls/conn.go:626 +0x3db
+crypto/tls.(*Conn).readRecord(...)
+	crypto/tls/conn.go:588
+crypto/tls.(*Conn).Read(0x25173e62c008, {0x251744b199c0, 0x2, 0x866a75?})
+	crypto/tls/conn.go:1393 +0x145
+github.com/syncthing/syncthing/lib/connections.(*limitedReader).Read(0x251744b27a70, {0x251744b199c0?, 0x0?, 0x25172ee42da0?})
+	github.com/syncthing/syncthing/lib/connections/limiter.go:234 +0x2a
+github.com/syncthing/syncthing/lib/protocol.(*countingReader).Read(0x251744b27ad0, {0x251744b199c0?, 0x1516bc0?, 0x25172ee42f70?})
+	github.com/syncthing/syncthing/lib/protocol/counting.go:29 +0x29
+io.ReadAtLeast({0x1516c80, 0x251744b27ad0}, {0x251744b199c0, 0x2, 0x4}, 0x2)
+	io/io.go:335 +0x8e
+io.ReadFull(...)
+	io/io.go:354
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).readHeader(0x251744b105a0, {0x251744b199c0, 0x4, 0x2?})
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:580 +0x85
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).readMessage(0x251744b105a0, {0x251744b199c0, 0x4, 0x4})
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:515 +0x27
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).readerLoop(0x251744b105a0)
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:412 +0x5d
+github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start.func1()
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:290 +0x1c
+created by github.com/syncthing/syncthing/lib/protocol.(*rawConnection).Start in goroutine 56
+	github.com/syncthing/syncthing/lib/protocol/protocol.go:289 +0x14b
+
+goroutine 3587 [select]:
+github.com/syncthing/syncthing/lib/fs.(*BasicFilesystem).watchLoop(0x25172a089e40, {0x151fec8, 0x251729db82d0}, {0x150ac78, 0x1}, {0x251729f16720, 0x1, 0x1}, 0x251729876c40, 0x251729c3eee0, ...)
+	github.com/syncthing/syncthing/lib/fs/basicfs_watch.go:88 +0x106
+created by github.com/syncthing/syncthing/lib/fs.(*BasicFilesystem).Watch in goroutine 48
+	github.com/syncthing/syncthing/lib/fs/basicfs_watch.go:66 +0x37b
