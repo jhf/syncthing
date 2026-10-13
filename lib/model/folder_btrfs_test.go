@@ -8,10 +8,13 @@ package model
 
 import (
 	"context"
+	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/watchaggregator"
@@ -32,6 +35,24 @@ func barrierTestFolder(t *testing.T) (*testModel, *folder, string) {
 	m := setupModel(t, w)
 	m.cancel()
 	<-m.stopped
+	// Windows CI failed this test's TempDir cleanup with "file being used" on
+	// the folder dir: a directory handle from folder startup is collectable
+	// garbage whose finalizer has not run yet (a forced GC releases it - no
+	// true leak; the production instance holds zero lingering open directory
+	// handles). GC here so the TempDir removal sees a deletable directory.
+	// Registered after t.TempDir above, so it runs before its cleanup (LIFO).
+	t.Cleanup(func() {
+		if !build.IsWindows {
+			return
+		}
+		for range 20 {
+			runtime.GC()
+			if err := os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
 	r, _ := m.folderRunners.Get(fcfg.ID)
 	f := r.(*sendReceiveFolder).folder
 	f.watchMut.Lock()
