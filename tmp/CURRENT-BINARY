@@ -7,27 +7,30 @@
 # Do not start Syncthing.app while this custom serve is running.
 
 KIND=custom
-BINARY=/Users/jhf/Projects/syncthing/custom-syncthing-darwin-arm64.dev64
-VERSION=v2.1.7-dev.64.g9b30385df-btrfs-scan-replay
-BRANCH=feature/btrfs-scan-replay (dev.64 = ee6906afe GC updateLock scoping + schema 61 blocks index + 9b30385df watch replay re-arm after full scan + ce404fb83 notify fork pinned in go.mod)
-COMMIT=9b30385df
+BINARY=/Users/jhf/Projects/syncthing/custom-syncthing-darwin-arm64.dev83
+VERSION=v2.1.7-dev.83.g0c6a4799-btrfs-scan-replay
+BRANCH=feature/btrfs-scan-replay (dev.83 = dev.64 + 0c6a4799a btrfs baseline: canary-barrier pairing replaces 2s quiet guess, runtime baseline refresh after full scans, rate-limited 10min)
+COMMIT=0c6a4799a
 SOURCE=/Users/jhf/Projects/syncthing
 
 # Artifact identity (2026-10-13):
-#   artifact  custom-syncthing-darwin-arm64.dev64
-#   sha256    98bc4fab773a3207638213ffee4993f783d647cf2404b98e379d315b902ac373
-#   commit    9b30385df feature/btrfs-scan-replay (clean tree at build)
-#   cgo       yes (FSEvents heal/replay included; dev.63 darwin was a nocgo
-#             misbuild, caught before deploy and never ran)
-#   yarlung   custom-syncthing-linux-amd64.dev64 (same commit, CGO_ENABLED=0)
-#             sha256 1951b5db450f6ae067df272b2be2a1042b6601abbe0fb04f7081504f99d95360
+#   artifact  custom-syncthing-darwin-arm64.dev83
+#   sha256    2a4aca41af731dccf0485b64164f47a3651aa3618888f5218701563c9822cd09
+#   commit    0c6a4799a feature/btrfs-scan-replay (clean tree at build)
+#   cgo       yes (25 FSEvent symbols; plain `go run build.go`, no CGO_ENABLED=0)
+#   yarlung   custom-syncthing-linux-amd64.dev83 (same commit, CGO_ENABLED=0)
+#             sha256 06f9a652bb58a4ce7a5e4c9a7284b9f4236f6d67af6d906146ac41f368f7ae25
+#             built via direct go build + build.go ldflags (GOBIN in go env
+#             breaks `go run build.go -goos linux`: cannot install
+#             cross-compiled binaries when GOBIN is set)
 #   notify    github.com/jhf/notify v0.0.0-20261013152350-1f2f7bb40679 via go.mod
-#             replace (1f2f7bb = ReplayEnabled getter); go.work -> ../notify remains
-#             a local convenience, no longer load-bearing.
-#   why       dev.62 GC pass wedged sync ~15 min (ANALYZE under updateLock) and
-#             FSEvents drop flags escalated to full rescans forever (replay could
-#             only arm at boot; watermark aged out overnight).
-#   rollback  dev.62 binary at custom-syncthing-darwin-arm64.dev62; point BINARY
-#             back at it to roll back.
+#   why       btrfs baseline only advanced at clean shutdown (months of uptime
+#             pin months of churned blocks) and the pairing proof was a 2s
+#             wall-clock quiet guess that could false-positive on in-flight
+#             events. dev.83: declarative FIFO canary barrier + runtime
+#             refresh after every full scan (>=10min apart).
+#   rollback  dev.64 binary at custom-syncthing-darwin-arm64.dev64; point BINARY
+#             above at it and re-run tmp/run-custom-syncthing.sh.
+
 HOME_DIR=$HOME/Library/Application Support/Syncthing
 LAUNCH=/Users/jhf/Projects/syncthing/tmp/run-custom-syncthing.sh
