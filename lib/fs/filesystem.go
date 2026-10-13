@@ -123,6 +123,12 @@ type Matcher interface {
 type Event struct {
 	Name string
 	Type EventType
+	// ID is the backend's journal position of the event, when the backend
+	// has a journal concept (FSEvents event IDs on macOS). Zero means the
+	// backend does not provide one. Consumers use it to persist how far the
+	// journal has been accounted for, so a later process can resume from
+	// there instead of scanning everything.
+	ID uint64
 }
 
 type EventType int

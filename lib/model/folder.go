@@ -9,6 +9,7 @@ package model
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/syncthing/syncthing/internal/db"
@@ -89,10 +91,19 @@ type folder struct {
 	pullRescanActive bool // Serve goroutine: a pull rescan is running
 
 	watchCancel      context.CancelFunc
-	watchChan        chan []string
+	watchChan        chan watchaggregator.Batch
 	restartWatchChan chan struct{}
 	watchErr         error
 	watchMut         sync.Mutex
+
+	// fullScanCount counts completed-or-attempted full-tree scans
+	// (scanSubdirs with nil subDirs). It exists so tests and diagnostics
+	// can tell whether a startup did a full walk or resumed from the
+	// filesystem journal.
+	fullScanCount atomic.Int64
+	// lastReplayWatermark is the last persisted FSEvents journal position,
+	// used to throttle KV writes (persist only on advancement).
+	lastReplayWatermark atomic.Uint64
 
 	puller    puller
 	versioner versioner.Versioner
@@ -176,6 +187,7 @@ func (f *folder) Serve(ctx context.Context) error {
 	}
 
 	if f.FSWatcherEnabled && f.getHealthErrorAndLoadIgnores() == nil {
+		f.tryArmWatchReplay(ctx)
 		f.startWatch(ctx)
 	}
 
@@ -263,7 +275,10 @@ func (f *folder) Serve(ctx context.Context) error {
 
 		case fsEvents := <-f.watchChan:
 			f.sl.DebugContext(ctx, "Scan due to watcher")
-			err = f.scanSubdirs(ctx, fsEvents)
+			err = f.scanSubdirs(ctx, fsEvents.Paths)
+			if err == nil {
+				f.persistWatchReplayWatermark(fsEvents.MaxEventID)
+			}
 
 		case <-f.restartWatchChan:
 			f.sl.DebugContext(ctx, "Restart watcher")
@@ -567,7 +582,11 @@ func (f *folder) serviceQueuedWatch(ctx context.Context) (bool, error) {
 		f.sl.DebugContext(ctx, "Scan due to watcher (serviced between scan chunks)")
 		f.watchScanDepth++
 		defer func() { f.watchScanDepth-- }()
-		return true, f.scanSubdirs(ctx, fsEvents)
+		err := f.scanSubdirs(ctx, fsEvents.Paths)
+		if err == nil {
+			f.persistWatchReplayWatermark(fsEvents.MaxEventID)
+		}
+		return true, err
 	default:
 		return false, nil
 	}
@@ -590,6 +609,9 @@ func (f *folder) serviceQueuedPull(ctx context.Context) (bool, error) {
 
 func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 	f.sl.DebugContext(ctx, "Scanning")
+	if subDirs == nil {
+		f.fullScanCount.Add(1)
+	}
 
 	oldHash := f.ignores.Hash()
 
@@ -738,7 +760,39 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 	}
 
 	f.ScanCompleted()
+	if subDirs == nil || (len(subDirs) == 1 && subDirs[0] == "") {
+		f.armWatchReplayAfterFullScan(ctx)
+	}
 	return nil
+}
+
+// armWatchReplayAfterFullScan enables journal replay once a full scan has
+// completed, when boot-time arming (tryArmWatchReplay) did not - e.g. the
+// persisted watermark had aged past maxWatchReplayAge after an overnight
+// gap. A completed full scan makes the database complete as of the
+// journal's current position, which is all arming requires; without this
+// re-arm every fseventsd drop flag for the rest of the process lifetime
+// escalates to a full rescan, and on a busy tree drops arrive faster than
+// scans complete, so scanning never stops (measured 2026-10-13: ~22
+// drops/min against ~20 min scans, 5566 folder state transitions in
+// 2h47m). With replay armed, a drop flag heals by replaying the journal
+// gap instead.
+func (f *folder) armWatchReplayAfterFullScan(ctx context.Context) {
+	if !fs.WatchReplaySupported() {
+		return
+	}
+	cur := fs.CurrentWatchEventID()
+	if cur == 0 {
+		return
+	}
+	// The watermark only advances behind completed scans; a completed full
+	// scan covers the journal up to now.
+	f.persistWatchReplayWatermark(cur)
+	if fs.WatchReplayArmed() {
+		return
+	}
+	fs.SetWatchReplaySince(cur)
+	f.sl.InfoContext(ctx, "Armed filesystem journal replay after completed full scan", "eventID", cur)
 }
 
 const maxToRemove = 1000
@@ -1472,7 +1526,7 @@ func (f *folder) restartWatch(ctx context.Context) error {
 func (f *folder) startWatch(ctx context.Context) {
 	watchCtx, cancel := context.WithCancel(ctx)
 	f.watchMut.Lock()
-	f.watchChan = make(chan []string)
+	f.watchChan = make(chan watchaggregator.Batch)
 	f.watchCancel = cancel
 	f.watchMut.Unlock()
 	go f.monitorWatch(watchCtx)
@@ -1521,6 +1575,13 @@ func (f *folder) monitorWatch(ctx context.Context) {
 			watchaggregator.Aggregate(aggrCtx, eventChan, f.watchChan, f.FolderConfiguration, f.model.cfg, f.evLogger)
 			f.sl.DebugContext(ctx, "Started filesystem watcher")
 		case err = <-errChan:
+			// The watch is dead; events between its death and the re-watch
+			// are lost. Schedule a full scan to re-establish completeness,
+			// and abandon any journal replay seed so the re-watch does not
+			// replay the same gap (or a long history) again - the full
+			// scan covers it.
+			f.scanOnWatchErr()
+			fs.ResetWatchReplay()
 			var next time.Duration
 			if dur := time.Since(lastWatch); dur > pause {
 				pause = time.Minute
@@ -1589,6 +1650,117 @@ func (f *folder) setWatchError(err error, nextTryIn time.Duration) {
 	} else {
 		f.sl.Debug("Failed to start filesystem watcher", slog.String("wait", nextTryIn.String()), slogutil.Error(err))
 	}
+}
+
+// watchReplayWatermarkKVPrefix namespaces the per-folder journal position
+// recording how far local filesystem changes have been accounted for in the
+// database. On startup a watcher seeded with it replays every change since,
+// which makes the initial full walk unnecessary (see tryArmWatchReplay).
+const watchReplayWatermarkKVPrefix = "model/fseventsEventID/"
+
+// maxWatchReplayAge bounds how old a persisted journal position may be to
+// still arm a replay. The bound exists because a journal gap is NOT
+// detectable from the stream: probing on macOS 26 (2026-10-08) showed that
+// seeding a stream with an ID the journal no longer holds is silently
+// clamped to the oldest available record, without the documented
+// MustScanSubDirs flag, so a too-old watermark would mean lost changes. The
+// journal only churns while the volume is active, so downtime while the
+// machine sleeps barely ages it; the periodic rescan is the backstop for
+// the remaining risk window.
+const maxWatchReplayAge = 12 * time.Hour
+
+// tryArmWatchReplay attempts to resume filesystem watching from the
+// persisted journal position instead of running the initial full scan. When
+// it succeeds the initial scan timer is replaced by the regular rescan
+// schedule and the initial scan is marked finished: a complete database
+// index (recorded by a previous run) plus a journal replay since the
+// watermark is equivalent to a completed initial scan. Every failure path
+// here leaves the folder on the regular course; every journal integrity
+// failure after arming is reported by the watcher as a fatal watch error,
+// which schedules a full scan via the watch error path. Must be called
+// before startWatch so the seed is in place when the stream starts.
+func (f *folder) tryArmWatchReplay(ctx context.Context) bool {
+	if !fs.WatchReplaySupported() {
+		return false
+	}
+	if done, err := f.initialScanEverCompleted(); err != nil || !done {
+		// Without a recorded complete index, replay cannot substitute for
+		// the first walk.
+		return false
+	}
+	w, recordedAt, err := f.watchReplayWatermark()
+	if err != nil {
+		f.sl.WarnContext(ctx, "Failed to read watch replay watermark", slogutil.Error(err))
+		return false
+	}
+	if w == 0 {
+		return false
+	}
+	if age := time.Since(recordedAt); age > maxWatchReplayAge {
+		// See maxWatchReplayAge: an over-old journal position cannot be
+		// trusted to still be covered, and the stream will not say so.
+		f.sl.InfoContext(ctx, "Watch replay watermark too old, falling back to full scan", "age", age, "max", maxWatchReplayAge)
+		return false
+	}
+	if cur := fs.CurrentWatchEventID(); cur < w {
+		// The journal starts over when e.g. the volume is reformatted; a
+		// watermark ahead of its current position is meaningless.
+		f.sl.WarnContext(ctx, "Watch replay watermark is ahead of the filesystem journal, falling back to full scan", "watermark", w, "journal", cur)
+		return false
+	}
+	fs.SetWatchReplaySince(w)
+	// Skip the pending initial scan and fall straight into the regular
+	// rescan schedule, keeping periodic scans as the safety net.
+	if !f.scanTimer.Stop() {
+		select {
+		case <-f.scanTimer.C:
+		default:
+		}
+	}
+	f.Reschedule()
+	select {
+	case <-f.initialScanFinished:
+	default:
+		close(f.initialScanFinished)
+	}
+	f.lastReplayWatermark.Store(w)
+	f.sl.InfoContext(ctx, "Skipping initial scan, resuming filesystem watching from the journal", "sinceEventID", w)
+	return true
+}
+
+// watchReplayWatermark reads the persisted journal position and when it was
+// recorded; an ID of 0 means none was recorded yet.
+func (f *folder) watchReplayWatermark() (uint64, time.Time, error) {
+	b, err := f.db.GetKV(watchReplayWatermarkKVPrefix + f.folderID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, time.Time{}, nil
+	}
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	if len(b) != 16 {
+		return 0, time.Time{}, nil
+	}
+	return binary.BigEndian.Uint64(b[:8]), time.Unix(int64(binary.BigEndian.Uint64(b[8:])), 0), nil
+}
+
+// persistWatchReplayWatermark records that every local change up to the
+// given journal position has been scanned into the database. Writes are
+// throttled to advancements only; the value is only ever consumed by the
+// next process start, and over-persisting is impossible because the caller
+// scans the corresponding batch first.
+func (f *folder) persistWatchReplayWatermark(id uint64) {
+	if id == 0 || id <= f.lastReplayWatermark.Load() {
+		return
+	}
+	var b [16]byte
+	binary.BigEndian.PutUint64(b[:8], id)
+	binary.BigEndian.PutUint64(b[8:], uint64(time.Now().Unix()))
+	if err := f.db.PutKV(watchReplayWatermarkKVPrefix+f.folderID, b[:]); err != nil {
+		f.sl.Warn("Failed to record watch replay watermark", slogutil.Error(err))
+		return
+	}
+	f.lastReplayWatermark.Store(id)
 }
 
 // scanOnWatchErr schedules a full scan immediately if an error occurred while watching.
