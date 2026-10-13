@@ -83,6 +83,34 @@ func (f *BasicFilesystem) watchLoop(ctx context.Context, name string, roots []st
 
 		select {
 		case ev := <-backendChan:
+			// Backend failure-flag events (e.g. FSEvents journal problems)
+			// are intercepted before the path checks below - they can
+			// carry the watched root or an otherwise ignorable path.
+			// Overflow means events were lost but the stream is alive:
+			// heal with a full folder scan and keep watching, like the
+			// inotify queue overflow path. Fatal means the stream cannot
+			// be trusted: report an error and tear the watch down.
+			switch class := watchEventClassify(ev); class {
+			case watchEventOverflow:
+				l.Debugln(f.Type(), f.URI(), "Watch: Backend dropped events, sending", name)
+				select {
+				case outChan <- Event{Name: name, Type: NonRemove}:
+				case <-ctx.Done():
+					notify.Stop(backendChan)
+					return
+				}
+				continue
+			case watchEventFatalClass:
+				fatalErr := fatalEventError(ev)
+				select {
+				case errChan <- fatalErr:
+					l.Debugln(f.Type(), f.URI(), "Watch: Sending fatal error", fatalErr)
+				case <-ctx.Done():
+				}
+				notify.Stop(backendChan)
+				return
+			}
+
 			evPath := ev.Path()
 
 			if !utf8.ValidString(evPath) {
@@ -107,8 +135,15 @@ func (f *BasicFilesystem) watchLoop(ctx context.Context, name string, roots []st
 				continue
 			}
 			evType := f.eventType(ev.Event())
+			// Journal position, when the backend has one (FSEvents). Probed
+			// via an anonymous interface so this shared file builds for
+			// backends whose Sys() has no such concept.
+			var evID uint64
+			if withID, ok := ev.Sys().(interface{ EventID() uint64 }); ok {
+				evID = withID.EventID()
+			}
 			select {
-			case outChan <- Event{Name: relPath, Type: evType}:
+			case outChan <- Event{Name: relPath, Type: evType, ID: evID}:
 				l.Debugln(f.Type(), f.URI(), "Watch: Sending", relPath, evType)
 			case <-ctx.Done():
 				notify.Stop(backendChan)
