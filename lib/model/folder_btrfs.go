@@ -245,7 +245,7 @@ func (f *folder) watchBarrier(ctx context.Context) bool {
 		f.sl.DebugContext(ctx, "Btrfs baseline: canary nonce failed", slogutil.Error(err))
 		return false
 	}
-	canary := fs.UnixTempPrefix + "barrier-" + hex.EncodeToString(nonce[:]) + ".tmp"
+	canary := fs.WatchBarrierCanaryPrefix + hex.EncodeToString(nonce[:]) + ".tmp"
 	file, err := f.Filesystem().Create(canary)
 	if err != nil {
 		f.sl.DebugContext(ctx, "Btrfs baseline: canary create failed", slogutil.Error(err))

@@ -133,7 +133,7 @@ func (f *BasicFilesystem) watchLoop(ctx context.Context, name string, roots []st
 				return
 			}
 
-			if ignore.Match(relPath).IsIgnored() {
+			if ignore.Match(relPath).IsIgnored() && !IsWatchBarrierCanary(relPath) {
 				l.Debugln(f.Type(), f.URI(), "Watch: Ignoring", relPath)
 				continue
 			}
