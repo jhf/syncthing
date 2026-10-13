@@ -7,18 +7,18 @@
 # Do not start Syncthing.app while this custom serve is running.
 
 KIND=custom
-BINARY=/Users/jhf/Projects/syncthing/custom-syncthing-darwin-arm64.dev85
-VERSION=v2.1.7-dev.85.g612a598e-btrfs-scan-replay
-BRANCH=feature/btrfs-scan-replay (dev.85 = dev.83 + 612a598e3 barrier canary passes watch ignore filter + notify 9a7d1df: replay-wide drop deferral, 1s FSEvents stream latency)
-COMMIT=612a598e3
+BINARY=/Users/jhf/Projects/syncthing/custom-syncthing-darwin-arm64.dev87
+VERSION=v2.1.7-dev.87.g612a598e-btrfs-scan-replay
+BRANCH=feature/btrfs-scan-replay (dev.87 = dev.83 + 612a598e3 barrier canary passes watch ignore filter + notify 9a7d1df: replay-wide drop deferral, 1s FSEvents stream latency)
+COMMIT=0adcc5c4
 SOURCE=/Users/jhf/Projects/syncthing
 
 # Artifact identity (2026-10-13):
-#   artifact  custom-syncthing-darwin-arm64.dev85
+#   artifact  custom-syncthing-darwin-arm64.dev87
 #   sha256    561da693ef81c63a4c74bb4b1733ea125104085885dd2e78a87fef47c5daa88a
 #   commit    0c6a4799a feature/btrfs-scan-replay (clean tree at build)
 #   cgo       yes (25 FSEvent symbols; plain `go run build.go`, no CGO_ENABLED=0)
-#   yarlung   custom-syncthing-linux-amd64.dev85 (same commit, CGO_ENABLED=0)
+#   yarlung   custom-syncthing-linux-amd64.dev87 (same commit, CGO_ENABLED=0)
 #             sha256 d9e419ce039628fcaf8d34c44c49effb970edfd8fcf64c904063f1542310d7d0
 #             built via direct go build + build.go ldflags (GOBIN in go env
 #             breaks `go run build.go -goos linux`: cannot install
