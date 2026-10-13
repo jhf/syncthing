@@ -28,6 +28,7 @@ require (
 	github.com/oschwald/geoip2-golang v1.13.0
 	github.com/pierrec/lz4/v4 v4.1.33
 	github.com/prometheus/client_golang v1.25.0
+	github.com/prometheus/client_model v0.6.3
 	github.com/puzpuzpuz/xsync/v3 v3.5.1
 	github.com/quic-go/quic-go v0.63.0
 	github.com/rabbitmq/amqp091-go v1.15.0
@@ -78,7 +79,6 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/posener/complete v1.2.3 // indirect
 	github.com/power-devops/perfstat v0.0.0-20260805114148-88456608a4f6 // indirect
-	github.com/prometheus/client_model v0.6.3 // indirect
 	github.com/prometheus/common v0.72.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
@@ -108,3 +108,5 @@ tool (
 	github.com/maxbrunsfeld/counterfeiter/v6
 	golang.org/x/tools/cmd/goimports
 )
+
+replace github.com/syncthing/notify => github.com/jhf/notify v0.0.0-20261013152350-1f2f7bb40679
