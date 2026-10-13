@@ -117,4 +117,4 @@ tool (
 	golang.org/x/tools/cmd/goimports
 )
 
-replace github.com/syncthing/notify => github.com/jhf/notify v0.0.0-20261013185601-9a7d1dfd3338
+replace github.com/syncthing/notify => github.com/jhf/notify v0.0.0-20261013191618-6de31c63ed8d
