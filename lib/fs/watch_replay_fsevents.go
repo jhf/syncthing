@@ -11,6 +11,7 @@ package fs
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/syncthing/notify"
 )
@@ -103,3 +104,14 @@ func CurrentWatchEventID() uint64 { return notify.CurrentEventID() }
 // journal replay (true) or forwarded to the consumer for a full rescan
 // (false).
 func WatchReplayArmed() bool { return notify.ReplayEnabled() }
+
+// SetWatchPollOnly switches FSEvents watching to poll mode: each watch
+// replays the journal from its watermark, stops at HistoryDone, and re-arms
+// after d, instead of holding a live stream open. See notify.SetPollOnly.
+func SetWatchPollOnly(d time.Duration) { notify.SetPollOnly(d) }
+
+// SetWatchIgnoreSelf toggles server-side filtering of events caused by this
+// process. Syncthing already knows its own writes (its database lives inside
+// the watched home tree, and every pulled file), so self-events are pure
+// journaling+delivery overhead on a busy tree. See notify.SetIgnoreSelf.
+func SetWatchIgnoreSelf(v bool) { notify.SetIgnoreSelf(v) }
