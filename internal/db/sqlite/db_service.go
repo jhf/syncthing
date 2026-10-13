@@ -120,10 +120,8 @@ func (s *Service) periodic(ctx context.Context) error {
 	t1 := time.Now()
 	defer func() { slog.DebugContext(ctx, "Periodic done in", "t1", time.Since(t1), "t0t1", t1.Sub(t0)) }()
 
-	s.sdb.updateLock.Lock()
-	err := tidy(ctx, s.sdb.sql)
-	s.sdb.updateLock.Unlock()
-	if err != nil {
+	// tidy needs no lock; see the folder-GC tidy call below.
+	if err := tidy(ctx, s.sdb.sql); err != nil {
 		return err
 	}
 
@@ -156,11 +154,16 @@ func (s *Service) periodic(ctx context.Context) error {
 			if err := garbageCollectNamesAndVersions(ctx, fdb); err != nil {
 				return wrap(err)
 			}
-			if err := garbageCollectBlocklistsAndBlocksLocked(ctx, fdb); err != nil {
-				return wrap(err)
-			}
-			return tidy(ctx, fdb.sql)
+			return garbageCollectBlocklistsAndBlocksLocked(ctx, fdb)
 		}(); err != nil {
+			return wrap(err)
+		}
+
+		// tidy runs unlocked: ANALYZE on a multi-million-row folder takes
+		// many minutes, and holding updateLock across it wedges every
+		// Update behind it (observed live on yarlung 2026-10-13 as a ~10
+		// minute stall that parked a connection dispatcher).
+		if err := tidy(ctx, fdb.sql); err != nil {
 			return wrap(err)
 		}
 
