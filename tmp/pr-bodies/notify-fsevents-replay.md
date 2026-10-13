@@ -39,3 +39,11 @@ paths replayed, full scan skipped.
 One commit (`NOTIFY_DEBUG_HEAL` debug logging) is marked "instrumentation,
 revert before upstreaming" in its message — it is opt-in via an env var and
 harmless, but happy to drop it from the PR if you prefer.
+
+## ReplayEnabled
+
+New getter reporting whether historical event processing is armed, i.e.
+whether a live drop flag will be healed by journal replay or forwarded to
+the consumer for a full rescan. The syncthing side uses it to log the
+arming transition when it re-arms replay after a completed full scan, and
+tests observe arming through it.

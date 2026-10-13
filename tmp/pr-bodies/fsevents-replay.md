@@ -52,3 +52,18 @@ full scan.
   when replay unsupported, queue-drain on shutdown.
 - `lib/model/folder_watchevents_test.go` + `folder_watchevents_replay_test.go`:
   replay bookkeeping, escalation, meta persistence.
+
+## Re-arming replay after a completed full scan
+
+Previously replay could arm only at boot (tryArmWatchReplay), so a watermark
+aged past maxWatchReplayAge — e.g. after an overnight gap — disarmed replay
+for the whole process lifetime, and every fseventsd drop flag escalated to a
+full rescan. Measured live 2026-10-13 on a busy 2.4M-file home tree: ~22
+drop flags/min against ~20 min full scans, so every scan contained hundreds
+of drops and the next rescan was justified the moment one finished — an
+endless scan loop (5566 folder state transitions in 2h47m, zero replay
+engagements). The new commit arms replay at any completed full scan (the
+database is then complete as of the journal's current position, which is
+all arming requires); drop flags after that heal by replaying the journal
+gap instead of walking the tree. TestWatchReplayArmsAfterFullScan fails
+when the arming call is removed.
