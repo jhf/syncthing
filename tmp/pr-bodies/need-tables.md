@@ -106,3 +106,12 @@ scan, and connection dispatcher all parked on the same mutex, the holder
 being the GC goroutine itself. The fix (no re-lock; the caller holds it) is
 squashed into the main commit, with a regression test that deadlocks on
 timeout when the re-lock is restored.
+
+## Companion commit: tidy outside updateLock
+
+Same incident class as the self-deadlock above, one lock-holder later: the
+periodic GC service held `updateLock` across `tidy()` (ANALYZE on a
+multi-million-row folder DB runs many minutes), wedging every Update behind
+it for the duration — observed live on yarlung 2026-10-13 as a ~10 minute
+stall during the first GC pass. The final commit moves `tidy` (folder DBs
+and main DB) outside the lock; the GC steps proper keep the lock.

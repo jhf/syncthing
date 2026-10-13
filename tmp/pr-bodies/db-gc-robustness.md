@@ -46,3 +46,20 @@ in bursts. The final commit in this PR sets `busy_timeout(5000)` on both
 driver DSNs (the mattn cgo driver already has a nonzero default) with
 teeth-verified tests: removed, they fail with `database is locked (5)
 (SQLITE_BUSY)`.
+
+## Companion commit: GC lock scope (no minute-long updateLock holds)
+
+Live on dev.62 (2026-10-13), the first GC pass wedged a receiver for ~15
+minutes: the service held `updateLock` across `tidy()`, whose `ANALYZE` runs
+many minutes on a multi-million-row folder DB, while the retired-blocklist
+GC ran its whole queue in one transaction whose blocks DELETE full-scanned
+the largest table. Scans, Updates, and a connection dispatcher parked on the
+mutex, recreating the phantom-connection preconditions of the 2026-10-12
+incident (goroutine dumps preserved in the fork's ops docs). The final
+commit scopes the lock: `tidy` runs unlocked (folder DBs and main DB), the
+retired queue is processed in 10k-hash batches holding `updateLock` per
+batch only, and new schema 61 adds `blocks(blocklist_hash)` so the batched
+delete is index-driven instead of a full scan per batch. Teeth test:
+`TestGCRetiredBlocklistsReleasesLockBetweenBatches` interleaves a revival
+between batches via a hook; simulating the old single-transaction behavior
+fails it on both assertions.
