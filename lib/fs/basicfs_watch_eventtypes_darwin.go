@@ -11,7 +11,13 @@ package fs
 import "github.com/syncthing/notify"
 
 const (
-	subEventMask = notify.Create | notify.Remove | notify.Write | notify.Rename | notify.FSEventsInodeMetaMod | notify.FSEventsXattrMod
+	// The watchFailureMask flags are requested so that an incomplete
+	// journal (trimmed history, dropped events, ID wrap, root change) is
+	// surfaced to the watch loop instead of being silently dropped by the
+	// backend; they are intercepted before regular event translation and
+	// turn into a watch error plus a full scan, never into fs.Events.
+	subEventMask = notify.Create | notify.Remove | notify.Write | notify.Rename | notify.FSEventsInodeMetaMod | notify.FSEventsXattrMod |
+		notify.FSEventsMustScanSubDirs | notify.FSEventsUserDropped | notify.FSEventsKernelDropped | notify.FSEventsEventIdsWrapped | notify.FSEventsRootChanged
 	// FSEventsChangeOwner fires on permission change
 	permEventMask = notify.FSEventsChangeOwner
 	rmEventMask   = notify.Remove | notify.Rename
