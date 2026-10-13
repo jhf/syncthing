@@ -821,6 +821,13 @@ func (f *folder) armWatchReplayAfterFullScan(ctx context.Context) {
 	}
 	fs.SetWatchReplaySince(cur)
 	f.sl.InfoContext(ctx, "Armed filesystem journal replay after completed full scan", "eventID", cur)
+	// Switch from the live stream to poll-mode replay. The watch is
+	// restarted so the running live stream is replaced by the poll loop;
+	// the replay from the watermark just persisted covers the restart gap,
+	// so no events are lost.
+	fs.SetWatchPollOnly(watchPollInterval)
+	f.stopWatch()
+	f.startWatch(ctx)
 }
 
 const maxToRemove = 1000
@@ -1683,6 +1690,15 @@ const watchReplayWatermarkKVPrefix = "model/fseventsEventID/"
 // the remaining risk window.
 const maxWatchReplayAge = 12 * time.Hour
 
+// watchPollInterval is the poll-mode replay cadence: with replay armed,
+// watches replay the journal every watchPollInterval instead of holding a
+// live stream open. The journal is a queue, so falling behind just grows
+// the next replay's gap; a live stream under load instead overflows
+// fseventsd's delivery queue and heals by re-reading the journal, adding
+// more journaling load - a vicious cycle (measured 2026-10-13: fseventsd
+// at 110% CPU, 9.1 GB RSS, ~1000 events/s on the watched tree).
+const watchPollInterval = 5 * time.Second
+
 // tryArmWatchReplay attempts to resume filesystem watching from the
 // persisted journal position instead of running the initial full scan. When
 // it succeeds the initial scan timer is replaced by the regular rescan
@@ -1723,6 +1739,7 @@ func (f *folder) tryArmWatchReplay(ctx context.Context) bool {
 		return false
 	}
 	fs.SetWatchReplaySince(w)
+	fs.SetWatchPollOnly(watchPollInterval)
 	// Skip the pending initial scan and fall straight into the regular
 	// rescan schedule, keeping periodic scans as the safety net.
 	if !f.scanTimer.Stop() {
