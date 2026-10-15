@@ -203,15 +203,22 @@ func (f *folder) Serve(ctx context.Context) error {
 		return err // will get restarted by suture
 	}
 
-	f.btrfsCleanStart = f.consumeBtrfsBaselineMarker(ctx)
-
 	if f.FSWatcherEnabled && f.getHealthErrorAndLoadIgnores() == nil {
 		f.tryArmWatchReplay(ctx)
 		f.startWatch(ctx)
+		// The marker is consumed only when the replay can actually be
+		// attempted: consuming before the gate would eat the arming marker
+		// on a boot where a transient health error (e.g. ignores mid-sync)
+		// skips this block, silently condemning the next boot to a full
+		// scan. Observed on yarlung 2026-10-15: marker written 19:34,
+		// consumed 21:22:44, diff never attempted.
+		f.btrfsCleanStart = f.consumeBtrfsBaselineMarker(ctx)
 		// Btrfs replay arms AFTER the watch: the diff covers everything up
 		// to its snapshot, the watch everything after its start, and only
 		// this order makes the two overlap instead of leaving a gap.
 		f.tryArmBtrfsScanReplay(ctx)
+	} else if f.FSWatcherEnabled {
+		f.sl.InfoContext(ctx, "Watch and btrfs replay deferred: folder not healthy at start")
 	}
 
 	// If we're configured to not do version cleanup, or we don't have a
@@ -378,7 +385,20 @@ func (*folder) Jobs(_, _ int) ([]string, []string, int) {
 func (f *folder) Scan(subdirs []string) error {
 	<-f.initialScanFinished
 	return f.doInSync(func(ctx context.Context) error {
-		return f.scanSubdirs(ctx, subdirs)
+		err := f.scanSubdirs(ctx, subdirs)
+		if subdirs == nil {
+			// Full scan requested via REST: same visibility as the
+			// timer path (an aborted one blocks the shutdown pairing).
+			switch {
+			case err == nil:
+				f.sl.InfoContext(ctx, "Completed requested full scan")
+			case errors.Is(err, context.Canceled):
+				// Suppressed: context was canceled (e.g. by shutdown)
+			default:
+				f.sl.WarnContext(ctx, "Requested full scan did not complete", slogutil.Error(err))
+			}
+		}
+		return err
 	})
 }
 
@@ -1448,6 +1468,18 @@ func (f *folder) scanTimerFired(ctx context.Context) error {
 
 	select {
 	case <-f.initialScanFinished:
+		// Non-initial full scan: surface the outcome. An aborted scan
+		// leaves fullScanOK false, which blocks the btrfs shutdown
+		// pairing; without this line the only symptom is a silently
+		// skipped pairing at the next shutdown (yarlung 2026-10-15).
+		switch {
+		case err == nil:
+			f.sl.InfoContext(ctx, "Completed full scan")
+		case errors.Is(err, context.Canceled):
+			// Suppressed: context was canceled (e.g. by user)
+		default:
+			f.sl.WarnContext(ctx, "Full scan did not complete", slogutil.Error(err))
+		}
 	default:
 		switch {
 		case err == nil:

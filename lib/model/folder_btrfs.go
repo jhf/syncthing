@@ -115,11 +115,22 @@ func (f *folder) consumeBtrfsBaselineMarker(ctx context.Context) bool {
 // and the folder falls into the regular rescan schedule, keeping periodic
 // full scans as the safety net.
 func (f *folder) tryArmBtrfsScanReplay(ctx context.Context) bool {
+	select {
+	case <-f.initialScanFinished:
+		// Another fast path (FSEvents journal replay) already armed and
+		// closed this; a diff on top would redo work the replay covers.
+		return false
+	default:
+	}
 	if !f.btrfsCleanStart {
+		// Not an error - an unclean shutdown or a skipped pairing lands
+		// here - but a full 2M-file scan deserves a visible reason.
+		f.sl.InfoContext(ctx, "Btrfs scan replay not armed: no pairing marker from previous run, doing a full scan")
 		return false
 	}
 	if done, err := f.initialScanEverCompleted(); err != nil || !done {
 		// Without a recorded complete index the diff has nothing to build on.
+		f.sl.InfoContext(ctx, "Btrfs scan replay not armed: no completed initial scan on record, doing a full scan", slogutil.Error(err))
 		return false
 	}
 	ok, err := fs.BtrfsScanBaselineOK(ctx)
@@ -128,6 +139,7 @@ func (f *folder) tryArmBtrfsScanReplay(ctx context.Context) bool {
 		return false
 	}
 	if !ok {
+		f.sl.InfoContext(ctx, "Btrfs scan replay not armed: helper reports no baseline, doing a full scan")
 		return false
 	}
 	snap := btrfsSnapName("boot", f.folderID)
