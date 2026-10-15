@@ -1,3 +1,13 @@
+> **This is a maintained soft fork of [syncthing/syncthing](https://github.com/syncthing/syncthing).**
+> It tracks upstream and carries the patches listed in [PATCHES.md](PATCHES.md)
+> (FSEvents journal replay, poll-mode watching, BTRFS snapshot-diff replay,
+> chunked scanning, GC/need-list fixes; background in
+> [syncthing#10921](https://github.com/syncthing/syncthing/issues/10921)).
+> Maintenance model: [FORK.md](FORK.md). For everything else, refer to the
+> upstream project below.
+
+---
+
 [![Syncthing][14]][15]
 
 ---
