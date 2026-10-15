@@ -1,6 +1,7 @@
 #!/bin/bash
-# Root helper for syncthing btrfs scan replay (v2, primitive operations).
-# Called by jhf via sudo -n. Snapshot names are restricted to [a-z0-9.-].
+# Root helper for syncthing btrfs scan replay (v3, primitive operations).
+# Called via the socket adapter (one connection per request). Snapshot names
+# are restricted to [a-z0-9.-].
 #   snap <name>           - read-only snapshot of the subvolume as <name>
 #   diff <a> <b>          - print btrfs send --no-data -p <a> <b> | receive --dump
 #   setbaseline <name>    - make snapshot <name> the baseline (deletes old)
@@ -8,6 +9,12 @@
 #   status                - print baseline=<path|none>
 #   subvol                - print subvol=<mount path>
 #   subvols               - list nested subvolumes by path
+#
+# v3 (2026-10-15): diff/diff-baseline no longer pipe send directly into
+# receive --dump. On streams larger than the pipe buffer, receive exits
+# after the final command while the kernel still has a write in flight;
+# send then dies with SIGPIPE/EPIPE (pipeline exit 141/32) despite a
+# complete stream. The temp file decouples the two. Streams are ~2MB.
 set -euo pipefail
 SUB=/home
 DIR=/home/.snapshots/syncthing
@@ -16,6 +23,14 @@ BASE=$DIR/baseline
 mkdir -p "$DIR"
 
 name_ok() { [[ "${1:-}" =~ ^[a-z0-9.-]+$ ]] && [[ "$1" != "baseline" ]]; }
+
+dump_diff() { # dump_diff <parent> <child>
+    local stream
+    stream=$(mktemp)
+    trap "rm -f \"$stream\"" EXIT
+    btrfs send --no-data -p "$1" "$2" > "$stream"
+    btrfs receive --dump < "$stream"
+}
 
 case "${1:-}" in
   snap)
@@ -26,13 +41,13 @@ case "${1:-}" in
   diff)
     name_ok "${2:-}" && name_ok "${3:-}" || { echo "bad name" >&2; exit 2; }
     [ -d "$DIR/$2" ] && [ -d "$DIR/$3" ] || { echo "snapshot missing" >&2; exit 1; }
-    btrfs send --no-data -p "$DIR/$2" "$DIR/$3" | btrfs receive --dump
+    dump_diff "$DIR/$2" "$DIR/$3"
     ;;
   diff-baseline)
     name_ok "${2:-}" || { echo "bad name" >&2; exit 2; }
     [ -d "$BASE" ] || { echo "no baseline snapshot" >&2; exit 1; }
     [ -d "$DIR/$2" ] || { echo "snapshot missing" >&2; exit 1; }
-    btrfs send --no-data -p "$BASE" "$DIR/$2" | btrfs receive --dump
+    dump_diff "$BASE" "$DIR/$2"
     ;;
   setbaseline)
     name_ok "${2:-}" || { echo "bad name" >&2; exit 2; }
