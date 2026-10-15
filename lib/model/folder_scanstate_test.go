@@ -11,6 +11,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/watchaggregator"
 )
@@ -135,5 +138,81 @@ func TestServiceQueuedWatchSkipsNestedFullScan(t *testing.T) {
 		t.Fatal(err)
 	} else if !ok {
 		t.Error("targeted watch batch was not serviced during a running full scan")
+	}
+}
+
+// TestServiceQueuedWatchCountsRootBatches pins the consumer-side accounting
+// of full-folder watch batches (2026-11-24 Mac: a root batch dequeued
+// between the chunks of a subtree scan ran a full walk and sweep nested
+// inside it, unlogged, for 2 h 38 min). A root batch dequeued between
+// chunks while no full-tree scan runs is counted as "between-chunks"
+// (nested); during a full-tree scan the guard skips it and it is counted
+// as "between-chunks-skipped".
+func TestServiceQueuedWatchCountsRootBatches(t *testing.T) {
+	_, f := setupSendReceiveFolder(t)
+	ctx := t.Context()
+	f.watchChan = make(chan watchaggregator.Batch, 1)
+
+	nested := metricFolderRootWatchBatches.WithLabelValues(f.folderID, "between-chunks")
+	skipped := metricFolderRootWatchBatches.WithLabelValues(f.folderID, "between-chunks-skipped")
+	nested0, skipped0 := testutil.ToFloat64(nested), testutil.ToFloat64(skipped)
+
+	f.fullScanActive.Store(false)
+	f.watchChan <- watchaggregator.Batch{Paths: []string{"."}}
+	_, err := f.serviceQueuedWatch(ctx)
+	must(t, err)
+	if got := testutil.ToFloat64(nested) - nested0; got != 1 {
+		t.Errorf("nested root batches = %v, want 1", got)
+	}
+
+	f.fullScanActive.Store(true)
+	defer f.fullScanActive.Store(false)
+	f.watchChan <- watchaggregator.Batch{Paths: []string{"."}}
+	_, err = f.serviceQueuedWatch(ctx)
+	must(t, err)
+	if got := testutil.ToFloat64(skipped) - skipped0; got != 1 {
+		t.Errorf("skipped root batches = %v, want 1", got)
+	}
+
+	// A targeted batch is not a root batch.
+	f.watchChan <- watchaggregator.Batch{Paths: []string{"target"}}
+	_, err = f.serviceQueuedWatch(ctx)
+	must(t, err)
+	if got := testutil.ToFloat64(nested) - nested0; got != 1 {
+		t.Errorf("nested root batches after a targeted batch = %v, want still 1", got)
+	}
+}
+
+// TestFolderRegistersRootWatchBatchSeriesAtZero pins that a new folder
+// exposes its root-watch-batch series at zero, so their absence from
+// /metrics can no longer be mistaken for "no full-folder batch yet".
+func TestFolderRegistersRootWatchBatchSeriesAtZero(t *testing.T) {
+	_, f := setupSendReceiveFolder(t)
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	must(t, err)
+	found := make(map[string]bool)
+	for _, mf := range mfs {
+		if mf.GetName() != "syncthing_model_folder_root_watch_batches_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			var folder, where string
+			for _, lp := range m.GetLabel() {
+				switch lp.GetName() {
+				case "folder":
+					folder = lp.GetValue()
+				case "where":
+					where = lp.GetValue()
+				}
+			}
+			if folder == f.folderID {
+				found[where] = true
+			}
+		}
+	}
+	for _, where := range []string{"serve", "between-chunks", "between-chunks-skipped"} {
+		if !found[where] {
+			t.Errorf("root watch batch series where=%q not registered for folder %q", where, f.folderID)
+		}
 	}
 }

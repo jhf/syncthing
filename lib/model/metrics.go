@@ -96,4 +96,7 @@ func registerFolderMetrics(folderID string) {
 	metricFolderProcessedBytesTotal.WithLabelValues(folderID, metricSourceLocalOther)
 	metricFolderProcessedBytesTotal.WithLabelValues(folderID, metricSourceSkipped)
 	metricFolderConflictsTotal.WithLabelValues(folderID)
+	for _, where := range []string{"serve", "between-chunks", "between-chunks-skipped"} {
+		metricFolderRootWatchBatches.WithLabelValues(folderID, where)
+	}
 }

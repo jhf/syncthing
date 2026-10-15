@@ -32,6 +32,7 @@ func (f *BasicFilesystem) Watch(name string, ignore Matcher, ctx context.Context
 	if err != nil {
 		return nil, nil, err
 	}
+	RegisterWatchEscalationMetrics(f.URI())
 
 	outChan := make(chan Event)
 	backendChan := make(chan notify.EventInfo, backendBuffer)
@@ -71,15 +72,18 @@ func (f *BasicFilesystem) watchLoop(ctx context.Context, name string, roots []st
 	for {
 		// Detect channel overflow
 		if len(backendChan) == backendBuffer {
+			drained := 0
 		outer:
 			for {
 				select {
 				case <-backendChan:
+					drained++
 				default:
 					break outer
 				}
 			}
 			// When next scheduling a scan, do it on the entire folder as events have been lost.
+			NoteWatchRootEscalation(f.URI(), WatchEscalationBufferOverflow, "drained", drained, "buffer", backendBuffer)
 			outChan <- Event{Name: name, Type: NonRemove}
 			l.Debugln(f.Type(), f.URI(), "Watch: Event overflow, send \".\"")
 		}
@@ -96,6 +100,7 @@ func (f *BasicFilesystem) watchLoop(ctx context.Context, name string, roots []st
 			switch class := watchEventClassify(ev); class {
 			case watchEventOverflow:
 				l.Debugln(f.Type(), f.URI(), "Watch: Backend dropped events, sending", name)
+				NoteWatchRootEscalation(f.URI(), WatchEscalationBackendDropped, "path", ev.Path(), "event", ev.Event().String())
 				select {
 				case outChan <- Event{Name: name, Type: NonRemove}:
 				case <-ctx.Done():

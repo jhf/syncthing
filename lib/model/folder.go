@@ -214,15 +214,30 @@ func (f *folder) Serve(ctx context.Context) error {
 		return err // will get restarted by suture
 	}
 
-	f.btrfsCleanStart = f.consumeBtrfsBaselineMarker(ctx)
-
 	if f.FSWatcherEnabled && f.getHealthErrorAndLoadIgnores() == nil {
 		f.tryArmWatchReplay(ctx)
 		f.startWatch(ctx)
-		// Btrfs replay arms AFTER the watch: the diff covers everything up
-		// to its snapshot, the watch everything after its start, and only
-		// this order makes the two overlap instead of leaving a gap.
-		f.tryArmBtrfsScanReplay(ctx)
+		// When the FSEvents journal replay armed, this boot is covered and
+		// the btrfs probe below can only produce "not available" noise on
+		// non-btrfs systems (observed on every Mac boot); the diff replay
+		// itself early-returns on the closed initialScanFinished anyway.
+		select {
+		case <-f.initialScanFinished:
+		default:
+			// The marker is consumed only when the replay can actually be
+			// attempted: consuming before the gate would eat the arming marker
+			// on a boot where a transient health error (e.g. ignores mid-sync)
+			// skips this block, silently condemning the next boot to a full
+			// scan. Observed on yarlung 2026-10-15: marker written 19:34,
+			// consumed 21:22:44, diff never attempted.
+			f.btrfsCleanStart = f.consumeBtrfsBaselineMarker(ctx)
+			// Btrfs replay arms AFTER the watch: the diff covers everything up
+			// to its snapshot, the watch everything after its start, and only
+			// this order makes the two overlap instead of leaving a gap.
+			f.tryArmBtrfsScanReplay(ctx)
+		}
+	} else if f.FSWatcherEnabled {
+		f.sl.InfoContext(ctx, "Watch and btrfs replay deferred: folder not healthy at start")
 	}
 
 	// If we're configured to not do version cleanup, or we don't have a
@@ -315,6 +330,9 @@ func (f *folder) Serve(ctx context.Context) error {
 
 		case fsEvents := <-f.watchChan:
 			f.sl.DebugContext(ctx, "Scan due to watcher")
+			if isRootWatchBatch(fsEvents.Paths) {
+				f.noteRootWatchBatch(ctx, "serve", false)
+			}
 			err = f.scanSubdirs(ctx, fsEvents.Paths)
 			if err == nil {
 				f.persistWatchReplayWatermark(fsEvents.MaxEventID)
@@ -399,7 +417,20 @@ func (*folder) Jobs(_, _ int) ([]string, []string, int) {
 func (f *folder) Scan(subdirs []string) error {
 	<-f.initialScanFinished
 	return f.doInSync(func(ctx context.Context) error {
-		return f.scanSubdirs(ctx, subdirs)
+		err := f.scanSubdirs(ctx, subdirs)
+		if subdirs == nil {
+			// Full scan requested via REST: same visibility as the
+			// timer path (an aborted one blocks the shutdown pairing).
+			switch {
+			case err == nil:
+				f.sl.InfoContext(ctx, "Completed requested full scan")
+			case errors.Is(err, context.Canceled):
+				// Suppressed: context was canceled (e.g. by shutdown)
+			default:
+				f.sl.WarnContext(ctx, "Requested full scan did not complete", slogutil.Error(err))
+			}
+		}
+		return err
 	})
 }
 
@@ -622,6 +653,9 @@ func (f *folder) serviceQueuedWatch(ctx context.Context) (bool, error) {
 	}
 	select {
 	case fsEvents := <-f.watchChan:
+		if isRootWatchBatch(fsEvents.Paths) {
+			f.noteRootWatchBatch(ctx, "between-chunks", f.fullScanActive.Load() && len(fsEvents.Paths) == 1)
+		}
 		// A full-folder escalation serviced while a full-tree scan is
 		// already running would walk the whole tree a second time inside
 		// the first scan's chunk budget - the doubling was measured at
@@ -739,8 +773,15 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 	// Schedule a pull after scanning, but only if we actually detected any
 	// changes.
 	changes := 0
+	scanStart := time.Now()
+	nested := f.watchScanDepth > 0
+	fullTree := subDirs == nil || isRootWatchBatch(subDirs)
+	nSubdirs, firstSubdir := len(subDirs), firstOrEmpty(subDirs)
 	defer func() {
 		f.sl.DebugContext(ctx, "Finished scanning", slog.Int("changes", changes))
+		if d := time.Since(scanStart); d >= slowScanLogThreshold {
+			f.sl.InfoContext(ctx, "Slow scan finished", slog.Duration("duration", d), slog.Bool("fullTree", fullTree), slog.Bool("nested", nested), slog.Int("subdirs", nSubdirs), slog.String("firstSubdir", firstSubdir), slog.Int("changes", changes))
+		}
 		if changes > 0 {
 			f.SchedulePull()
 		}
@@ -1513,6 +1554,18 @@ func (f *folder) scanTimerFired(ctx context.Context) error {
 
 	select {
 	case <-f.initialScanFinished:
+		// Non-initial full scan: surface the outcome. An aborted scan
+		// leaves fullScanOK false, which blocks the btrfs shutdown
+		// pairing; without this line the only symptom is a silently
+		// skipped pairing at the next shutdown (yarlung 2026-10-15).
+		switch {
+		case err == nil:
+			f.sl.InfoContext(ctx, "Completed full scan")
+		case errors.Is(err, context.Canceled):
+			// Suppressed: context was canceled (e.g. by user)
+		default:
+			f.sl.WarnContext(ctx, "Full scan did not complete", slogutil.Error(err))
+		}
 	default:
 		switch {
 		case err == nil:
