@@ -66,6 +66,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS files_device_name ON files (device_idx, name_i
 -- We want to be able to look up & iterate files based on blocks hash
 CREATE INDEX IF NOT EXISTS files_blocklist_hash_only ON files (blocklist_hash, device_idx) WHERE blocklist_hash IS NOT NULL
 ;
+-- We want to iterate the files we need (the local pull queue) without
+-- scanning every file in the folder. Adopted from upstream issue
+-- syncthing#10902 (fix by MahdiBM, unmerged at adoption): file iteration
+-- median 40.5 s -> 1.3 s on a large tree; partial indexes are nearly free
+-- to maintain because only needed files ever enter them.
+CREATE INDEX IF NOT EXISTS files_needed ON files (local_flags) WHERE local_flags & {{.FlagLocalNeeded}} != 0
+;
 -- We need to look by name_idx or version_idx for garbage collection.
 -- This will fail pre-migration for v4 schemas, which is fine.
 -- syncthing:ignore-failure
