@@ -101,7 +101,10 @@ func TestBusyTimeoutIsSet(t *testing.T) {
 	if err := db.QueryRow(`PRAGMA busy_timeout`).Scan(&timeout); err != nil {
 		t.Fatal(err)
 	}
-	if timeout <= 0 {
-		t.Fatalf("busy_timeout is %d, want a positive timeout", timeout)
+	// Pinned at 30 s: a scan's chunk commits on slow storage hold the write
+	// lock well past the previous 5 s (yarlung 2026-10-14 connection-flap
+	// loop). A regression below this reopens the connection-killing race.
+	if timeout < 30000 {
+		t.Fatalf("busy_timeout is %d, want at least 30000", timeout)
 	}
 }
