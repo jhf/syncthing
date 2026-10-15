@@ -71,9 +71,9 @@ secret may ever be in the repo.
 Tracked (besides upstream content):
 
 - `PATCHES.md`, `FORK.md`, the README header — the fork's identity.
-- `ops/custom-syncthing/btrfs/` — the yarlung BTRFS helper, socket adapter,
-  and systemd units: deployment-critical, rebuildable from source, no
-  credentials.
+- `ops/custom-syncthing/btrfs/` — the remote receiver's BTRFS helper, socket
+  adapter, and systemd units: deployment-critical, rebuildable from source,
+  no credentials.
 - `tmp/CUSTOM-SERVE.md`, `tmp/btrfs-scan-replay.md`,
   `tmp/syncpreparing-linger.md` — design/incident documents referenced by
   path from other docs. `tmp/` is otherwise ignored (allowlist in

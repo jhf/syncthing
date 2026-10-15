@@ -41,16 +41,16 @@ everything in the branches before it plus its own piece, so
 ## Measured results
 
 All numbers from this fork's own logs and instruments, on the production
-workload: Mac Studio home tree (2.38M files, 394k directories, 262 GiB)
-mirroring to yarlung (Ubuntu, BTRFS RAID1 on HDD) over WAN. "Before" is
-stock upstream v2.1.x on the same machines.
+workload: the local Mac's home tree (2.38M files, 394k directories,
+262 GiB) mirroring to the remote Linux receiver (Ubuntu, BTRFS RAID1 on
+HDD) over WAN. "Before" is stock upstream v2.1.x on the same machines.
 
 | What | Before | After | Patch(es) |
 |------|--------|-------|-----------|
 | Boot after 5.8 h offline (Mac) | ~40 min full scan | 6 s journal replay (4.17M events) | 05, 14 |
 | Scan of the full tree (Mac) | baseline | −40 % wall time | 01 |
 | Watcher cost under event storms | fseventsd 104–110 % CPU, 9–19 GB RSS, drop-flag heals adding more load | 0.2–3 % CPU, 14–16 MB RSS; 11,877+ poll cycles, zero drops | 08, 14 |
-| First scan on yarlung after reboot | ~14–45 min full walk of HDD RAID | snapshot diff, seconds (when a baseline is paired) | 06, 07, 13, 16 |
+| First scan on the remote receiver after reboot | ~14–45 min full walk of HDD RAID | snapshot diff, seconds (when a baseline is paired) | 06, 07, 13, 16 |
 | End-to-end change latency | watch-driven when the watcher survived; under storms the watch dropped events and healed with scans | 10–23 s stable under storm load, deletes included | 04, 08, 14 |
 | Need-list queries (out-of-sync view, pull queue) | full-table scans per query (upstream reporter: 40.5 s median file iteration on a large tree) | maintained need tables; remaining iteration via `files_needed` partial index (reporter: 1.3 s) | 03, 10, 17 |
 | GC on 45.5M-row blocks table | single 5-min+ transaction, interrupted, flag lost | per-chunk commits, interrupt-safe, no lock held across | 02, 11 |
