@@ -16,6 +16,43 @@
 > Maintenance model: [FORK.md](FORK.md). For everything else, refer to the
 > upstream project below.
 
+## The approach
+
+We don't hammer on one slow function. For each slowdown we step back and
+ask: *for this workload to be fast, what must never happen at all?* Then we
+find where it happens and remove the pattern, not the symptom:
+
+- **Turn O(tree) into O(changes).** A 2.38M-file tree must never be
+  re-walked to learn what changed. The FSEvents journal and BTRFS snapshots
+  already know; replay them (patches 05–07, 12–14).
+- **Poll perfect queues instead of holding live streams.** The kernel
+  journals every event for every open stream; on a busy tree that burns a
+  core per subscriber. Poll the journal every 5 s instead, and size the
+  pipeline for storms, not averages (patches 08, 14).
+- **No lock held longer than a chunk.** Scans and GC commit per chunk and
+  service pulls and watch events between chunks, so a 45-minute operation
+  never starves the rest of the system (patches 02, 04, 11).
+- **A transient resource error must never kill a long-lived connection.**
+  SQLITE_BUSY means "wait", not "reconnect" (patches 11, 15).
+- **Precompute the questions the UI and the puller ask every few seconds.**
+  Incrementally maintained need tables and indexes instead of
+  per-query full-table scans (patches 03, 10, 17).
+- **Measure, then claim.** Every line below is from this repo's logs, not
+  estimates.
+
+## Measured results (Mac Studio ↔ Linux/BTRFS, 2.38M files / 262 GiB)
+
+- Boot after 5.8 h offline: **~40 min full scan → 6 s** journal replay
+  (4.17M events).
+- Watcher cost: fseventsd **104–110 % CPU / 9–19 GB RSS → 0.2–3 % /
+  14–16 MB**; 11,877+ poll cycles, zero drop flags.
+- Change visible on the other side: **10–23 s** end to end, deletes included.
+- A database that previously killed the device connection every ~20 s under
+  scan load (172 SQLITE_BUSY errors, index frozen): **zero** lock errors
+  since the fix.
+
+Full table with per-patch numbers: [PATCHES.md](PATCHES.md#measured-results).
+
 ---
 
 [![Syncthing][14]][15]
