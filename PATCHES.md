@@ -38,19 +38,28 @@ everything in the branches before it plus its own piece, so
   `go.mod`): boot replay primitives, lossy-replay verdicts, IgnoreSelf,
   `SetPollOnly` poll mode. That repo has its own `PATCHES.md`.
 
-## Headline results (measured on this fork, Oct 2026)
+## Measured results
 
-- 2.4M-file home folder on a Mac Studio: boot replay of a 4.17M-event /
-  5.8-hour journal gap completes in 6 s. Stock syncthing took ~40 minutes of
-  full scan for the same gap.
-- Poll mode: fseventsd goes from a permanent real-time subscriber
-  (104 % CPU / 19.3 GB RSS under event storms) to an occasional batch reader
-  (~0.2–3 % CPU, 14–16 MB RSS). 11,877+ poll cycles with zero drop flags.
-- Sync latency with 5 s polling: 10–23 s end to end (Mac↔Linux), deletes
-  included.
-- yarlung (Ubuntu 26.04, BTRFS RAID1 on 2×3TB HDD): first full chunked scan
-  completed; subsequent boots and runtime scans use snapshot-diff replay.
-- Full data: https://github.com/syncthing/syncthing/issues/10921
+All numbers from this fork's own logs and instruments, on the production
+workload: Mac Studio home tree (2.38M files, 394k directories, 262 GiB)
+mirroring to yarlung (Ubuntu, BTRFS RAID1 on HDD) over WAN. "Before" is
+stock upstream v2.1.x on the same machines.
+
+| What | Before | After | Patch(es) |
+|------|--------|-------|-----------|
+| Boot after 5.8 h offline (Mac) | ~40 min full scan | 6 s journal replay (4.17M events) | 05, 14 |
+| Scan of the full tree (Mac) | baseline | −40 % wall time | 01 |
+| Watcher cost under event storms | fseventsd 104–110 % CPU, 9–19 GB RSS, drop-flag heals adding more load | 0.2–3 % CPU, 14–16 MB RSS; 11,877+ poll cycles, zero drops | 08, 14 |
+| First scan on yarlung after reboot | ~14–45 min full walk of HDD RAID | snapshot diff, seconds (when a baseline is paired) | 06, 07, 13, 16 |
+| End-to-end change latency | watch-driven when the watcher survived; under storms the watch dropped events and healed with scans | 10–23 s stable under storm load, deletes included | 04, 08, 14 |
+| Need-list queries (out-of-sync view, pull queue) | full-table scans per query (upstream reporter: 40.5 s median file iteration on a large tree) | maintained need tables; remaining iteration via `files_needed` partial index (reporter: 1.3 s) | 03, 10, 17 |
+| GC on 45.5M-row blocks table | single 5-min+ transaction, interrupted, flag lost | per-chunk commits, interrupt-safe, no lock held across | 02, 11 |
+| Index updates racing a writer | SQLITE_BUSY killed the device connection (~20 s flap loop, 172 errors in one session, index frozen) | 30 s busy_timeout + bounded retry; zero lock errors since dev.92 | 11, 15 |
+| GUI event stream in a background tab | throttled timers stall the UI | fetch-based poll loop | 09 |
+
+Verification status notes live per patch in the table above and in commit
+messages; the pre-2026-10-15 numbers are reproduced and extended in
+https://github.com/syncthing/syncthing/issues/10921.
 
 ## Not included in the clean chain
 
