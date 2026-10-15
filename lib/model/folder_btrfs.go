@@ -320,17 +320,29 @@ func (f *folder) refreshBtrfsBaseline(ctx context.Context) {
 	}
 }
 
+// watchFlushTimeout bounds how long requestWatchFlush waits for the
+// aggregator to accept the flush before concluding it is dead.
+var watchFlushTimeout = 15 * time.Second
+
 // requestWatchFlush asks the aggregator to emit pending batches immediately.
+// The send must wait: the aggregator can be alive but momentarily busy
+// (blocked handing a batch to the scanner inside actOnTimer), and a
+// non-blocking send with a default branch then aborts a perfectly valid
+// pairing — observed on yarlung 2026-10-15, "watch flush unavailable,
+// watch not running" at the runtime pairing while the watcher had been up
+// for 45 minutes. The timeout distinguishes busy from dead.
 func (f *folder) requestWatchFlush(ctx context.Context) (chan struct{}, bool) {
 	ack := make(chan struct{})
+	timer := time.NewTimer(watchFlushTimeout)
+	defer timer.Stop()
 	select {
 	case f.watchFlush <- ack:
 		return ack, true
-	case <-ctx.Done():
-		return nil, false
-	default:
+	case <-timer.C:
 		// Aggregator not running (watch failed or was never started):
 		// no clean pairing is possible.
+		return nil, false
+	case <-ctx.Done():
 		return nil, false
 	}
 }
