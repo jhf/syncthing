@@ -435,7 +435,7 @@ func (s *indexHandler) receive(fs []protocol.FileInfo, update bool, op string, p
 		})
 	}
 
-	if err := s.sdb.Update(s.folder, deviceID, fs); err != nil {
+	if err := s.updateWithLockRetry(deviceID, fs); err != nil {
 		return err
 	}
 	seq, err := s.sdb.GetDeviceSequence(s.folder, deviceID)
@@ -463,6 +463,49 @@ func (s *indexHandler) receive(fs []protocol.FileInfo, update bool, op string, p
 	})
 
 	return nil
+}
+
+// indexLockBackoff is the retry schedule for an index-update batch that hit
+// SQLite lock contention (SQLITE_BUSY past busy_timeout). An error here is
+// connection-fatal upstream — the protocol layer kills the device connection
+// on any index-update error — yet contention is transient by definition:
+// the competing writer (background need-tracking build, chunked GC, scan
+// chunk commits on slow storage) commits and moves on. Retrying rides out
+// the contention; observed live on yarlung 2026-10-14, where a fallback
+// full scan's chunk commits on HDD held the write lock in multi-second
+// bursts and every index batch killed the connection in a ~20 s flap loop
+// ("update: deviceidxlocked: database is locked (5) (SQLITE_BUSY)"). The
+// backoff is on top of busy_timeout, which each attempt already waits out.
+// Exhausting the schedule returns the last error, preserving upstream
+// behavior for a genuinely stuck lock.
+var indexLockBackoff = []time.Duration{
+	250 * time.Millisecond,
+	500 * time.Millisecond,
+	time.Second,
+	2 * time.Second,
+	4 * time.Second,
+	8 * time.Second,
+	16 * time.Second,
+}
+
+// updateWithLockRetry applies the batch, retrying while the database
+// reports transient lock contention. Blocking the connection reader during
+// the retries is deliberate: it stalls subsequent batches from this peer
+// instead of discarding them via reconnect.
+func (s *indexHandler) updateWithLockRetry(deviceID protocol.DeviceID, fs []protocol.FileInfo) error {
+	err := s.sdb.Update(s.folder, deviceID, fs)
+	for attempt := 0; err != nil && db.IsLockContention(err) && attempt < len(indexLockBackoff); attempt++ {
+		if attempt == 0 {
+			slog.Info("Index update hit database lock contention, retrying",
+				slog.String("folder", s.folder),
+				slog.String("device", deviceID.Short().String()),
+				slog.Int("files", len(fs)),
+			)
+		}
+		time.Sleep(indexLockBackoff[attempt])
+		err = s.sdb.Update(s.folder, deviceID, fs)
+	}
+	return err
 }
 
 func (s *indexHandler) logSequenceAnomaly(msg string, extra map[string]any) {
