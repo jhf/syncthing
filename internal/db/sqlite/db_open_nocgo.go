@@ -18,7 +18,7 @@ const (
 	// busy_timeout: see db_open_cgo.go. Two writers on one file are
 	// legitimate; instant SQLITE_BUSY is connection-fatal at the protocol
 	// layer.
-	commonOptions = "_pragma=foreign_keys(1)&_pragma=recursive_triggers(1)&_pragma=synchronous(1)&_txlock=immediate&_pragma=busy_timeout(5000)"
+	commonOptions = "_pragma=foreign_keys(1)&_pragma=recursive_triggers(1)&_pragma=synchronous(1)&_txlock=immediate&_pragma=busy_timeout(30000)"
 )
 
 func init() {
