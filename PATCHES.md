@@ -28,6 +28,7 @@ everything in the branches before it plus its own piece, so
 | 12 | `patch/12-fsevents-rearm-after-scan` | Arm journal replay after a completed full scan too | 1 |
 | 13 | `patch/13-btrfs-canary-barrier` | Pair BTRFS baseline with index via canary barrier; runtime baseline refresh; canaries pass the watch ignore filter | 2 |
 | 14 | `patch/14-fsevents-poll-mode` | Poll-mode journal replay replaces the live FSEvents stream (5s cadence); IgnoreSelf via notify fork | 2 |
+| 15 | `patch/15-db-busy-resilience` | Index updates retry on SQLite lock contention (bounded backoff) instead of killing the device connection; `busy_timeout` 5s → 30s | 1 |
 
 ## Depends on
 
