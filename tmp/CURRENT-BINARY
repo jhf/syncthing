@@ -7,14 +7,14 @@
 # Do not start Syncthing.app while this custom serve is running.
 
 KIND=custom
-BINARY=/Users/jhf/Projects/syncthing/custom-syncthing-darwin-arm64.dev87
-VERSION=v2.1.7-dev.87.g612a598e-btrfs-scan-replay
-BRANCH=feature/btrfs-scan-replay (dev.87 = dev.83 + 612a598e3 barrier canary passes watch ignore filter + notify 9a7d1df: replay-wide drop deferral, 1s FSEvents stream latency)
-COMMIT=0adcc5c4
+BINARY=/Users/jhf/Projects/syncthing/custom-syncthing-darwin-arm64.dev89
+VERSION=v2.1.7-dev.89.gf102cc94-btrfs-scan-replay
+BRANCH=feature/btrfs-scan-replay (dev.89 = dev.87 + f102cc943 poll-mode journal replay, 5s cadence, replaces live FSEvents stream)
+COMMIT=f102cc943
 SOURCE=/Users/jhf/Projects/syncthing
 
 # Artifact identity (2026-10-13):
-#   artifact  custom-syncthing-darwin-arm64.dev87
+#   artifact  custom-syncthing-darwin-arm64.dev89
 #   sha256    561da693ef81c63a4c74bb4b1733ea125104085885dd2e78a87fef47c5daa88a
 #   commit    0c6a4799a feature/btrfs-scan-replay (clean tree at build)
 #   cgo       yes (25 FSEvent symbols; plain `go run build.go`, no CGO_ENABLED=0)
