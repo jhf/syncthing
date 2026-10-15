@@ -25,6 +25,14 @@ import (
 // flush requests report unavailable and the barrier relies on fed batches).
 func barrierTestFolder(t *testing.T) (*testModel, *folder, string) {
 	t.Helper()
+	// The barrier's flush-then-listen starts with a flush request; with no
+	// aggregator (tests drive watchChan directly) that request waits out
+	// watchFlushTimeout before the barrier starts listening. Shrink it or
+	// every barrier test burns the full timeout before its first batch.
+	old := watchFlushTimeout
+	t.Cleanup(func() { watchFlushTimeout = old })
+	watchFlushTimeout = 10 * time.Millisecond
+
 	w, fcfg := newDefaultCfgWrapper(t)
 	dir := t.TempDir()
 	fcfg.FilesystemType = config.FilesystemTypeBasic
