@@ -1,4 +1,14 @@
 > **This is a maintained soft fork of [syncthing/syncthing](https://github.com/syncthing/syncthing).**
+>
+> **North Star:** Syncthing, fast on one real workload — a Mac whose home
+> tree (measured: 2.38M files, 394k directories, 262 GiB) mirrors to a
+> remote Linux machine on BTRFS over WAN. Boot to ready in seconds instead
+> of a ~40-minute full scan; a change on one side visible on the other in
+> ~22 s; and the watcher must not melt the machine it watches. Everything
+> this fork carries serves that pair of machines; that is the scope we
+> maintain and test against. (Windows, other platforms, and general-purpose
+> hardening are upstream's domain — maybe one day, not now.)
+>
 > It tracks upstream and carries the patches listed in [PATCHES.md](PATCHES.md)
 > (FSEvents journal replay, poll-mode watching, BTRFS snapshot-diff replay,
 > chunked scanning, GC/need-list fixes; background in
