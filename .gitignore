@@ -18,3 +18,15 @@ deb
 /repos
 /proto/scripts/protoc-gen-gosyncthing
 /compat.json
+
+# --- Fork: machine-local ops state (see FORK.md "Tracked vs machine-local")
+# Dev-build binaries live at the repo root and are machine-local artifacts.
+/custom-syncthing-*
+# tmp/ holds logs, the CURRENT-BINARY pointer, launch scripts, and incident
+# evidence — all machine-local. Only the listed design/ops docs are tracked;
+# adding anything else from tmp/ requires git add -f, by design, so that no
+# log or script with credentials ever rides along accidentally.
+tmp/*
+!tmp/CUSTOM-SERVE.md
+!tmp/btrfs-scan-replay.md
+!tmp/syncpreparing-linger.md
