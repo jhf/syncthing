@@ -31,7 +31,7 @@ everything in the branches before it plus its own piece, so
 | 15 | `patch/15-db-busy-resilience` | Index updates retry on SQLite lock contention (bounded backoff) instead of killing the device connection; `busy_timeout` 5s → 30s | 1 |
 | 16 | `patch/16-watch-flush-wait` | Watch flush request waits (15s) for a busy aggregator instead of aborting a valid baseline pairing | 1 |
 | 17 | `patch/17-files-needed-index` | `files_needed` partial index: local pull-queue query stops scanning every file (adopted from unmerged upstream fix, syncthing#10902) | 1 |
-| 18 | `patch/18-scan-observability` | Full-scan outcomes and btrfs replay bail reasons are logged; pairing marker consumed only when the replay can actually be attempted (found by dogfooding the fast path) | 1 |
+| 18 | `patch/18-scan-observability` | Full-scan outcomes and btrfs replay bail reasons are logged; pairing marker consumed only when the replay can actually be attempted; btrfs probe skipped when the journal replay already armed (found by dogfooding the fast path) | 1 |
 | 19 | `patch/19-btrfs-repair-after-replay` | Re-arm the baseline pairing after a boot diff replay on a Serve-loop retry timer — the shutdown pairing races the process-exit deadline, and an inline boot pairing fails while the watch aggregator is still in its setup pass; both found by dogfooding | 1 |
 
 ## Depends on
