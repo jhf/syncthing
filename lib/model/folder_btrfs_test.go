@@ -182,3 +182,46 @@ func TestRefreshBtrfsBaselineGates(t *testing.T) {
 		t.Fatal("marker written though pairing never ran")
 	}
 }
+
+// The post-replay re-arm must keep retrying while the aggregator is still
+// in its setup pass, then give up cleanly at the bound: pending clears,
+// and no refresh timestamp or marker is recorded without a successful
+// pairing. Observed on yarlung 2026-10-16: patch/19's original inline
+// pairing failed "watch not running" 15s after boot, leaving the next
+// restart uncovered (rescanIntervalS=86400, so the full-scan refresh was
+// a day away).
+//
+// Teeth: with the inline pairing this handler does not exist; with a
+// handler that never gives up the bound assertion fails.
+func TestBtrfsRearmRetriesThenGivesUp(t *testing.T) {
+	old := watchFlushTimeout
+	t.Cleanup(func() { watchFlushTimeout = old })
+	watchFlushTimeout = time.Millisecond
+
+	_, f, _ := barrierTestFolder(t)
+	ctx := t.Context()
+
+	// Simulate the replay path arming the retry.
+	f.btrfsRearmPending = true
+	f.btrfsRearmTries = 0
+
+	// No aggregator (watchFlush unset): every pairing attempt fails.
+	for i := 1; i <= btrfsRearmMaxTries; i++ {
+		f.btrfsRearmTimerFired(ctx)
+		if i < btrfsRearmMaxTries && !f.btrfsRearmPending {
+			t.Fatalf("retry %d: pending cleared before the bound", i)
+		}
+	}
+	if f.btrfsRearmPending {
+		t.Fatal("pending still set after btrfsRearmMaxTries failures")
+	}
+	if f.btrfsRearmTries != btrfsRearmMaxTries {
+		t.Fatalf("tries = %d, want %d", f.btrfsRearmTries, btrfsRearmMaxTries)
+	}
+	if !f.lastBtrfsRefresh.IsZero() {
+		t.Fatal("refresh timestamp recorded without a successful pairing")
+	}
+	if _, err := f.db.GetKV(btrfsBaselineKVPrefix + f.folderID); err == nil {
+		t.Fatal("marker written without a successful pairing")
+	}
+}
