@@ -1,0 +1,119 @@
+name: Fork test build
+
+# Manually triggered builds of the fork's main branch, published as a GitHub
+# PRE-RELEASE so testers can download binaries and report what works. This is
+# deliberately separate from upstream syncthing/syncthing releases: the tag is
+# prefixed (fork-dev.NN), the release is marked prerelease (never shown as
+# "latest"), and the binaries are built with -no-upgrade so they never
+# auto-update into an official Syncthing release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dev:
+        description: "Fork dev number, e.g. 95 (tag will be fork-dev.95)"
+        required: true
+        type: string
+      notes:
+        description: "What is new in this test build (markdown)"
+        required: false
+        type: string
+
+permissions:
+  contents: write # to create the prerelease
+
+env:
+  CGO_ENABLED: "0"
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, target: linux-amd64 }
+          - { goos: linux, goarch: arm64, target: linux-arm64 }
+          - { goos: darwin, goarch: amd64, target: macos-amd64 }
+          - { goos: darwin, goarch: arm64, target: macos-arm64 }
+          - { goos: windows, goarch: amd64, target: windows-amd64 }
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # git describe needs history for version stamping
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: |
+          go run build.go -no-upgrade -goos ${{ matrix.goos }} -goarch ${{ matrix.goarch }} \
+            -build-out "syncthing${{ matrix.goos == 'windows' && '.exe' || '' }}" build
+
+      - name: Package
+        run: |
+          set -e
+          name="syncthing-fork-${{ matrix.target }}-dev.${{ inputs.dev }}"
+          mkdir "$name"
+          cp "syncthing${{ matrix.goos == 'windows' && '.exe' || '' }}" "$name/"
+          cp README.md PATCHES.md "$name/"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip -qr "$name.zip" "$name"
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: syncthing-fork-${{ matrix.target }}-dev.${{ inputs.dev }}
+          path: syncthing-fork-${{ matrix.target }}-dev.${{ inputs.dev }}.*
+          if-no-files-found: error
+
+  release:
+    name: Publish prerelease fork-dev.${{ inputs.dev }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download@v4
+        with:
+          pattern: syncthing-fork-*-dev.${{ inputs.dev }}
+          merge-multiple: true
+
+      - name: Release notes
+        run: |
+          cat > notes.md <<EOF
+          ## Unofficial test build — jhf/syncthing fork, dev.${{ inputs.dev }}
+
+          **This is not an official Syncthing release.** It is a test build of the
+          fork at https://github.com/jhf/syncthing for people who want to try the
+          fork's patches and report what works and what does not. Do not use it as
+          your only copy of anything, and do not expect upgrade compatibility with
+          official releases (auto-upgrade is compiled out).
+
+          Base: upstream syncthing/syncthing main plus the patch chain described in
+          [PATCHES.md](https://github.com/jhf/syncthing/blob/main/PATCHES.md) of the
+          tagged commit. Known-issue mapping lives in
+          [ISSUES.md](https://github.com/jhf/syncthing/blob/main/ISSUES.md).
+
+          ${{ inputs.notes }}
+
+          **Feedback wanted:** open an issue at https://github.com/jhf/syncthing/issues
+          with the build tag (fork-dev.${{ inputs.dev }}), your platform, and what
+          happened. Startup time, memory over a day, and any connection churn are the
+          numbers we care most about.
+          EOF
+
+      - name: Create prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "fork-dev.${{ inputs.dev }}" \
+            --title "Fork test build dev.${{ inputs.dev }} (unofficial)" \
+            --notes-file notes.md \
+            --prerelease \
+            syncthing-fork-*
