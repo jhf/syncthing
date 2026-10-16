@@ -86,8 +86,17 @@ https://github.com/syncthing/syncthing/issues/10798
 Multi-version connection loop; error mutates over time, currently "handling index: no such
 folder". Index-handling kills the connection — the exact failure class patch/15 armors
 against.
-**us: mitigation carried** (patch/15 retries lock contention instead of dropping the
-connection). Watching for upstream's root cause.
+**Root cause demonstrated 2026-10-15 (VoDmAl, goroutine profiles attached):** on the peer
+with a large folder, `dispatcherLoop → handleIndexUpdate → indexHandler.receive →
+folderDB.Update` waits for the folder DB mutex while
+`garbageCollectBlocklistsAndBlocksLocked ← (*Service).periodic` holds it for 5-12 minutes.
+Each new connection is "additional", the old index handler is abandoned, and the far side
+sees "folder is not running" — the churn loop. Waves follow the 8h DBMaintenanceInterval.
+That is precisely the hazard patch/11 removes: our GC commits and releases the folder lock
+per chunk, so index updates are never wedged behind it.
+**us: likely fixed** (patch/11 GC lock scope + chunked commit, patch/15 lock-contention
+retry). Remaining sub-issue from the same analysis: a connection whose socket is gone is
+kept as the device's primary — see #10150/#9337.
 https://github.com/syncthing/syncthing/issues/10372
 
 ### #10264 — SQLite database doesn't scale — OPEN
