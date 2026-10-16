@@ -18,8 +18,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/internal/slogutil"
+	"github.com/syncthing/syncthing/lib/fs"
 )
 
 // This file implements the Linux/btrfs counterpart of the FSEvents journal
@@ -56,6 +56,17 @@ const maxBtrfsReplayPaths = 200_000
 // baseline's pinned blocks, so the limit exists only to guard against
 // pathologically frequent full scans.
 const btrfsBaselineMinInterval = 10 * time.Minute
+
+// btrfsRearmInterval paces the post-replay re-arm retries, and
+// btrfsRearmMaxTries bounds them. The pairing needs the watch aggregator
+// accepting flushes, which during its setup pass on a large tree it does
+// not (observed on yarlung 2026-10-16: post-replay pairing failed "watch
+// not running" 15s after boot; 2.3M files, rescanIntervalS=86400, so the
+// next full-scan refresh would have been a day away). After the retries
+// run out, the regular full-scan refresh or the shutdown pairing provides
+// coverage instead.
+const btrfsRearmInterval = 30 * time.Second
+const btrfsRearmMaxTries = 20
 
 var btrfsSnapNameClean = regexp.MustCompile(`[^a-z0-9.-]+`)
 
@@ -180,7 +191,42 @@ func (f *folder) tryArmBtrfsScanReplay(ctx context.Context) bool {
 	}
 	f.sl.InfoContext(ctx, "Skipping initial scan, applied btrfs snapshot diff", "changedPaths", len(paths))
 	f.fullScanOK.Store(true)
+
+	// Re-arm the marker. The boot consumed it, and without a fresh pairing
+	// the next restart depends on the shutdown pairing, which races the
+	// process-exit deadline (observed on yarlung 2026-10-16: exit 11s
+	// after SIGTERM with the barrier still in flight, marker lost, next
+	// boot full-scanned). The replay just proved the index matches the
+	// filesystem, so pair a fresh baseline now; then ANY restart is
+	// covered, clean or not. The watch aggregator is still in its setup
+	// pass here and cannot accept a flush yet (observed on yarlung
+	// 2026-10-16: inline pairing failed "watch not running" 15s after
+	// boot), so the pairing runs on a retry timer in the Serve loop.
+	f.btrfsRearmPending = true
+	f.btrfsRearmTries = 0
+	f.btrfsRearmTimer.Reset(btrfsRearmInterval)
 	return true
+}
+
+// btrfsRearmTimerFired retries the post-replay baseline pairing until the
+// watch aggregator is up and the pairing succeeds. Runs on the Serve
+// goroutine (the sole watchChan consumer). On success the retry clears and
+// the refresh is recorded; after btrfsRearmMaxTries failures it gives up
+// and the next scheduled full scan's refresh (or the shutdown pairing)
+// provides coverage instead.
+func (f *folder) btrfsRearmTimerFired(ctx context.Context) {
+	f.btrfsRearmTries++
+	if f.pairBtrfsBaseline(ctx, "post-replay") {
+		f.btrfsRearmPending = false
+		f.lastBtrfsRefresh = time.Now()
+		return
+	}
+	if f.btrfsRearmTries >= btrfsRearmMaxTries {
+		f.btrfsRearmPending = false
+		f.sl.InfoContext(ctx, "Btrfs baseline: post-replay re-arm giving up, next full-scan refresh or shutdown pairing provides coverage", "tries", f.btrfsRearmTries)
+		return
+	}
+	f.btrfsRearmTimer.Reset(btrfsRearmInterval)
 }
 
 // pairBtrfsBaseline runs the baseline pairing ritual: flush the watch,
@@ -204,11 +250,11 @@ func (f *folder) pairBtrfsBaseline(ctx context.Context, trigger string) bool {
 	// what proves completeness; this flush just keeps the barrier short.
 	ack, ok := f.requestWatchFlush(ctx)
 	if !ok {
-		f.sl.DebugContext(ctx, "Btrfs baseline: watch flush unavailable, watch not running")
+		f.sl.InfoContext(ctx, "Btrfs baseline: pairing failed, watch flush unavailable (watch not running)")
 		return false
 	}
 	if !f.scanUntilAck(ctx, ack) {
-		f.sl.DebugContext(ctx, "Btrfs baseline: watch did not drain in time")
+		f.sl.InfoContext(ctx, "Btrfs baseline: pairing failed, watch did not drain in time")
 		return false
 	}
 
@@ -217,18 +263,18 @@ func (f *folder) pairBtrfsBaseline(ctx context.Context, trigger string) bool {
 	snap := btrfsSnapName(trigger, f.folderID)
 	defer fs.BtrfsScanRemoveSnapshot(context.Background(), snap)
 	if err := fs.BtrfsScanSnapshot(ctx, snap); err != nil {
-		f.sl.DebugContext(ctx, "Btrfs baseline: snapshot failed", slogutil.Error(err))
+		f.sl.InfoContext(ctx, "Btrfs baseline: pairing failed, snapshot error", slogutil.Error(err))
 		return false
 	}
 
 	// Prove that every change up to the snapshot is in the index.
 	if !f.watchBarrier(ctx) {
-		f.sl.DebugContext(ctx, "Btrfs baseline: watch barrier not reached")
+		f.sl.InfoContext(ctx, "Btrfs baseline: pairing failed, watch barrier not reached")
 		return false
 	}
 
 	if err := fs.BtrfsScanSetBaseline(ctx, snap); err != nil {
-		f.sl.DebugContext(ctx, "Btrfs baseline: setbaseline failed", slogutil.Error(err))
+		f.sl.InfoContext(ctx, "Btrfs baseline: pairing failed, setbaseline error", slogutil.Error(err))
 		return false
 	}
 	var b [8]byte

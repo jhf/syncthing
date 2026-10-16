@@ -63,7 +63,7 @@ type folder struct {
 
 	scanInterval           time.Duration
 	scanTimer              *time.Timer
-	watchScanDepth         int // >0 while servicing a watch-triggered scan between chunks
+	watchScanDepth         int         // >0 while servicing a watch-triggered scan between chunks
 	fullScanActive         atomic.Bool // true while a full-tree scan is running
 	scanDelay              chan time.Duration
 	initialScanFinished    chan struct{}
@@ -78,6 +78,14 @@ type folder struct {
 	// lastBtrfsRefresh is the last successful runtime baseline pairing,
 	// rate-limiting refreshes (Serve goroutine only).
 	lastBtrfsRefresh time.Time
+	// btrfsRearm* drive the post-replay baseline re-arm retries: the
+	// pairing needs the watch aggregator accepting flushes, which is not
+	// true during its setup pass on a large tree (observed on yarlung
+	// 2026-10-16: post-replay pairing failed "watch not running" 15s
+	// after boot). Serve goroutine only.
+	btrfsRearmTimer   *time.Timer
+	btrfsRearmPending bool
+	btrfsRearmTries   int
 	// btrfsCleanStart is set at Serve start when the previous shutdown left
 	// a paired, provably consistent baseline+index (see folder_btrfs.go).
 	btrfsCleanStart bool
@@ -172,6 +180,8 @@ func newFolder(model *model, ignores *ignore.Matcher, cfg config.FolderConfigura
 	f.pullPause = f.pullBasePause()
 	f.pullFailTimer = time.NewTimer(0)
 	<-f.pullFailTimer.C
+	f.btrfsRearmTimer = time.NewTimer(0)
+	<-f.btrfsRearmTimer.C
 
 	registerFolderMetrics(f.ID)
 
@@ -190,6 +200,7 @@ func (f *folder) Serve(ctx context.Context) error {
 	defer func() {
 		f.scanTimer.Stop()
 		f.versionCleanupTimer.Stop()
+		f.btrfsRearmTimer.Stop()
 		f.setState(FolderIdle)
 	}()
 
@@ -245,6 +256,13 @@ func (f *folder) Serve(ctx context.Context) error {
 
 	for {
 		var err error
+
+		// Nil (blocking forever) unless a post-replay re-arm retry is
+		// pending.
+		var btrfsRearmC <-chan time.Time
+		if f.btrfsRearmPending {
+			btrfsRearmC = f.btrfsRearmTimer.C
+		}
 
 		select {
 		case <-ctx.Done():
@@ -320,6 +338,9 @@ func (f *folder) Serve(ctx context.Context) error {
 		case <-f.restartWatchChan:
 			f.sl.DebugContext(ctx, "Restart watcher")
 			err = f.restartWatch(ctx)
+
+		case <-btrfsRearmC:
+			f.btrfsRearmTimerFired(ctx)
 
 		case <-f.versionCleanupTimer.C:
 			if _, _, healthErr := f.getState(); healthErr != nil {
