@@ -17,16 +17,16 @@ everything in the branches before it plus its own piece, so
 | 01 | `patch/01-skip-mtime-on-exists` | Skip virtual mtime lookup for existence checks (the 40% scan speedup) | 7 |
 | 02 | `patch/02-gc-chunked-commit` | GC commits each hash-range chunk; blocklist hashes retired at update; keep needs-full-scan flag across GC interruption | 3 |
 | 03 | `patch/03-need-list-perf` | Need-list queries: no SQL name ordering, cached remote need list, cached per-device need count, iterator cost accounting | 6 |
-| 04 | `patch/04-chunked-scan` | Chunked scanning: resumable walks, pull/watch servicing between chunks, timer-enforced chunk budget, mid-sweep pull servicing | 15 |
+| 04 | `patch/04-chunked-scan` | Chunked scanning: resumable walks, pull/watch servicing between chunks, timer-enforced chunk budget, mid-sweep pull servicing; tests hardened for CI runners (native-name DB compare on Windows, budget-timing retries, unique test content to keep the rename bucket O(n)) | 15 |
 | 05 | `patch/05-fsevents-journal-replay` | Boot-time FSEvents journal replay instead of the initial full scan; overflow healing without killing the watch; pins the notify fork | 4 |
-| 06 | `patch/06-btrfs-scan-replay` | BTRFS snapshot-diff scan replay (Linux receiver side); shutdown-paired scans; per-run scan completeness gating | 8 |
+| 06 | `patch/06-btrfs-scan-replay` | BTRFS snapshot-diff scan replay (Linux receiver side); shutdown-paired scans; per-run scan completeness gating; 32-bit-safe btrfs magic compare (CI-found) | 8 |
 | 07 | `patch/07-btrfs-helper-ops` | Socket-activated btrfs helper stack (systemd units + helper scripts under `ops/`) | 1 |
 | 08 | `patch/08-watch-buffer-batch-throttle` | Watch backend buffer 500→65536; skip full-folder watch batches while a full scan runs | 2 |
 | 09 | `patch/09-gui-event-loop` | Fetch-based GUI event loop (immune to background-tab timer throttling); CSRF header on the poll | 2 |
-| 10 | `patch/10-need-tables` | Incrementally maintained need tracking tables (no full scans for need queries) | 2 |
+| 10 | `patch/10-need-tables` | Incrementally maintained need tracking tables (no full scans for need queries); folderDB.Close waits for the async need-table builder so test tempdirs close cleanly on Windows (CI-found) | 2 |
 | 11 | `patch/11-gc-lock-scope` | GC must not hold updateLock for minutes; busy_timeout so concurrent writers wait; no updateLock re-acquire in GC | 3 |
 | 12 | `patch/12-fsevents-rearm-after-scan` | Arm journal replay after a completed full scan too | 1 |
-| 13 | `patch/13-btrfs-canary-barrier` | Pair BTRFS baseline with index via canary barrier; runtime baseline refresh; canaries pass the watch ignore filter | 2 |
+| 13 | `patch/13-btrfs-canary-barrier` | Pair BTRFS baseline with index via canary barrier; runtime baseline refresh; canaries pass the watch ignore filter; barrier test helper collects GC-garbage dir handles before tempdir removal on Windows (CI-found) | 2 |
 | 14 | `patch/14-fsevents-poll-mode` | Poll-mode journal replay replaces the live FSEvents stream (5s cadence); IgnoreSelf (own writes filtered server-side) as a serve-startup opt-in | 2 |
 | 15 | `patch/15-db-busy-resilience` | Index updates retry on SQLite lock contention (bounded backoff) instead of killing the device connection; `busy_timeout` 5s → 30s | 1 |
 | 16 | `patch/16-watch-flush-wait` | Watch flush request waits (15s) for a busy aggregator instead of aborting a valid baseline pairing | 1 |
