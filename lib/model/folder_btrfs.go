@@ -180,6 +180,16 @@ func (f *folder) tryArmBtrfsScanReplay(ctx context.Context) bool {
 	}
 	f.sl.InfoContext(ctx, "Skipping initial scan, applied btrfs snapshot diff", "changedPaths", len(paths))
 	f.fullScanOK.Store(true)
+
+	// Re-arm the marker immediately. The boot consumed it, and without a
+	// fresh pairing the next restart depends on the shutdown pairing,
+	// which races the process-exit deadline (observed on yarlung
+	// 2026-10-16: exit 11s after SIGTERM with the barrier still in
+	// flight, marker lost, next boot full-scanned). The replay just
+	// proved the index matches the filesystem, so pair a fresh baseline
+	// now; then ANY restart is covered, clean or not.
+	f.lastBtrfsRefresh = time.Now()
+	f.pairBtrfsBaseline(ctx, "post-replay")
 	return true
 }
 
@@ -204,11 +214,11 @@ func (f *folder) pairBtrfsBaseline(ctx context.Context, trigger string) bool {
 	// what proves completeness; this flush just keeps the barrier short.
 	ack, ok := f.requestWatchFlush(ctx)
 	if !ok {
-		f.sl.DebugContext(ctx, "Btrfs baseline: watch flush unavailable, watch not running")
+		f.sl.InfoContext(ctx, "Btrfs baseline: pairing failed, watch flush unavailable (watch not running)")
 		return false
 	}
 	if !f.scanUntilAck(ctx, ack) {
-		f.sl.DebugContext(ctx, "Btrfs baseline: watch did not drain in time")
+		f.sl.InfoContext(ctx, "Btrfs baseline: pairing failed, watch did not drain in time")
 		return false
 	}
 
@@ -217,18 +227,18 @@ func (f *folder) pairBtrfsBaseline(ctx context.Context, trigger string) bool {
 	snap := btrfsSnapName(trigger, f.folderID)
 	defer fs.BtrfsScanRemoveSnapshot(context.Background(), snap)
 	if err := fs.BtrfsScanSnapshot(ctx, snap); err != nil {
-		f.sl.DebugContext(ctx, "Btrfs baseline: snapshot failed", slogutil.Error(err))
+		f.sl.InfoContext(ctx, "Btrfs baseline: pairing failed, snapshot error", slogutil.Error(err))
 		return false
 	}
 
 	// Prove that every change up to the snapshot is in the index.
 	if !f.watchBarrier(ctx) {
-		f.sl.DebugContext(ctx, "Btrfs baseline: watch barrier not reached")
+		f.sl.InfoContext(ctx, "Btrfs baseline: pairing failed, watch barrier not reached")
 		return false
 	}
 
 	if err := fs.BtrfsScanSetBaseline(ctx, snap); err != nil {
-		f.sl.DebugContext(ctx, "Btrfs baseline: setbaseline failed", slogutil.Error(err))
+		f.sl.InfoContext(ctx, "Btrfs baseline: pairing failed, setbaseline error", slogutil.Error(err))
 		return false
 	}
 	var b [8]byte
