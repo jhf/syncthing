@@ -21,7 +21,7 @@ everything in the branches before it plus its own piece, so
 | 05 | `patch/05-fsevents-journal-replay` | Boot-time FSEvents journal replay instead of the initial full scan; overflow healing without killing the watch; pins the notify fork | 4 |
 | 06 | `patch/06-btrfs-scan-replay` | BTRFS snapshot-diff scan replay (Linux receiver side); shutdown-paired scans; per-run scan completeness gating; 32-bit-safe btrfs magic compare (CI-found) | 8 |
 | 07 | `patch/07-btrfs-helper-ops` | Socket-activated btrfs helper stack (systemd units + helper scripts under `ops/`) | 1 |
-| 08 | `patch/08-watch-buffer-batch-throttle` | Watch backend buffer 500→65536; skip full-folder watch batches while a full scan runs | 2 |
+| 08 | `patch/08-watch-buffer-batch-throttle` | Watch backend buffer 500→65536; skip full-folder watch batches while a full scan runs; aggregator overflow collapses to the affected subtrees instead of a full-tree scan (dogfood: hourly full scans from build bursts, 2026-10-17) | 3 |
 | 09 | `patch/09-gui-event-loop` | Fetch-based GUI event loop (immune to background-tab timer throttling); CSRF header on the poll | 2 |
 | 10 | `patch/10-need-tables` | Incrementally maintained need tracking tables (no full scans for need queries); folderDB.Close waits for the async need-table builder so test tempdirs close cleanly on Windows (CI-found) | 2 |
 | 11 | `patch/11-gc-lock-scope` | GC must not hold updateLock for minutes; busy_timeout so concurrent writers wait; no updateLock re-acquire in GC | 3 |
