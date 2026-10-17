@@ -22,6 +22,15 @@ import (
 var (
 	maxFiles       = 512
 	maxFilesPerDir = 128
+	// When the per-window total overflows, the tracked paths collapse to
+	// their common prefixes: any prefix covering more than
+	// collapseClusterThreshold tracked paths is scanned as one subtree,
+	// sparser paths stay precise. No cap on the result is needed beyond
+	// strict shrinking: the emitted set is bounded by maxFiles tracked
+	// paths, and its scan cost is bounded by the union of the touched
+	// subtrees, which never exceeds a full walk. A burst of thousands of
+	// files in one directory collapses to that one subtree.
+	collapseClusterThreshold = 16
 )
 
 // aggregatedEvent represents potentially multiple events at and/or recursively
@@ -226,6 +235,21 @@ func (a *aggregator) newEvent(event fs.Event, inProgress map[string]struct{}) {
 }
 
 func (a *aggregator) aggregateEvent(event fs.Event, evTime time.Time) {
+	if event.Name != "." && a.counts.total() == maxFiles {
+		// Too many distinct paths in this window. Nothing was lost -
+		// every event is in the tree - so instead of escalating to a
+		// full-tree scan, factor the tracked paths into their common
+		// prefixes and scan only those subtrees: a burst under
+		// .bun/install/cache scans that directory, not the root.
+		// Measured on a 2.35M-file home folder: bursts of tens of
+		// thousands of events from one build or package install each
+		// flattened to a full scan of the whole tree, roughly once an
+		// hour. A genuine tree-wide churn still escalates to the root.
+		if paths := a.collapseToCommonPrefixes(event, evTime); paths != nil {
+			l.Debugf("%v Too many paths (%d), scanning %d affected subtrees instead of the entire folder", a, maxFiles, len(paths))
+			return
+		}
+	}
 	if event.Name == "." || a.counts.total() == maxFiles {
 		l.Debugln(a, "Scan entire folder")
 		firstModTime := evTime
@@ -341,6 +365,128 @@ func (a *aggregator) resetNotifyTimerIfNeeded() {
 	if a.notifyTimerNeedsReset {
 		a.resetNotifyTimer(a.notifyDelay)
 	}
+}
+
+// collapseToCommonPrefixes factors the tracked events into their common
+// prefixes: any prefix covering more than collapseClusterThreshold tracked
+// paths becomes one subtree-scan event, sparser paths stay as they are.
+// The incoming event joins the set first. The batch the aggregator then
+// emits names exactly the subtrees that saw events, and the scan covers
+// every event ever received: unlike a dropped-events flag, the aggregation
+// limit loses no information.
+//
+// Returns nil without touching the tree only when the collapse would not
+// strictly shrink the tracked set below maxFiles - the overflow check fires
+// on equality, so accepting a non-shrinking collapse would leave the total
+// at the limit and never escalate again. Scanning the emitted set costs at
+// most a walk of the touched subtrees, never more than a full scan, so no
+// path-count cap is needed beyond the shrink.
+func (a *aggregator) collapseToCommonPrefixes(event fs.Event, evTime time.Time) []string {
+	type pathEvent struct {
+		firstModTime time.Time
+		lastModTime  time.Time
+		evType       fs.EventType
+	}
+	var tracked []pathEvent
+	var names []string
+	var collect func(dir *eventDir, prefix string)
+	collect = func(dir *eventDir, prefix string) {
+		for name, sub := range dir.dirs {
+			collect(sub, filepath.Join(prefix, name))
+		}
+		for name, ev := range dir.events {
+			if name == "." {
+				names = append(names, ".")
+				continue
+			}
+			names = append(names, filepath.Join(prefix, name))
+			tracked = append(tracked, pathEvent{firstModTime: ev.firstModTime, lastModTime: ev.lastModTime, evType: ev.evType})
+		}
+	}
+	collect(a.root, "")
+	for _, name := range names {
+		if name == "." {
+			return nil // already escalated to the root; keep it
+		}
+	}
+	names = append(names, event.Name)
+	tracked = append(tracked, pathEvent{firstModTime: evTime, lastModTime: evTime, evType: event.Type})
+
+	// Factor the paths into a prefix trie.
+	type trieNode struct {
+		children map[string]*trieNode
+		terminal *pathEvent // a tracked path ends exactly here
+	}
+	root := &trieNode{}
+	for i, name := range names {
+		node := root
+		for _, seg := range strings.Split(filepath.ToSlash(name), "/") {
+			if node.children == nil {
+				node.children = make(map[string]*trieNode)
+			}
+			child, ok := node.children[seg]
+			if !ok {
+				child = &trieNode{}
+				node.children[seg] = child
+			}
+			node = child
+		}
+		ev := tracked[i]
+		if node.terminal != nil {
+			node.terminal.evType = node.terminal.evType.Merge(ev.evType)
+			node.terminal.lastModTime = ev.lastModTime
+		} else {
+			term := ev
+			node.terminal = &term
+		}
+	}
+
+	// Emit the factored paths bottom-up: a dense subtree becomes one
+	// subtree-scan path, and a node collapses only when the paths
+	// remaining below it still exceed the threshold - so the climb stops
+	// at the least common prefix of each dense cluster and never reaches
+	// the root for localized bursts.
+	type emittedPath struct {
+		name string
+		ev   pathEvent
+	}
+	var emit func(node *trieNode, prefix string) []emittedPath
+	emit = func(node *trieNode, prefix string) []emittedPath {
+		var out []emittedPath
+		for seg, child := range node.children {
+			out = append(out, emit(child, filepath.Join(prefix, seg))...)
+		}
+		if node.terminal != nil {
+			out = append(out, emittedPath{prefix, *node.terminal})
+		}
+		// The root itself never collapses; that is the flatten case.
+		if prefix != "" && len(out) > collapseClusterThreshold {
+			merged := pathEvent{firstModTime: evTime, lastModTime: evTime}
+			for _, p := range out {
+				merged.evType = merged.evType.Merge(p.ev.evType)
+				if p.ev.firstModTime.Before(merged.firstModTime) {
+					merged.firstModTime = p.ev.firstModTime
+				}
+			}
+			return []emittedPath{{prefix, merged}}
+		}
+		return out
+	}
+	emitted := emit(root, "")
+
+	if len(emitted) >= maxFiles {
+		return nil
+	}
+
+	a.root.dirs = make(map[string]*eventDir)
+	a.root.events = make(map[string]*aggregatedEvent)
+	a.counts = eventCounter{}
+	names = make([]string, 0, len(emitted))
+	for _, p := range emitted {
+		a.aggregateEvent(fs.Event{Name: p.name, Type: p.ev.evType}, p.ev.firstModTime)
+		names = append(names, p.name)
+	}
+	return names
 }
 
 // resetNotifyTimer should only ever be called when notifyTimer has stopped
