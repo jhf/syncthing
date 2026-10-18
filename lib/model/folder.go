@@ -112,6 +112,13 @@ type folder struct {
 	restartWatchChan chan struct{}
 	watchErr         error
 	watchMut         sync.Mutex
+	// stalenessChan carries synthetic events for paths where serving a
+	// remote request found the index disagreeing with the disk (see
+	// NoteStalePath). Created for the folder's lifetime, drained by the
+	// watch aggregator while watching is enabled; when watching is
+	// disabled it simply fills up and further observations are dropped,
+	// leaving the timer scan as the repair path, exactly as before.
+	stalenessChan chan fs.Event
 
 	// fullScanCount counts completed-or-attempted full-tree scans
 	// (scanSubdirs with nil subDirs). It exists so tests and diagnostics
@@ -173,6 +180,7 @@ func newFolder(model *model, ignores *ignore.Matcher, cfg config.FolderConfigura
 		forcedRescanPaths:     make(map[string]struct{}),
 
 		watchCancel:      func() {},
+		stalenessChan:    make(chan fs.Event, stalenessBuffer),
 		restartWatchChan: make(chan struct{}, 1),
 
 		versioner: ver,
@@ -1599,6 +1607,41 @@ func (f *folder) startWatch(ctx context.Context) {
 	go f.monitorWatch(watchCtx)
 }
 
+// mergeWatchEventSources fans the backend event stream and the staleness
+// observation channel into one for the aggregator, for the lifetime of ctx
+// (the per-watch-session context, cancelled on watch restart and shutdown).
+// The output is deliberately never closed: the aggregator's event receive
+// does not check for channel closure and would busy-read zero-value events,
+// one of which could be emitted as a root rescan.
+func mergeWatchEventSources(ctx context.Context, backend, staleness <-chan fs.Event) <-chan fs.Event {
+	merged := make(chan fs.Event)
+	go func() {
+		for {
+			select {
+			case ev, ok := <-backend:
+				if !ok {
+					backend = nil
+					continue
+				}
+				select {
+				case merged <- ev:
+				case <-ctx.Done():
+					return
+				}
+			case ev := <-staleness:
+				select {
+				case merged <- ev:
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return merged
+}
+
 // monitorWatch starts the filesystem watching and retries every minute on failure.
 // It should not be used except in startWatch. Its context outlives Serve's
 // (see startWatch) so the btrfs shutdown pairing can drain the aggregator.
@@ -1640,7 +1683,7 @@ func (f *folder) monitorWatch(ctx context.Context) {
 				continue
 			}
 			lastWatch = time.Now()
-			watchaggregator.AggregateWithFlush(aggrCtx, eventChan, f.watchChan, f.watchFlush, f.FolderConfiguration, f.model.cfg, f.evLogger)
+			watchaggregator.AggregateWithFlush(aggrCtx, mergeWatchEventSources(aggrCtx, eventChan, f.stalenessChan), f.watchChan, f.watchFlush, f.FolderConfiguration, f.model.cfg, f.evLogger)
 			f.sl.DebugContext(ctx, "Started filesystem watcher")
 		case err = <-errChan:
 			// The watch is dead; events between its death and the re-watch
@@ -1990,6 +2033,27 @@ func (f *folder) Errors() []FileError {
 		return strings.Compare(a.Path, b.Path)
 	})
 	return errors
+}
+
+// stalenessBuffer bounds queued stale-path observations (see NoteStalePath).
+// When full, further observations are dropped: a requester whose file is
+// still missing retries, and the timer scan is the backstop, exactly as
+// before this mechanism existed.
+const stalenessBuffer = 512
+
+// NoteStalePath records that serving a remote request found the given path
+// missing on disk while the index claims it exists - direct observation of
+// an index entry that disk no longer backs. The path enters the watch
+// aggregator as a synthetic journal-less event, so the repair is an ordinary
+// debounced subtree scan with the same coalescing and overflow behavior as
+// filesystem events; the resulting tombstone is announced and the requester
+// converges. Being journal-less (ID 0), the event never advances the replay
+// watermark. Overflows are dropped (see stalenessBuffer).
+func (f *folder) NoteStalePath(name string) {
+	select {
+	case f.stalenessChan <- fs.Event{Name: name, Type: fs.Remove}:
+	default:
+	}
 }
 
 // ScheduleForceRescan marks the file such that it gets rehashed on next scan, and schedules a scan.

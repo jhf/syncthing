@@ -7,9 +7,11 @@
 package model
 
 import (
+	"context"
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/d4l3k/messagediff"
 
@@ -181,5 +183,70 @@ func TestSetPlatformData(t *testing.T) {
 
 	if err := sr.setPlatformData(fi, "file.tmp"); err != nil {
 		t.Error(err)
+	}
+}
+
+func TestMergeWatchEventSources(t *testing.T) {
+	// Both sources flow into one channel; closing the backend must not
+	// disturb the staleness feed; cancellation ends the goroutine without
+	// closing the output (the aggregator does not expect closure).
+	ctx, cancel := context.WithCancel(context.Background())
+	backend := make(chan fs.Event, 2)
+	staleness := make(chan fs.Event, 2)
+	backend <- fs.Event{Name: "a", Type: fs.NonRemove}
+	staleness <- fs.Event{Name: "b", Type: fs.Remove}
+
+	out := mergeWatchEventSources(ctx, backend, staleness)
+	got := make(map[string]bool)
+	for range 2 {
+		select {
+		case ev := <-out:
+			got[ev.Name] = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for merged events")
+		}
+	}
+	if !got["a"] || !got["b"] {
+		t.Errorf("missing merged events: %v", got)
+	}
+
+	close(backend)
+	staleness <- fs.Event{Name: "c", Type: fs.Remove}
+	select {
+	case ev := <-out:
+		if ev.Name != "c" {
+			t.Errorf("unexpected event after backend close: %+v", ev)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("staleness feed died with the backend channel")
+	}
+
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case ev, ok := <-out:
+		if !ok {
+			t.Error("output channel must not be closed on cancellation")
+		} else {
+			t.Errorf("unexpected event after cancellation: %+v", ev)
+		}
+	default:
+	}
+}
+
+func TestNoteStalePathDropsWhenFull(t *testing.T) {
+	// A bounded buffer that drops instead of blocking: a request handler
+	// must never stall on a scan backlog.
+	f := &folder{stalenessChan: make(chan fs.Event, 1)}
+	f.NoteStalePath("one")
+	f.NoteStalePath("two") // dropped, buffer full
+	ev := <-f.stalenessChan
+	if ev.Name != "one" || ev.Type != fs.Remove {
+		t.Errorf("unexpected event: %+v", ev)
+	}
+	select {
+	case ev := <-f.stalenessChan:
+		t.Errorf("expected drop, got %+v", ev)
+	default:
 	}
 }
