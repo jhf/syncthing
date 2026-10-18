@@ -63,6 +63,7 @@ type service interface {
 	Errors() []FileError
 	WatchError() error
 	ScheduleForceRescan(path string)
+	NoteStalePath(name string) // a request found the index disagreeing with the disk for name
 	GetStatistics() (stats.FolderStatistics, error)
 
 	getState() (folderState, time.Time, error)
@@ -2116,6 +2117,9 @@ func (m *model) Request(conn protocol.Connection, req *protocol.Request) (out pr
 		// Reject reads for anything that doesn't exist or is something
 		// other than a regular file.
 		l.Debugf("%v REQ(in) failed stating file (%v): %s: %q / %q o=%d s=%d", m, err, deviceID.Short(), req.Folder, req.Name, req.Offset, req.Size)
+		if fs.IsNotExist(err) {
+			m.noteStaleRequestedFile(req.Folder, req.Name)
+		}
 		return nil, protocol.ErrNoSuchFile
 	}
 
@@ -2123,6 +2127,7 @@ func (m *model) Request(conn protocol.Connection, req *protocol.Request) (out pr
 	switch {
 	case fs.IsNotExist(err):
 		l.Debugf("%v REQ(in) file doesn't exist: %s: %q / %q o=%d s=%d", m, deviceID.Short(), req.Folder, req.Name, req.Offset, req.Size)
+		m.noteStaleRequestedFile(req.Folder, req.Name)
 		return nil, protocol.ErrNoSuchFile
 	case errors.Is(err, io.EOF):
 		// Read beyond end of file. This might indicate a problem, or it
@@ -2211,6 +2216,31 @@ func (m *model) recheckFile(deviceID protocol.DeviceID, folder, name string, off
 
 func (m *model) CurrentFolderFile(folder string, file string) (protocol.FileInfo, bool, error) {
 	return m.sdb.GetDeviceFile(folder, protocol.LocalDeviceID, file)
+}
+
+// noteStaleRequestedFile handles a remote request for a file that turned out
+// not to exist on disk. If our index still claims the file exists locally,
+// the index is stale - a local change was lost somewhere between the
+// filesystem, the watcher and the aggregator - so the path is fed to the
+// folder's scan funnel: a debounced subtree scan records the deletion and
+// the resulting index update lets the requester converge. If the entry is
+// already tombstoned, the requester is merely behind and ordinary index
+// exchange fixes it; there is nothing to repair. (Observed 2026-10-18: a
+// requester retried one Next.js build manifest 9449 times over 17h because
+// the deletion of its directory had never reached the index.)
+func (m *model) noteStaleRequestedFile(folder, name string) {
+	fi, ok, err := m.sdb.GetDeviceFile(folder, protocol.LocalDeviceID, name)
+	if err != nil || !ok || fi.Deleted {
+		return
+	}
+	m.mut.RLock()
+	runner, ok := m.folderRunners.Get(folder)
+	m.mut.RUnlock()
+	if !ok {
+		return
+	}
+	l.Debugf("%v REQ(in) revealed a stale index entry, feeding it to the scanner: %q / %q", m, folder, name)
+	runner.NoteStalePath(name)
 }
 
 func (m *model) CurrentGlobalFile(folder string, file string) (protocol.FileInfo, bool, error) {
