@@ -148,6 +148,72 @@ func TestRequest(t *testing.T) {
 	}
 }
 
+func TestRequestStaleIndexFeed(t *testing.T) {
+	// A request for a file the index claims exists but the disk does not is
+	// direct evidence of a missed local change: the path must be fed to the
+	// folder's scan funnel so a debounced subtree scan records the deletion.
+	// Requests for unknown or already tombstoned files must feed nothing.
+
+	wrapper, fcfg := newDefaultCfgWrapper(t)
+	ffs := fcfg.Filesystem()
+	m := setupModel(t, wrapper)
+	defer cleanupModel(m)
+
+	writeFile(t, ffs, "gone", []byte("foobar"))
+	m.ScanFolder("default")
+
+	runner, ok := m.folderRunners.Get("default")
+	if !ok {
+		t.Fatal("no runner for default folder")
+	}
+	srf, ok := runner.(*sendReceiveFolder)
+	if !ok {
+		t.Fatalf("unexpected runner type %T", runner)
+	}
+	stale := func() (fs.Event, bool) {
+		select {
+		case ev := <-srf.stalenessChan:
+			return ev, true
+		default:
+			return fs.Event{}, false
+		}
+	}
+
+	// Delete the file underneath the index, then request it: the Lstat
+	// failure plus the live index entry must produce one observation.
+	if err := ffs.Remove("gone"); err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256([]byte("foobar"))
+	if _, err := m.Request(device1Conn, &protocol.Request{Folder: "default", Name: "gone", Size: 6, Hash: hash[:]}); err == nil {
+		t.Fatal("expected request to fail for a vanished file")
+	}
+	ev, ok := stale()
+	if !ok {
+		t.Fatal("no staleness observation fed to the scanner")
+	}
+	if ev.Name != "gone" || ev.Type != fs.Remove {
+		t.Errorf("unexpected staleness observation: %+v", ev)
+	}
+
+	// Rescan to tombstone the entry; a repeat request must feed nothing.
+	m.ScanFolder("default")
+	if _, err := m.Request(device1Conn, &protocol.Request{Folder: "default", Name: "gone", Size: 6, Hash: hash[:]}); err == nil {
+		t.Fatal("expected request to fail for a tombstoned file")
+	}
+	if ev, ok := stale(); ok {
+		t.Errorf("unexpected staleness observation for tombstoned file: %+v", ev)
+	}
+
+	// A file that never existed feeds nothing either.
+	if _, err := m.Request(device1Conn, &protocol.Request{Folder: "default", Name: "neverexisted", Size: 6, Hash: hash[:]}); err == nil {
+		t.Fatal("expected request to fail for an unknown file")
+	}
+	if ev, ok := stale(); ok {
+		t.Errorf("unexpected staleness observation for unknown file: %+v", ev)
+	}
+}
+
 func genFiles(n int) []protocol.FileInfo {
 	files := make([]protocol.FileInfo, n)
 	t := time.Now().Unix()
