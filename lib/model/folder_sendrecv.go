@@ -283,7 +283,26 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 		})
 	}
 
-	fileDeletions, dirDeletions, err := f.processNeeded(ctx, dbUpdateChan, copyChan, scanChan)
+	fileDeletions, dirDeletions, deferredDeletions, buckets, err := f.processNeeded(ctx, dbUpdateChan, copyChan, scanChan)
+
+	// Deletions no longer wait for the round's transfers: everything still
+	// in the immediate deletion sets is provably unreferenced (no block
+	// overlap with any queued pull, no exact block-list match that a rename
+	// could consume), so it can be applied while the queue below feeds the
+	// copier/fetcher pipeline. A large delete wave then overlaps the
+	// round's network transfers instead of queueing behind them. An
+	// in-flight puller that was reading partial blocks from a to-be-deleted
+	// file via the block map may lose that source and falls back to the
+	// network, exactly as when a file vanishes locally.
+	var delWg sync.WaitGroup
+	if err == nil {
+		delWg.Go(func() {
+			f.processDeletions(ctx, fileDeletions, dirDeletions, dbUpdateChan, scanChan)
+		})
+		if qerr := f.processQueue(ctx, buckets, deferredDeletions, copyChan, dbUpdateChan, scanChan); qerr != nil {
+			err = qerr
+		}
+	}
 
 	// Signal copy and puller routines that we are done with the in data for
 	// this iteration. Wait for them to finish.
@@ -297,8 +316,13 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 	close(finisherChan)
 	doneWg.Wait()
 
-	if err == nil {
-		f.processDeletions(ctx, fileDeletions, dirDeletions, dbUpdateChan, scanChan)
+	// Wait for the deletions alongside the pipeline.
+	delWg.Wait()
+
+	// Deletions whose local blocks served (or could have served) the round's
+	// pulls go last, once the pipeline has drained.
+	if err == nil && len(deferredDeletions) > 0 {
+		f.processDeletions(ctx, deferredDeletions, nil, dbUpdateChan, scanChan)
 	}
 
 	// Wait for db updates and scan scheduling to complete
@@ -310,10 +334,16 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 	return changed, err
 }
 
-func (f *sendReceiveFolder) processNeeded(ctx context.Context, dbUpdateChan chan<- dbUpdateJob, copyChan chan<- copyBlocksState, scanChan chan<- string) (map[string]protocol.FileInfo, []protocol.FileInfo, error) {
+func (f *sendReceiveFolder) processNeeded(ctx context.Context, dbUpdateChan chan<- dbUpdateJob, copyChan chan<- copyBlocksState, scanChan chan<- string) (map[string]protocol.FileInfo, []protocol.FileInfo, map[string]protocol.FileInfo, map[string][]protocol.FileInfo, error) {
 	var dirDeletions []protocol.FileInfo
 	fileDeletions := map[string]protocol.FileInfo{}
 	buckets := map[string][]protocol.FileInfo{}
+	// Block hashes the round's pulls need, and the local state of the files
+	// we are about to delete. Their overlap decides which deletions must
+	// wait for the transfer pipeline to drain.
+	neededBlocks := map[string]struct{}{}
+	pulledBlocksHashes := map[string]struct{}{}
+	deletedLocals := map[string]protocol.FileInfo{}
 
 	// Iterate the list of items that we need and sort them into piles.
 	// Regular files to pull goes into the file queue, everything else
@@ -322,7 +352,7 @@ func (f *sendReceiveFolder) processNeeded(ctx context.Context, dbUpdateChan chan
 loop:
 	for file, err := range itererr.Zip(f.model.sdb.AllNeededGlobalFiles(f.folderID, protocol.LocalDeviceID, f.Order, 0, 0)) {
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		select {
 		case <-ctx.Done():
@@ -365,7 +395,7 @@ loop:
 			default:
 				df, ok, err := f.model.sdb.GetDeviceFile(f.folderID, protocol.LocalDeviceID, file.Name)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, nil, err
 				}
 				// Local file can be already deleted, but with a lower version
 				// number, hence the deletion coming in again as part of
@@ -373,6 +403,7 @@ loop:
 				// type if we haven't yet managed to pull it.
 				if ok && !df.IsDeleted() && !df.IsSymlink() && !df.IsDirectory() && !df.IsInvalid() {
 					fileDeletions[file.Name] = file
+					deletedLocals[file.Name] = df
 					// Put files into buckets per first hash
 					key := string(df.BlocksHash)
 					buckets[key] = append(buckets[key], df)
@@ -384,8 +415,12 @@ loop:
 		case file.Type == protocol.FileInfoTypeFile:
 			curFile, hasCurFile, err := f.model.sdb.GetDeviceFile(f.folderID, protocol.LocalDeviceID, file.Name)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, nil, err
 			}
+			// Any pulled file whose block list exactly matches a deleted
+			// file makes that deletion a rename candidate; record the hash
+			// even when the shortcut path means no blocks move.
+			pulledBlocksHashes[string(file.BlocksHash)] = struct{}{}
 			if hasCurFile && curFile.Type == file.Type && file.BlocksEqual(curFile) {
 				// We are supposed to copy the entire file, and then fetch nothing. We
 				// are only updating metadata, so we don't actually *need* to make the
@@ -393,6 +428,9 @@ loop:
 				f.shortcutFile(file, curFile, dbUpdateChan, scanChan)
 			} else {
 				// Queue files for processing after directories and symlinks.
+				for _, b := range file.Blocks {
+					neededBlocks[string(b.Hash)] = struct{}{}
+				}
 				f.queue.Push(file.Name, file.Size, file.ModTime())
 			}
 
@@ -424,17 +462,44 @@ loop:
 
 	select {
 	case <-ctx.Done():
-		return nil, nil, ctx.Err()
+		return nil, nil, nil, nil, ctx.Err()
 	default:
 	}
 
-	// Process the file queue.
+	// Deletions whose local blocks overlap blocks the round is pulling must
+	// wait for the transfer pipeline to drain (their content may still serve
+	// copies via the block map), and deletions whose block list exactly
+	// matches a queued pull must wait for the queue to settle (they are
+	// rename sources, consumed in processQueue). Everything else is provably
+	// unreferenced and can be applied while transfers are in flight.
+	var deferredDeletions map[string]protocol.FileInfo
+	for name, del := range fileDeletions {
+		dl := deletedLocals[name]
+		_, isRenameSource := pulledBlocksHashes[string(dl.BlocksHash)]
+		if isRenameSource || deletedBlocksOverlap(dl.Blocks, neededBlocks) {
+			if deferredDeletions == nil {
+				deferredDeletions = map[string]protocol.FileInfo{}
+			}
+			deferredDeletions[name] = del
+			delete(fileDeletions, name)
+		}
+	}
+	if len(deferredDeletions) > 0 {
+		f.sl.DebugContext(ctx, "Deferring deletions with block overlap or rename potential until the queue settles", slog.Int("files", len(deferredDeletions)))
+	}
+	return fileDeletions, dirDeletions, deferredDeletions, buckets, nil
+}
 
+// processQueue works through the pull queue built by processNeeded, handing
+// files to the copier pipeline and resolving rename shortcuts against the
+// deferred deletion set (rename consumption mutates deferredDeletions; the
+// caller processes whatever survives once the pipeline has drained).
+func (f *sendReceiveFolder) processQueue(ctx context.Context, buckets map[string][]protocol.FileInfo, deferredDeletions map[string]protocol.FileInfo, copyChan chan<- copyBlocksState, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) error {
 nextFile:
 	for {
 		select {
 		case <-ctx.Done():
-			return fileDeletions, dirDeletions, ctx.Err()
+			return ctx.Err()
 		default:
 		}
 
@@ -445,7 +510,7 @@ nextFile:
 
 		fi, ok, err := f.model.sdb.GetGlobalFile(f.folderID, fileName)
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		if !ok {
 			// File is no longer in the index. Mark it as done and drop it.
@@ -466,13 +531,20 @@ nextFile:
 		}
 
 		// Check our list of files to be removed for a match, in which case
-		// we can just do a rename instead.
+		// we can just do a rename instead. A deletion that can serve a
+		// rename shares its whole block list with the pull, so it sits in
+		// the deferred set by construction (see processNeeded).
 		key := string(fi.BlocksHash)
 		for candidate, ok := popCandidate(buckets, key); ok; candidate, ok = popCandidate(buckets, key) {
 			// candidate is our current state of the file, where as the
 			// desired state with the delete bit set is in the deletion
 			// map.
-			desired := fileDeletions[candidate.Name]
+			desired, ok := deferredDeletions[candidate.Name]
+			if !ok {
+				// Not deferred (impossible for a real match) or already
+				// consumed; try the next candidate.
+				continue
+			}
 			if err := f.renameFile(candidate, desired, fi, dbUpdateChan, scanChan); err != nil {
 				f.sl.DebugContext(ctx, "Rename shortcut failed", slogutil.FilePath(fi.Name), slogutil.Error(err))
 				// Failed to rename, try next one.
@@ -480,7 +552,7 @@ nextFile:
 			}
 
 			// Remove the pending deletion (as we performed it by renaming)
-			delete(fileDeletions, candidate.Name)
+			delete(deferredDeletions, candidate.Name)
 
 			f.queue.Done(fileName)
 			continue nextFile
@@ -507,8 +579,18 @@ nextFile:
 			f.newPullError(fileName, err)
 		}
 	}
+	return nil
+}
 
-	return fileDeletions, dirDeletions, nil
+// deletedBlocksOverlap reports whether any of the file's blocks are among the
+// round's needed blocks.
+func deletedBlocksOverlap(blocks []protocol.BlockInfo, needed map[string]struct{}) bool {
+	for _, b := range blocks {
+		if _, ok := needed[string(b.Hash)]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func popCandidate(buckets map[string][]protocol.FileInfo, key string) (protocol.FileInfo, bool) {
