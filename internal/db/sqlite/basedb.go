@@ -55,7 +55,7 @@ func openBase(path string, maxOpenConns, maxIdleConns int, pragmas, schemaScript
 	pathURL := url.URL{
 		Scheme:   "file",
 		Path:     fileToUriPath(path),
-		RawQuery: commonOptions,
+		RawQuery: commonOptions + pageCacheDSNOption(pageCachePerConnKiB(maxOpenConns)),
 	}
 	sqlDB, err := sqlx.Open(dbDriver, pathURL.String())
 	if err != nil {
