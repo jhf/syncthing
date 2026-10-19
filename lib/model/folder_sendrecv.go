@@ -817,6 +817,16 @@ func (f *sendReceiveFolder) verifyDeleteTreeCovered(root string, fileDeletions m
 			// tree only loses a rename source, which the queue replaces by fetching.
 			tomb, covered = deferred[path]
 		}
+		if !covered && info.IsDir() {
+			// On-disk residue of a tombstone an earlier pass already consumed: a
+			// restart or a not-quite-empty directory at the time leaves the entry
+			// behind with the index saying deleted. Removing it with the tree is
+			// safe - the walk still descends and verifies everything inside - and
+			// leaving it would resurrect the empty directory at the next scan.
+			if cur, hasCur, cerr := f.model.sdb.GetDeviceFile(f.folderID, protocol.LocalDeviceID, path); cerr == nil && hasCur && cur.IsDeleted() {
+				return nil
+			}
+		}
 		if !covered {
 			return abort(path, "on disk but not deleted this round: user content, keep")
 		}
