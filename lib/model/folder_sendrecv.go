@@ -297,7 +297,7 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 	var delWg sync.WaitGroup
 	if err == nil {
 		delWg.Go(func() {
-			f.processDeletions(ctx, fileDeletions, dirDeletions, dbUpdateChan, scanChan)
+			f.processDeletions(ctx, fileDeletions, dirDeletions, deferredDeletions, dbUpdateChan, scanChan)
 		})
 		if qerr := f.processQueue(ctx, buckets, deferredDeletions, copyChan, dbUpdateChan, scanChan); qerr != nil {
 			err = qerr
@@ -322,7 +322,7 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 	// Deletions whose local blocks served (or could have served) the round's
 	// pulls go last, once the pipeline has drained.
 	if err == nil && len(deferredDeletions) > 0 {
-		f.processDeletions(ctx, deferredDeletions, nil, dbUpdateChan, scanChan)
+		f.processDeletions(ctx, deferredDeletions, nil, nil, dbUpdateChan, scanChan)
 	}
 
 	// Wait for db updates and scan scheduling to complete
@@ -603,7 +603,10 @@ func popCandidate(buckets map[string][]protocol.FileInfo, key string) (protocol.
 	return cands[0], true
 }
 
-func (f *sendReceiveFolder) processDeletions(ctx context.Context, fileDeletions map[string]protocol.FileInfo, dirDeletions []protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) {
+func (f *sendReceiveFolder) processDeletions(ctx context.Context, fileDeletions map[string]protocol.FileInfo, dirDeletions []protocol.FileInfo, deferred map[string]protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) {
+	f.sl.Debug("Processing deletions", slog.Int("files", len(fileDeletions)), slog.Int("dirs", len(dirDeletions)))
+	collapsedDirs := f.collapseDeletions(ctx, fileDeletions, dirDeletions, deferred, dbUpdateChan)
+
 	for _, file := range fileDeletions {
 		select {
 		case <-ctx.Done():
@@ -623,9 +626,261 @@ func (f *sendReceiveFolder) processDeletions(ctx context.Context, fileDeletions 
 		}
 
 		dir := dirDeletions[len(dirDeletions)-i-1]
+		if _, ok := collapsedDirs[dir.Name]; ok {
+			continue
+		}
 		f.sl.DebugContext(ctx, "Deleting directory", slogutil.FilePath(dir.Name))
 		f.deleteDir(dir, dbUpdateChan, scanChan)
 	}
+}
+
+// collapseDeletionsMinSet is the smallest deletion set under one directory root for which the
+// collapse path is attempted. Below it the per-file path is cheap enough that the verification
+// walk buys nothing.
+const collapseDeletionsMinSet = 100
+
+// collapseDeletions handles waves that delete whole directory trees (a removed checkout, a
+// cleaned build directory): those arrive as one tombstone per file plus one per directory, and
+// the per-file path pays a database read, a stat, a remove, two event-bus entries, and a log
+// line for each of them. When a deleted directory's entire on-disk content verifies as covered
+// by this round's deletion set, the tree comes out in one RemoveAll and the index updates queue
+// in bulk. The verification is what makes it safe: anything on disk that lacks a
+// non-conflicting tombstone in this round's set, differs from its local index entry, or is
+// unknown to the index aborts the collapse for that root, and the per-file path runs for it
+// unchanged. Entries in the deferred set count as covered: they are deleted later this same
+// round (the collapse merely takes them slightly early), and both consumers tolerate that:
+// the queue's rename shortcut falls back to fetching when its source vanished, and the
+// deferred pass's per-file delete tolerates the file already being gone. Without this, one
+// deferred file anywhere in a tree (common in a delete-and-re-checkout cycle, where the
+// content-identical files defer as rename sources) would abort the tree's whole collapse.
+// Ignored-deletable and temporary entries are removable as in the per-directory
+// path. Never runs with a versioner configured: versioning wants its per-file move-away.
+//
+// fileDeletions is mutated: collapsed members are removed from it. The returned set holds the
+// collapsed directories (including the roots) for the caller to skip.
+func (f *sendReceiveFolder) collapseDeletions(ctx context.Context, fileDeletions map[string]protocol.FileInfo, dirDeletions []protocol.FileInfo, deferred map[string]protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob) map[string]struct{} {
+	if f.versioner != nil || len(dirDeletions) == 0 {
+		if len(dirDeletions) > 0 {
+			f.sl.Debug("Collapse skipped: versioner configured", slog.Int("dirs", len(dirDeletions)))
+		}
+		return nil
+	}
+
+	dirSet := make(map[string]protocol.FileInfo, len(dirDeletions))
+	for _, d := range dirDeletions {
+		dirSet[d.Name] = d
+	}
+
+	// A deletion root is a deleted directory with no deleted ancestor in this round: the
+	// outermost directory of each deleted tree.
+	rootSet := make(map[string]struct{})
+	for name := range dirSet {
+		isRoot := true
+		for parent := filepath.Dir(name); parent != "." && parent != "" && parent != "/"; parent = filepath.Dir(parent) {
+			if _, ok := dirSet[parent]; ok {
+				isRoot = false
+				break
+			}
+		}
+		if isRoot {
+			rootSet[name] = struct{}{}
+		}
+	}
+
+	// Assign every deletion in the round to its owning root.
+	members := make(map[string][]string, len(rootSet))
+	for name := range fileDeletions {
+		if root := owningRoot(name, rootSet); root != "" {
+			members[root] = append(members[root], name)
+		}
+	}
+	for name := range dirSet {
+		if _, isRoot := rootSet[name]; isRoot {
+			continue // the root itself is accounted for at collapse time
+		}
+		if root := owningRoot(name, rootSet); root != "" {
+			members[root] = append(members[root], name)
+		}
+	}
+
+	collapsed := make(map[string]struct{})
+	var belowThreshold, symlinkSkipped, verifyFailed, removeFailed, pullConflict int
+	for root, names := range members {
+		if len(names)+1 < collapseDeletionsMinSet {
+			belowThreshold++
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return collapsed
+		default:
+		}
+
+		// A pull queued or in flight under the root (multi-device
+		// inconsistency: the tree deleted on one device, an entry inside it
+		// alive on another) would have its freshly written file destroyed by
+		// the RemoveAll. The per-file path converges safely instead.
+		if f.queue.ContainsPathUnder(root) {
+			pullConflict++
+			f.sl.Debug("Collapse skipped: pulls pending under the tree", slogutil.FilePath(root))
+			continue
+		}
+
+		// Never remove anything through a symlinked parent (mirrors checkToBeDeleted).
+		if err := osutil.TraversesSymlink(f.mtimefs, filepath.Dir(root)); err != nil {
+			symlinkSkipped++
+			continue
+		}
+
+		covered, abortPath, abortReason := f.verifyDeleteTreeCovered(root, fileDeletions, dirSet, deferred)
+		if !covered {
+			verifyFailed++
+			f.sl.Debug("Collapse verification failed", slogutil.FilePath(root), slog.String("abortPath", abortPath), slog.String("reason", abortReason))
+			continue
+		}
+
+		if err := f.inWritableDir(f.mtimefs.RemoveAll, root); err != nil && !fs.IsNotExist(err) {
+			// Partial removal is fine: the per-file path below handles what
+			// remains, and tolerates what is already gone.
+			removeFailed++
+			f.sl.Debug("Collapsed tree delete failed, falling back to per-file deletes", slogutil.FilePath(root), slogutil.Error(err))
+			continue
+		}
+
+		count := 0
+		for _, name := range names {
+			select {
+			case <-ctx.Done():
+				return collapsed
+			default:
+			}
+			if d, ok := dirSet[name]; ok {
+				dbUpdateChan <- dbUpdateJob{d, dbUpdateDeleteDir}
+				collapsed[name] = struct{}{}
+			} else if fi, ok := fileDeletions[name]; ok {
+				dbUpdateChan <- dbUpdateJob{fi, dbUpdateDeleteFile}
+				delete(fileDeletions, name)
+			}
+			count++
+		}
+		dbUpdateChan <- dbUpdateJob{dirSet[root], dbUpdateDeleteDir}
+		collapsed[root] = struct{}{}
+		count++
+		slog.Info("Deleted directory tree in one collapsed delete", f.LogAttr(), slogutil.FilePath(root), slog.Int("items", count))
+	}
+	f.sl.Debug("Collapse pass complete", slog.Int("roots", len(rootSet)), slog.Int("collapsed", len(collapsed)), slog.Int("belowThreshold", belowThreshold), slog.Int("symlinkSkipped", symlinkSkipped), slog.Int("verifyFailed", verifyFailed), slog.Int("removeFailed", removeFailed), slog.Int("pullConflict", pullConflict))
+	return collapsed
+}
+
+// owningRoot returns the deletion root that is an ancestor of name, if any.
+func owningRoot(name string, rootSet map[string]struct{}) string {
+	for parent := filepath.Dir(name); parent != "." && parent != "" && parent != "/"; parent = filepath.Dir(parent) {
+		if _, ok := rootSet[parent]; ok {
+			return parent
+		}
+	}
+	return ""
+}
+
+// errCollapseAbort aborts the verification walk when the tree is not fully covered.
+var errCollapseAbort = errors.New("collapse aborted")
+
+// verifyDeleteTreeCovered walks the on-disk tree at root and reports whether every entry in it
+// may safely be removed: covered by a tombstone in this round's deletion set, not in conflict
+// with the local index, content unchanged since the index entry was made, or ignorable
+// (deletable) or temporary. Anything else - an untracked file, a local modification, a
+// conflict, a read error - aborts, and the caller falls back to the per-file path. On abort
+// the first offending path and the reason are returned so the caller can log them: the abort
+// is otherwise invisible and the per-file fallback silently costs one syscall per entry.
+func (f *sendReceiveFolder) verifyDeleteTreeCovered(root string, fileDeletions map[string]protocol.FileInfo, dirSet map[string]protocol.FileInfo, deferred map[string]protocol.FileInfo) (ok bool, abortPath, abortReason string) {
+	abort := func(path, reason string) error {
+		if abortReason == "" { // keep the first, rootmost failure
+			abortPath, abortReason = path, reason
+		}
+		return errCollapseAbort
+	}
+	err := f.mtimefs.Walk(root, func(path string, info fs.FileInfo, err error) error {
+		if path == root {
+			return err // a vanished root verifies vacuously; a read error does not
+		}
+		if err != nil {
+			return abort(path, "walk error: "+err.Error())
+		}
+		switch match := f.ignores.Match(path); {
+		case match.IsDeletable() || fs.IsTemporary(path):
+			if info.IsDir() {
+				return fs.SkipDir // ignorable subtree: removable without further checks
+			}
+			return nil
+		case match.IsIgnored():
+			return abort(path, "ignored (non-deletable): user content, keep")
+		}
+		tomb, covered := fileDeletions[path]
+		if !covered {
+			tomb, covered = dirSet[path]
+		}
+		if !covered {
+			// A deferred entry is deleted later this same round; taking it with the
+			// tree only loses a rename source, which the queue replaces by fetching.
+			tomb, covered = deferred[path]
+		}
+		if !covered && info.IsDir() {
+			// On-disk residue of a tombstone an earlier pass already consumed: a
+			// restart or a not-quite-empty directory at the time leaves the entry
+			// behind with the index saying deleted. Removing it with the tree is
+			// safe - the walk still descends and verifies everything inside - and
+			// leaving it would resurrect the empty directory at the next scan.
+			if cur, hasCur, cerr := f.model.sdb.GetDeviceFile(f.folderID, protocol.LocalDeviceID, path); cerr == nil && hasCur && cur.IsDeleted() {
+				return nil
+			}
+		}
+		if !covered {
+			return abort(path, "on disk but not deleted this round: user content, keep")
+		}
+		cur, hasCur, cerr := f.model.sdb.GetDeviceFile(f.folderID, protocol.LocalDeviceID, path)
+		if cerr != nil || !hasCur {
+			return abort(path, "unknown to the local index: treat as user content")
+		}
+		if cur.IsDeleted() {
+			return abort(path, "already deleted in the local index: on-disk residue from an earlier failed delete")
+		}
+		if cur.IsReceiveOnlyChanged() {
+			return abort(path, "receive-only changed")
+		}
+		if cur.IsUnsupported() {
+			return abort(path, "unsupported entry")
+		}
+		if info.IsDir() {
+			return nil // directories carry no content to conflict over; descend
+		}
+		if tomb.InConflictWith(cur) {
+			return abort(path, "conflicts with the local index version")
+		}
+		// The disk content must match the local index, i.e. there is no unscanned local
+		// modification that the delete would silently destroy.
+		diskFile, derr := scanner.CreateFileInfo(info, path, f.mtimefs, false, false, config.XattrFilter{})
+		if derr != nil {
+			return abort(path, "scan error: "+derr.Error())
+		}
+		if !cur.IsEquivalentOptional(diskFile, protocol.FileInfoComparison{
+			ModTimeWindow:   f.modTimeWindow,
+			IgnorePerms:     f.IgnorePerms,
+			IgnoreBlocks:    true,
+			IgnoreFlags:     protocol.LocalAllFlags,
+			IgnoreOwnership: !f.SyncOwnership,
+			IgnoreXattrs:    !f.SyncXattrs,
+		}) {
+			return abort(path, "disk content differs from the local index: unscanned local modification")
+		}
+		return nil
+	})
+	if err != nil {
+		if err != errCollapseAbort {
+			f.sl.Debug("Delete-tree verification walk failed", slogutil.FilePath(root), slogutil.Error(err))
+		}
+		return false, abortPath, abortReason
+	}
+	return true, "", ""
 }
 
 // handleDir creates or updates the given directory
