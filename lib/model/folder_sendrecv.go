@@ -300,7 +300,7 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 	var delWg sync.WaitGroup
 	if err == nil {
 		delWg.Go(func() {
-			f.processDeletions(ctx, fileDeletions, dirDeletions, dbUpdateChan, scanChan)
+			f.processDeletions(ctx, fileDeletions, dirDeletions, deferredDeletions, dbUpdateChan, scanChan)
 		})
 		if qerr := f.processQueue(ctx, buckets, deferredDeletions, copyChan, dbUpdateChan, scanChan); qerr != nil {
 			err = qerr
@@ -325,7 +325,7 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 	// Deletions whose local blocks served (or could have served) the round's
 	// pulls go last, once the pipeline has drained.
 	if err == nil && len(deferredDeletions) > 0 {
-		f.processDeletions(ctx, deferredDeletions, nil, dbUpdateChan, scanChan)
+		f.processDeletions(ctx, deferredDeletions, nil, nil, dbUpdateChan, scanChan)
 	}
 
 	// Wait for db updates and scan scheduling to complete
@@ -606,9 +606,9 @@ func popCandidate(buckets map[string][]protocol.FileInfo, key string) (protocol.
 	return cands[0], true
 }
 
-func (f *sendReceiveFolder) processDeletions(ctx context.Context, fileDeletions map[string]protocol.FileInfo, dirDeletions []protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) {
+func (f *sendReceiveFolder) processDeletions(ctx context.Context, fileDeletions map[string]protocol.FileInfo, dirDeletions []protocol.FileInfo, deferred map[string]protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) {
 	f.sl.Debug("Processing deletions", slog.Int("files", len(fileDeletions)), slog.Int("dirs", len(dirDeletions)))
-	collapsedDirs := f.collapseDeletions(ctx, fileDeletions, dirDeletions, dbUpdateChan)
+	collapsedDirs := f.collapseDeletions(ctx, fileDeletions, dirDeletions, deferred, dbUpdateChan)
 
 	for _, file := range fileDeletions {
 		select {
@@ -650,12 +650,18 @@ const collapseDeletionsMinSet = 100
 // in bulk. The verification is what makes it safe: anything on disk that lacks a
 // non-conflicting tombstone in this round's set, differs from its local index entry, or is
 // unknown to the index aborts the collapse for that root, and the per-file path runs for it
-// unchanged. Ignored-deletable and temporary entries are removable as in the per-directory
+// unchanged. Entries in the deferred set count as covered: they are deleted later this same
+// round (the collapse merely takes them slightly early), and both consumers tolerate that:
+// the queue's rename shortcut falls back to fetching when its source vanished, and the
+// deferred pass's per-file delete tolerates the file already being gone. Without this, one
+// deferred file anywhere in a tree (common in a delete-and-re-checkout cycle, where the
+// content-identical files defer as rename sources) would abort the tree's whole collapse.
+// Ignored-deletable and temporary entries are removable as in the per-directory
 // path. Never runs with a versioner configured: versioning wants its per-file move-away.
 //
 // fileDeletions is mutated: collapsed members are removed from it. The returned set holds the
 // collapsed directories (including the roots) for the caller to skip.
-func (f *sendReceiveFolder) collapseDeletions(ctx context.Context, fileDeletions map[string]protocol.FileInfo, dirDeletions []protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob) map[string]struct{} {
+func (f *sendReceiveFolder) collapseDeletions(ctx context.Context, fileDeletions map[string]protocol.FileInfo, dirDeletions []protocol.FileInfo, deferred map[string]protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob) map[string]struct{} {
 	if f.versioner != nil || len(dirDeletions) == 0 {
 		if len(dirDeletions) > 0 {
 			f.sl.Debug("Collapse skipped: versioner configured", slog.Int("dirs", len(dirDeletions)))
@@ -719,7 +725,7 @@ func (f *sendReceiveFolder) collapseDeletions(ctx context.Context, fileDeletions
 			continue
 		}
 
-		covered, abortPath, abortReason := f.verifyDeleteTreeCovered(root, fileDeletions, dirSet)
+		covered, abortPath, abortReason := f.verifyDeleteTreeCovered(root, fileDeletions, dirSet, deferred)
 		if !covered {
 			verifyFailed++
 			f.sl.Debug("Collapse verification failed", slogutil.FilePath(root), slog.String("abortPath", abortPath), slog.String("reason", abortReason))
@@ -779,7 +785,7 @@ var errCollapseAbort = errors.New("collapse aborted")
 // conflict, a read error - aborts, and the caller falls back to the per-file path. On abort
 // the first offending path and the reason are returned so the caller can log them: the abort
 // is otherwise invisible and the per-file fallback silently costs one syscall per entry.
-func (f *sendReceiveFolder) verifyDeleteTreeCovered(root string, fileDeletions map[string]protocol.FileInfo, dirSet map[string]protocol.FileInfo) (ok bool, abortPath, abortReason string) {
+func (f *sendReceiveFolder) verifyDeleteTreeCovered(root string, fileDeletions map[string]protocol.FileInfo, dirSet map[string]protocol.FileInfo, deferred map[string]protocol.FileInfo) (ok bool, abortPath, abortReason string) {
 	abort := func(path, reason string) error {
 		if abortReason == "" { // keep the first, rootmost failure
 			abortPath, abortReason = path, reason
@@ -805,6 +811,11 @@ func (f *sendReceiveFolder) verifyDeleteTreeCovered(root string, fileDeletions m
 		tomb, covered := fileDeletions[path]
 		if !covered {
 			tomb, covered = dirSet[path]
+		}
+		if !covered {
+			// A deferred entry is deleted later this same round; taking it with the
+			// tree only loses a rename source, which the queue replaces by fetching.
+			tomb, covered = deferred[path]
 		}
 		if !covered {
 			return abort(path, "on disk but not deleted this round: user content, keep")
