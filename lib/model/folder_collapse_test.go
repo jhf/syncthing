@@ -64,7 +64,7 @@ func TestCollapseDeletionsCollapses(t *testing.T) {
 	dbUpdateChan := make(chan dbUpdateJob, 2*members)
 	scanChan := make(chan string, 10)
 
-	f.processDeletions(t.Context(), fileDeletions, dirDeletions, dbUpdateChan, scanChan)
+	f.processDeletions(t.Context(), fileDeletions, dirDeletions, nil, dbUpdateChan, scanChan)
 
 	if len(fileDeletions) != 0 {
 		t.Errorf("%d file deletions left for the per-file path after a full collapse", len(fileDeletions))
@@ -89,7 +89,7 @@ func TestCollapseDeletionsKeepsUntracked(t *testing.T) {
 	dbUpdateChan := make(chan dbUpdateJob, 1000)
 	scanChan := make(chan string, 100)
 
-	f.processDeletions(t.Context(), fileDeletions, dirDeletions, dbUpdateChan, scanChan)
+	f.processDeletions(t.Context(), fileDeletions, dirDeletions, nil, dbUpdateChan, scanChan)
 
 	if _, err := f.mtimefs.Lstat("tree/d2/userfile"); err != nil {
 		t.Errorf("untracked user file must survive the wave, stat err = %v", err)
@@ -108,9 +108,42 @@ func TestCollapseDeletionsKeepsLocalModification(t *testing.T) {
 	dbUpdateChan := make(chan dbUpdateJob, 1000)
 	scanChan := make(chan string, 100)
 
-	f.processDeletions(t.Context(), fileDeletions, dirDeletions, dbUpdateChan, scanChan)
+	f.processDeletions(t.Context(), fileDeletions, dirDeletions, nil, dbUpdateChan, scanChan)
 
 	if _, err := f.mtimefs.Lstat("tree/d1/f000"); err != nil {
 		t.Errorf("locally modified file must survive the wave, stat err = %v", err)
+	}
+}
+
+func TestCollapseDeletionsCoversDeferred(t *testing.T) {
+	t.Parallel()
+	_, f := setupSendReceiveFolder(t)
+	members := setupCollapseTree(t, f, "tree", 60)
+
+	// One file of the tree defers to the post-drain pass (rename source for an
+	// in-flight pull). It is still deleted this round, so the collapse must not
+	// treat it as user content and abandon the whole tree to the per-file path.
+	fileDeletions, dirDeletions := collapseWave(t, f, "tree")
+	deferred := map[string]protocol.FileInfo{"tree/d1/f000": fileDeletions["tree/d1/f000"]}
+	delete(fileDeletions, "tree/d1/f000")
+
+	dbUpdateChan := make(chan dbUpdateJob, 2*members)
+	scanChan := make(chan string, 10)
+	f.processDeletions(t.Context(), fileDeletions, dirDeletions, deferred, dbUpdateChan, scanChan)
+
+	if len(fileDeletions) != 0 {
+		t.Errorf("%d file deletions left for the per-file path despite the collapse", len(fileDeletions))
+	}
+	if _, err := f.mtimefs.Lstat("tree"); !fs.IsNotExist(err) {
+		t.Errorf("tree should be gone from disk, stat err = %v", err)
+	}
+	// The deferred entry's index update is not the collapse's business: the
+	// post-drain pass deletes it from the index (tolerating the file already
+	// being gone from disk).
+	if got, want := len(dbUpdateChan), members-1; got != want {
+		t.Errorf("expected %d index updates (tree minus the deferred entry), got %d", want, got)
+	}
+	if _, ok := deferred["tree/d1/f000"]; !ok {
+		t.Error("the deferred set must be left for the post-drain pass")
 	}
 }
