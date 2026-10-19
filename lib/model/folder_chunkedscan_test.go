@@ -508,3 +508,40 @@ func TestScanSweepServicesWatch(t *testing.T) {
 		t.Error("d2/new missing: the queued watch event was not serviced inside the sweep")
 	}
 }
+
+// TestNextScanChunkBudget pins the adaptive quantum rule: idle boundaries double the budget up
+// to the cap, serviced work snaps it back to the base quantum, and a chunk without progress
+// grows aggressively toward the hard cap so a slow resume point can still finish.
+func TestNextScanChunkBudget(t *testing.T) {
+	t.Parallel()
+
+	// Idle boundaries double from the base up to the adaptive cap, then hold there.
+	b := scanChunkBudget
+	for range 10 {
+		b = nextScanChunkBudget(b, true, false)
+	}
+	if b != maxAdaptiveScanChunkBudget {
+		t.Errorf("idle growth should reach the adaptive cap, got %v", b)
+	}
+	if got := nextScanChunkBudget(maxAdaptiveScanChunkBudget, true, false); got != maxAdaptiveScanChunkBudget {
+		t.Errorf("idle growth should hold at the cap, got %v", got)
+	}
+
+	// Serviced work snaps back to the base quantum.
+	if got := nextScanChunkBudget(maxAdaptiveScanChunkBudget, true, true); got != scanChunkBudget {
+		t.Errorf("serviced work should snap back to the base quantum, got %v", got)
+	}
+
+	// No progress doubles aggressively, floored at 100ms, capped at 5 minutes, and wins over
+	// the serviced signal: an unprogressable chunk must grow regardless of queue state.
+	if got := nextScanChunkBudget(10*time.Millisecond, false, true); got != 100*time.Millisecond {
+		t.Errorf("no progress should floor at 100ms, got %v", got)
+	}
+	b = scanChunkBudget
+	for range 20 {
+		b = nextScanChunkBudget(b, false, false)
+	}
+	if b != 5*time.Minute {
+		t.Errorf("no-progress growth should reach the 5m hard cap, got %v", b)
+	}
+}

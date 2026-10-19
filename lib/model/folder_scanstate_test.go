@@ -118,7 +118,8 @@ func TestServiceQueuedWatchSkipsNestedFullScan(t *testing.T) {
 	defer f.fullScanActive.Store(false)
 
 	f.watchChan <- watchaggregator.Batch{Paths: []string{"."}}
-	must(t, f.serviceQueuedWatch(ctx))
+	_, err := f.serviceQueuedWatch(ctx)
+	must(t, err)
 
 	if _, ok, err := f.db.GetDeviceFile(f.ID, protocol.LocalDeviceID, "skipme/newfile"); err != nil {
 		t.Fatal(err)
@@ -127,7 +128,8 @@ func TestServiceQueuedWatchSkipsNestedFullScan(t *testing.T) {
 	}
 
 	f.watchChan <- watchaggregator.Batch{Paths: []string{"target"}}
-	must(t, f.serviceQueuedWatch(ctx))
+	_, err = f.serviceQueuedWatch(ctx)
+	must(t, err)
 
 	if _, ok, err := f.db.GetDeviceFile(f.ID, protocol.LocalDeviceID, "target/newfile"); err != nil {
 		t.Fatal(err)
