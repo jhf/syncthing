@@ -60,6 +60,7 @@ func (r *logRing) append(l Line) {
 	r.seq++
 	r.lines[(r.seq-1)%uint64(len(r.lines))] = l
 	r.mut.Unlock()
+	checkTraps(l)
 	select {
 	case r.poke <- struct{}{}:
 	default:
