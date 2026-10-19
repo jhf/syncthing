@@ -9,6 +9,7 @@ package model
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/syncthing/syncthing/internal/itererr"
 	"github.com/syncthing/syncthing/lib/fs"
@@ -182,5 +183,41 @@ func TestCollapseDeletionsCoversResidueDir(t *testing.T) {
 	// must not emit a second update for it.
 	if got, want := len(dbUpdateChan), members-1; got != want {
 		t.Errorf("expected %d index updates (tree minus the residue dir), got %d", want, got)
+	}
+}
+
+func TestCollapseDeletionsSkipsQueuedPullTree(t *testing.T) {
+	t.Parallel()
+	_, f := setupSendReceiveFolder(t)
+	setupCollapseTree(t, f, "tree", 60)
+
+	// A pull queued under the deleted tree (multi-device inconsistency: the
+	// tree deleted on one device, an entry inside alive on another) must skip
+	// the collapse: the RemoveAll would destroy the freshly pulled file.
+	f.queue.Push("tree/d1/pulled", 100, time.Now())
+
+	fileDeletions, dirDeletions := collapseWave(t, f, "tree")
+	dbUpdateChan := make(chan dbUpdateJob, 1000)
+
+	if collapsed := f.collapseDeletions(t.Context(), fileDeletions, dirDeletions, nil, dbUpdateChan); len(collapsed) != 0 {
+		t.Errorf("collapse ran with a pull queued under the tree: %v", collapsed)
+	}
+	if _, err := f.mtimefs.Lstat("tree"); err != nil {
+		t.Errorf("tree must survive while a pull is queued under it, stat err = %v", err)
+	}
+
+	// Once the queue no longer touches the tree, the collapse proceeds.
+	name, ok := f.queue.Pop()
+	if !ok || name != "tree/d1/pulled" {
+		t.Fatalf("expected to pop the queued pull, got %q, %v", name, ok)
+	}
+	f.queue.Done(name)
+
+	fileDeletions2, dirDeletions2 := collapseWave(t, f, "tree")
+	if collapsed := f.collapseDeletions(t.Context(), fileDeletions2, dirDeletions2, nil, dbUpdateChan); len(collapsed) == 0 {
+		t.Error("collapse should proceed once the queue no longer touches the tree")
+	}
+	if _, err := f.mtimefs.Lstat("tree"); !fs.IsNotExist(err) {
+		t.Errorf("tree should be gone after the queue cleared, stat err = %v", err)
 	}
 }

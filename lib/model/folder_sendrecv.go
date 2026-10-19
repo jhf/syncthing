@@ -707,7 +707,7 @@ func (f *sendReceiveFolder) collapseDeletions(ctx context.Context, fileDeletions
 	}
 
 	collapsed := make(map[string]struct{})
-	var belowThreshold, symlinkSkipped, verifyFailed, removeFailed int
+	var belowThreshold, symlinkSkipped, verifyFailed, removeFailed, pullConflict int
 	for root, names := range members {
 		if len(names)+1 < collapseDeletionsMinSet {
 			belowThreshold++
@@ -717,6 +717,16 @@ func (f *sendReceiveFolder) collapseDeletions(ctx context.Context, fileDeletions
 		case <-ctx.Done():
 			return collapsed
 		default:
+		}
+
+		// A pull queued or in flight under the root (multi-device
+		// inconsistency: the tree deleted on one device, an entry inside it
+		// alive on another) would have its freshly written file destroyed by
+		// the RemoveAll. The per-file path converges safely instead.
+		if f.queue.ContainsPathUnder(root) {
+			pullConflict++
+			f.sl.Debug("Collapse skipped: pulls pending under the tree", slogutil.FilePath(root))
+			continue
 		}
 
 		// Never remove anything through a symlinked parent (mirrors checkToBeDeleted).
@@ -761,7 +771,7 @@ func (f *sendReceiveFolder) collapseDeletions(ctx context.Context, fileDeletions
 		count++
 		slog.Info("Deleted directory tree in one collapsed delete", f.LogAttr(), slogutil.FilePath(root), slog.Int("items", count))
 	}
-	f.sl.Debug("Collapse pass complete", slog.Int("roots", len(rootSet)), slog.Int("collapsed", len(collapsed)), slog.Int("belowThreshold", belowThreshold), slog.Int("symlinkSkipped", symlinkSkipped), slog.Int("verifyFailed", verifyFailed), slog.Int("removeFailed", removeFailed))
+	f.sl.Debug("Collapse pass complete", slog.Int("roots", len(rootSet)), slog.Int("collapsed", len(collapsed)), slog.Int("belowThreshold", belowThreshold), slog.Int("symlinkSkipped", symlinkSkipped), slog.Int("verifyFailed", verifyFailed), slog.Int("removeFailed", removeFailed), slog.Int("pullConflict", pullConflict))
 	return collapsed
 }
 
