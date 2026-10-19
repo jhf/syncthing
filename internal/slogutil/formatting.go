@@ -28,6 +28,8 @@ type formattingOptions struct {
 	LineFormat
 
 	out          io.Writer
+	ring         *logRing
+	overview     *logRing
 	recs         []*lineRecorder
 	timeOverride time.Time
 }
@@ -109,9 +111,19 @@ func (h *formattingHandler) Handle(_ context.Context, rec slog.Record) error {
 		rec.record(line)
 	}
 
-	// If there's an output, print the line.
-	if h.opts.out != nil {
+	// The ring is the primary sink: appending is O(1) in memory and the
+	// drainer performs all output I/O. Handlers without a ring (tests)
+	// write directly.
+	if h.opts.ring != nil {
+		h.opts.ring.append(line)
+	} else if h.opts.out != nil {
 		_, _ = line.WriteTo(h.opts.out, h.opts.LineFormat)
+	}
+	// The overview ring (overview.go) keeps the flood-resistant subset;
+	// admission is decided on the raw call-site message, before attrs are
+	// rendered into line.Message.
+	if h.opts.overview != nil && overviewWorthy(rec.Message, rec.Level) {
+		h.opts.overview.append(line)
 	}
 	return nil
 }
