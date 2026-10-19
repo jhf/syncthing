@@ -7,6 +7,7 @@
 package model
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -78,6 +79,28 @@ func (q *jobQueue) Done(file string) {
 			return
 		}
 	}
+}
+
+// ContainsPathUnder reports whether any queued or in-progress job's path sits
+// under the given directory. Queue membership only shrinks over a round
+// (nothing pushes mid-round), so a false answer stays false for the rest of
+// the round.
+func (q *jobQueue) ContainsPathUnder(dir string) bool {
+	q.mut.Lock()
+	defer q.mut.Unlock()
+
+	prefix := dir + "/"
+	for _, e := range q.queued {
+		if strings.HasPrefix(e.name, prefix) {
+			return true
+		}
+	}
+	for _, name := range q.progress {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // Jobs returns a paginated list of file currently being pulled and files queued
