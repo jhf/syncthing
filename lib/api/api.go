@@ -282,6 +282,9 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/upgrade", s.getSystemUpgrade)           // -
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/version", s.getSystemVersion)           // -
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/loglevels", s.getSystemDebug)           // -
+	restMux.HandlerFunc(http.MethodGet, "/rest/system/logtraps", s.getLogTraps)               // -
+	restMux.HandlerFunc(http.MethodPost, "/rest/system/logtraps", s.postLogTrap)              // <body>
+	restMux.HandlerFunc(http.MethodDelete, "/rest/system/logtraps", s.deleteLogTrap)          // pattern
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/log", s.getSystemLog)                   // [since]
 	restMux.HandlerFunc(http.MethodGet, "/rest/system/log.txt", s.getSystemLogTxt)            // [since]
 
@@ -729,6 +732,67 @@ func (*service) getSystemDebug(w http.ResponseWriter, _ *http.Request) {
 		"packages": slogutil.PackageDescrs(),
 		"levels":   slogutil.PackageLevels(),
 	})
+}
+
+func (*service) getLogTraps(w http.ResponseWriter, _ *http.Request) {
+	sendJSON(w, slogutil.LogTrapStatus())
+}
+
+// postLogTrap arms a log trap: when a log line matching the filter enters
+// the ring, dump the ring and elevate the given packages for the duration.
+// Body: {"contains": "Deleted file (folder.id=home ... file.name=Projects/x",
+// or "regex": "...", "packages": ["model"], "level": "DEBUG",
+// "durationSeconds": 600, "cooldownSeconds": 900, "dump": true}
+func (*service) postLogTrap(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Contains        string   `json:"contains"`
+		Regex           string   `json:"regex"`
+		Packages        []string `json:"packages"`
+		Level           string   `json:"level"`
+		DurationSeconds int      `json:"durationSeconds"`
+		CooldownSeconds int      `json:"cooldownSeconds"`
+		Dump            bool     `json:"dump"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var level slog.Level
+	if req.Level != "" {
+		if err := level.UnmarshalText([]byte(req.Level)); err != nil {
+			http.Error(w, "bad level: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else {
+		level = slog.LevelDebug
+	}
+	spec := slogutil.TrapSpec{
+		Contains: req.Contains,
+		Regex:    req.Regex,
+		Packages: req.Packages,
+		Level:    level,
+		Duration: time.Duration(req.DurationSeconds) * time.Second,
+		Cooldown: time.Duration(req.CooldownSeconds) * time.Second,
+	}
+	if req.Dump {
+		spec.DumpPath = func(tag string) string {
+			return strings.TrimSuffix(locations.GetTimestamped(locations.PanicLog), ".log") +
+				"-trap-" + tag + ".log"
+		}
+	}
+	if err := slogutil.AddLogTrap(spec); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (*service) deleteLogTrap(w http.ResponseWriter, r *http.Request) {
+	if !slogutil.RemoveLogTrap(r.URL.Query().Get("pattern")) {
+		http.Error(w, "no such trap", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (*service) postSystemDebug(w http.ResponseWriter, r *http.Request) {

@@ -21,6 +21,10 @@ type Line struct {
 	When    time.Time  `json:"when"`
 	Message string     `json:"message"`
 	Level   slog.Level `json:"level"`
+
+	// pkg is the log package that produced the line, used by the trap
+	// machinery to exempt its own bookkeeping lines.
+	pkg string
 }
 
 func (l *Line) WriteTo(w io.Writer, f LineFormat) (int64, error) {
