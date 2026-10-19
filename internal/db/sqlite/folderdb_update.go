@@ -763,13 +763,19 @@ func (s *folderDB) periodicCheckpointLocked(fs []protocol.FileInfo) {
 			slog.Debug("PRAGMA journal_size_limit error", slog.String("db", s.baseName), slogutil.Error(err))
 		}
 
-		// Every 50th checkpoint becomes a truncate, in an effort to bring
-		// down the size now and then.
-		checkpointType := "RESTART"
-		if s.checkpointsCount > 50 {
-			checkpointType = "TRUNCATE"
-		}
-		cmd := fmt.Sprintf(`PRAGMA wal_checkpoint(%s)`, checkpointType)
+		// Checkpoint in PASSIVE mode: it copies what it can without waiting on
+		// readers and returns immediately. This runs synchronously in whatever
+		// goroutine happened to update the database - the folder serve loop
+		// during a scan sweep - where RESTART/TRUNCATE must wait for readers,
+		// and the sweep's own iteration snapshot is such a reader: the
+		// checkpoint could not complete, returned busy, and the escalating
+		// retry logic then attempted ever more TRUNCATEs against the same
+		// pinned snapshot. Measured 2026-10-19 on a 197k-entry deletion
+		// sweep: ~100 marks/s at 0% CPU, the serve loop parked in the
+		// checkpoint's sqlite3_step. PASSIVE never stalls the writer; the WAL
+		// size stays bounded by journal_size_limit, and checkpoints complete
+		// fully once readers drain, when the machine is quiet.
+		cmd := `PRAGMA wal_checkpoint(PASSIVE)`
 		row := conn.QueryRowContext(context.Background(), cmd)
 
 		var res, modified, moved int
@@ -781,16 +787,13 @@ func (s *folderDB) periodicCheckpointLocked(fs []protocol.FileInfo) {
 			slog.Debug("Checkpoint result", "db", s.baseName, "checkpointscount", s.checkpointsCount, "updatepoints", s.updatePoints, "res", res, "modified", modified, "moved", moved)
 		}
 
-		// Reset the truncate counter when a truncate succeeded. If it
-		// failed, we'll keep trying it until we succeed. Increase it faster
-		// when we fail to checkpoint, as it's more likely the WAL is
-		// growing and will need truncation when we get out of this state.
-		switch {
-		case res == 1:
-			s.checkpointsCount += 10
-		case res == 0 && checkpointType == "TRUNCATE":
+		// PASSIVE never blocks, so a busy result is not expected; moved <
+		// modified simply means readers pinned part of the WAL, which is fine
+		// - the next checkpoint continues where this one stopped. Count
+		// consecutive incomplete checkpoints purely for the debug log above.
+		if res == 0 && moved == modified {
 			s.checkpointsCount = 0
-		default:
+		} else {
 			s.checkpointsCount++
 		}
 		s.updatePoints = 0
