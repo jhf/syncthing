@@ -34,6 +34,7 @@ everything in the branches before it plus its own piece, so
 | 18 | `patch/18-scan-observability` | Full-scan outcomes and btrfs replay bail reasons are logged; pairing marker consumed only when the replay can actually be attempted; btrfs probe skipped when the journal replay already armed (found by dogfooding the fast path) | 1 |
 | 19 | `patch/19-btrfs-repair-after-replay` | Re-arm the baseline pairing after a boot diff replay on a Serve-loop retry timer — the shutdown pairing races the process-exit deadline, and an inline boot pairing fails while the watch aggregator is still in its setup pass; both found by dogfooding | 1 |
 | 20 | `patch/20-stale-request-repair` | A remote request that fails ENOENT while the index claims the file exists feeds the path into the watch aggregator: debounced subtree scan, tombstone, requester converges — self-healing for missed local changes (dogfood: one manifest retried 9449 times over 17h, 2026-10-18) | 1 |
+| 21 | `patch/21-adaptive-scan-budget` | The scan chunk quantum doubles at each boundary that found no queued pull or watch work (250ms → 5s cap) and snaps back when real work is serviced: an idle machine converges at speed instead of paying a boundary-forced commit flush per 250ms; a busy machine keeps fine-grained sharing. The deletion sweep logs per-chunk entries/marks/wall/boundary/per-entry cost — motivated by a 197k-entry sweep observed at ~100 marks/s at 0% CPU with no code path to explain it (2026-10-19) | 1 |
 
 ## Depends on
 
