@@ -52,8 +52,10 @@ func (h *formattingHandler) Enabled(context.Context, slog.Level) bool {
 func (h *formattingHandler) Handle(_ context.Context, rec slog.Record) error {
 	fr := runtime.CallersFrames([]uintptr{rec.PC})
 	var logAttrs []any
+	var pkgName string
 	if fram, _ := fr.Next(); fram.Function != "" {
-		pkgName, typeName := funcNameToPkg(fram.Function)
+		var typeName string
+		pkgName, typeName = funcNameToPkg(fram.Function)
 		lvl := globalLevels.Get(pkgName)
 		if lvl > rec.Level {
 			// Logging not enabled at the record's level
@@ -103,6 +105,7 @@ func (h *formattingHandler) Handle(_ context.Context, rec slog.Record) error {
 		When:    cmp.Or(h.opts.timeOverride, rec.Time),
 		Message: sb.String(),
 		Level:   rec.Level,
+		pkg:     pkgName,
 	}
 
 	// If there is a recorder, record the line.
