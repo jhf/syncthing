@@ -147,3 +147,40 @@ func TestCollapseDeletionsCoversDeferred(t *testing.T) {
 		t.Error("the deferred set must be left for the post-drain pass")
 	}
 }
+
+func TestCollapseDeletionsCoversResidueDir(t *testing.T) {
+	t.Parallel()
+	m, f := setupSendReceiveFolder(t)
+	members := setupCollapseTree(t, f, "tree", 60)
+
+	// Simulate residue from an interrupted earlier pass: the directory's
+	// tombstone was already consumed (the index says deleted) but the
+	// directory itself is still on disk. It must not block the collapse:
+	// the walk descends and verifies its contents individually anyway.
+	fileDeletions, dirDeletions := collapseWave(t, f, "tree")
+	var kept []protocol.FileInfo
+	for _, d := range dirDeletions {
+		if d.Name == "tree/d1" {
+			must(t, m.sdb.Update(f.folderID, protocol.LocalDeviceID, []protocol.FileInfo{d}))
+			continue
+		}
+		kept = append(kept, d)
+	}
+	dirDeletions = kept
+
+	dbUpdateChan := make(chan dbUpdateJob, 2*members)
+	scanChan := make(chan string, 10)
+	f.processDeletions(t.Context(), fileDeletions, dirDeletions, nil, dbUpdateChan, scanChan)
+
+	if len(fileDeletions) != 0 {
+		t.Errorf("%d file deletions left for the per-file path despite the collapse", len(fileDeletions))
+	}
+	if _, err := f.mtimefs.Lstat("tree"); !fs.IsNotExist(err) {
+		t.Errorf("tree should be gone from disk, stat err = %v", err)
+	}
+	// The residue directory's index entry is already deleted; the collapse
+	// must not emit a second update for it.
+	if got, want := len(dbUpdateChan), members-1; got != want {
+		t.Errorf("expected %d index updates (tree minus the residue dir), got %d", want, got)
+	}
+}
