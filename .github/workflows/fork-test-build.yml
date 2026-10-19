@@ -100,6 +100,30 @@ jobs:
           tagged commit. Known-issue mapping lives in
           [ISSUES.md](https://github.com/jhf/syncthing/blob/main/ISSUES.md).
 
+          ### Install (no package manager; swap the binary)
+
+          These are plain archives, not installers - the audience for a test build is
+          someone comfortable swapping a binary, and any AI assistant can run the
+          steps for you if you paste it this page. Verify the sha256 shown next to
+          each asset before running anything.
+
+          **Linux:** stop Syncthing (e.g. `systemctl --user stop syncthing` or
+          `sudo systemctl stop syncthing@USER`), back up the config+database
+          directory (`~/.local/state/syncthing` or `~/.config/syncthing`), unpack
+          the tarball, copy the `syncthing` binary over the one you run (find it
+          with `which syncthing`), start again.
+
+          **Windows:** quit Syncthing (tray icon, or SyncTrayzor), back up
+          `%LOCALAPPDATA%\Syncthing`, unzip, replace the `syncthing.exe` you run
+          with the one from the zip, start again.
+
+          **macOS:** quit Syncthing, back up `~/Library/Application Support/Syncthing`,
+          unpack, replace the binary you launch, start again.
+
+          **Revert:** swap the original binary back. Keep the backup until you trust
+          the build - the fork's database additions are additive indexes, but the
+          backup is the guarantee, not the assumption.
+
           ${{ inputs.notes }}
 
           **Feedback wanted:** open an issue at https://github.com/jhf/syncthing/issues
