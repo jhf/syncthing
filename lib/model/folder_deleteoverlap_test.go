@@ -9,8 +9,11 @@ package model
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
+	"time"
 
+	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/scanner"
 )
@@ -59,7 +62,7 @@ func TestProcessNeededDefersBlockOverlappingDeletions(t *testing.T) {
 	dbUpdateChan := make(chan dbUpdateJob, 100)
 	copyChan := make(chan copyBlocksState, 10)
 	scanChan := make(chan string, 10)
-	fileDeletions, _, deferred, err := f.processNeeded(t.Context(), dbUpdateChan, copyChan, scanChan)
+	fileDeletions, _, deferred, _, err := f.processNeeded(t.Context(), dbUpdateChan, copyChan, scanChan)
 	must(t, err)
 
 	if _, ok := fileDeletions["plain"]; !ok {
@@ -100,5 +103,80 @@ func TestPullerIterationDeletesConcurrently(t *testing.T) {
 
 	if _, err := f.mtimefs.Lstat("gone"); err == nil {
 		t.Error("deleted file still exists on disk")
+	}
+}
+
+// A deletion with no block overlap must be applied while a pull in the same
+// round is still in flight, not after the pipeline drains. The fake remote
+// refuses to serve the pulled block until the deleted file is gone from
+// disk, so a round that runs deletions after the drain fails to pull.
+func TestDeletionsRunConcurrentWithPulls(t *testing.T) {
+	m, f := setupSendReceiveFolder(t)
+	conn := addFakeConn(m, device1, f.ID)
+
+	writeFile(t, f.mtimefs, "victim", []byte("delete me, I share nothing"))
+	must(t, f.scanSubdirs(t.Context(), nil))
+
+	pulledContent := []byte("fresh content only the remote has")
+	blocks, err := scanner.Blocks(t.Context(), bytes.NewReader(pulledContent), protocol.MinBlockSize, int64(len(pulledContent)), nil)
+	must(t, err)
+	pulled := protocol.FileInfo{
+		Name:         "blocked",
+		Type:         protocol.FileInfoTypeFile,
+		Size:         int64(len(pulledContent)),
+		RawBlockSize: int32(protocol.MinBlockSize),
+		Blocks:       blocks,
+	}
+	pulled.Version = pulled.Version.Update(device1.Short())
+	conn.fileData = map[string][]byte{"blocked": pulledContent}
+	conn.RequestCalls(func(ctx context.Context, req *protocol.Request) ([]byte, error) {
+		if req.Name == "blocked" {
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				if _, err := f.mtimefs.Lstat("victim"); fs.IsNotExist(err) {
+					break
+				}
+				if time.Now().After(deadline) {
+					return nil, errors.New("victim still present: deletions did not run concurrently with the pull")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+		return conn.fileData[req.Name], nil
+	})
+
+	cur, ok := m.testCurrentFolderFile(f.ID, "victim")
+	if !ok {
+		t.Fatal("victim missing from local index")
+	}
+	tomb := cur
+	tomb.SetDeleted(device1.Short())
+	tomb.Version = cur.Version.Update(device1.Short())
+	must(t, m.Index(conn, &protocol.Index{Folder: f.ID, Files: []protocol.FileInfo{tomb, pulled}}))
+
+	if _, err := f.pullerIteration(t.Context(), make(chan string)); err != nil {
+		t.Fatal(err)
+	}
+	for name, e := range f.tempPullErrors {
+		t.Logf("pull error: %s: %s", name, e)
+	}
+	for _, fe := range f.pullErrors {
+		t.Logf("pull error: %s: %s", fe.Path, fe.Err)
+	}
+
+	if _, err := f.mtimefs.Lstat("victim"); !fs.IsNotExist(err) {
+		t.Error("deleted file still exists on disk")
+	}
+	if fd, err := f.mtimefs.Open("blocked"); err != nil {
+		t.Error("pulled file missing:", err)
+	} else {
+		got := make([]byte, len(pulledContent))
+		if _, err := fd.Read(got); err != nil {
+			t.Fatal(err)
+		}
+		fd.Close()
+		if !bytes.Equal(got, pulledContent) {
+			t.Error("pulled content mismatch")
+		}
 	}
 }
