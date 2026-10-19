@@ -27,6 +27,7 @@ import (
 	"runtime/pprof"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -210,6 +211,21 @@ func defaultVars() kong.Vars {
 }
 
 func main() {
+	// The log ring is the primary log sink; on a panic it holds the last N
+	// lines even if the crash wrecks the regular stream. Dump it alongside
+	// the panic logs (picked up by the panic-*.log cleanup and crash
+	// reporting), then re-panic to preserve normal crash behavior. With
+	// --no-restart there is no monitor process and this is the only record.
+	defer func() {
+		if r := recover(); r != nil {
+			path := strings.TrimSuffix(locations.GetTimestamped(locations.PanicLog), ".log") + "-ring.log"
+			if err := slogutil.DumpLogRingToFile(path); err == nil {
+				fmt.Fprintf(os.Stderr, "Log ring dumped to %s\n", path)
+			}
+			panic(r)
+		}
+	}()
+
 	// Create a parser with an overridden help function to print our extra
 	// help info.
 	var entrypoint CLI
@@ -621,6 +637,9 @@ func (c *serveCmd) syncthingMain() {
 	// Best effort remove lockfile, doesn't matter if it succeeds
 	_ = lf.Unlock()
 	_ = os.Remove(locations.Get(locations.LockFile))
+
+	// Let the log drainer write out whatever is still in the ring.
+	slogutil.FlushLogRing(2 * time.Second)
 
 	os.Exit(int(status))
 }
