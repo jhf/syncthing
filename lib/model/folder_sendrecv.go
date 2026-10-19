@@ -719,9 +719,10 @@ func (f *sendReceiveFolder) collapseDeletions(ctx context.Context, fileDeletions
 			continue
 		}
 
-		if !f.verifyDeleteTreeCovered(root, fileDeletions, dirSet) {
+		covered, abortPath, abortReason := f.verifyDeleteTreeCovered(root, fileDeletions, dirSet)
+		if !covered {
 			verifyFailed++
-			f.sl.Debug("Collapse verification failed", slogutil.FilePath(root))
+			f.sl.Debug("Collapse verification failed", slogutil.FilePath(root), slog.String("abortPath", abortPath), slog.String("reason", abortReason))
 			continue
 		}
 
@@ -775,14 +776,22 @@ var errCollapseAbort = errors.New("collapse aborted")
 // may safely be removed: covered by a tombstone in this round's deletion set, not in conflict
 // with the local index, content unchanged since the index entry was made, or ignorable
 // (deletable) or temporary. Anything else - an untracked file, a local modification, a
-// conflict, a read error - aborts, and the caller falls back to the per-file path.
-func (f *sendReceiveFolder) verifyDeleteTreeCovered(root string, fileDeletions map[string]protocol.FileInfo, dirSet map[string]protocol.FileInfo) bool {
+// conflict, a read error - aborts, and the caller falls back to the per-file path. On abort
+// the first offending path and the reason are returned so the caller can log them: the abort
+// is otherwise invisible and the per-file fallback silently costs one syscall per entry.
+func (f *sendReceiveFolder) verifyDeleteTreeCovered(root string, fileDeletions map[string]protocol.FileInfo, dirSet map[string]protocol.FileInfo) (ok bool, abortPath, abortReason string) {
+	abort := func(path, reason string) error {
+		if abortReason == "" { // keep the first, rootmost failure
+			abortPath, abortReason = path, reason
+		}
+		return errCollapseAbort
+	}
 	err := f.mtimefs.Walk(root, func(path string, info fs.FileInfo, err error) error {
 		if path == root {
 			return err // a vanished root verifies vacuously; a read error does not
 		}
 		if err != nil {
-			return errCollapseAbort
+			return abort(path, "walk error: "+err.Error())
 		}
 		switch match := f.ignores.Match(path); {
 		case match.IsDeletable() || fs.IsTemporary(path):
@@ -791,33 +800,39 @@ func (f *sendReceiveFolder) verifyDeleteTreeCovered(root string, fileDeletions m
 			}
 			return nil
 		case match.IsIgnored():
-			return errCollapseAbort // ignored but not deletable: user content, keep
+			return abort(path, "ignored (non-deletable): user content, keep")
 		}
-		tomb, ok := fileDeletions[path]
-		if !ok {
-			tomb, ok = dirSet[path]
+		tomb, covered := fileDeletions[path]
+		if !covered {
+			tomb, covered = dirSet[path]
 		}
-		if !ok {
-			return errCollapseAbort // on disk but not deleted this round: user content, keep
+		if !covered {
+			return abort(path, "on disk but not deleted this round: user content, keep")
 		}
 		cur, hasCur, cerr := f.model.sdb.GetDeviceFile(f.folderID, protocol.LocalDeviceID, path)
 		if cerr != nil || !hasCur {
-			return errCollapseAbort // unknown to the local index: treat as user content
+			return abort(path, "unknown to the local index: treat as user content")
 		}
-		if cur.IsDeleted() || cur.IsReceiveOnlyChanged() || cur.IsUnsupported() {
-			return errCollapseAbort
+		if cur.IsDeleted() {
+			return abort(path, "already deleted in the local index: on-disk residue from an earlier failed delete")
+		}
+		if cur.IsReceiveOnlyChanged() {
+			return abort(path, "receive-only changed")
+		}
+		if cur.IsUnsupported() {
+			return abort(path, "unsupported entry")
 		}
 		if info.IsDir() {
 			return nil // directories carry no content to conflict over; descend
 		}
 		if tomb.InConflictWith(cur) {
-			return errCollapseAbort // the per-file path moves a conflict copy aside instead
+			return abort(path, "conflicts with the local index version")
 		}
 		// The disk content must match the local index, i.e. there is no unscanned local
 		// modification that the delete would silently destroy.
 		diskFile, derr := scanner.CreateFileInfo(info, path, f.mtimefs, false, false, config.XattrFilter{})
 		if derr != nil {
-			return errCollapseAbort
+			return abort(path, "scan error: "+derr.Error())
 		}
 		if !cur.IsEquivalentOptional(diskFile, protocol.FileInfoComparison{
 			ModTimeWindow:   f.modTimeWindow,
@@ -827,7 +842,7 @@ func (f *sendReceiveFolder) verifyDeleteTreeCovered(root string, fileDeletions m
 			IgnoreOwnership: !f.SyncOwnership,
 			IgnoreXattrs:    !f.SyncXattrs,
 		}) {
-			return errCollapseAbort
+			return abort(path, "disk content differs from the local index: unscanned local modification")
 		}
 		return nil
 	})
@@ -835,9 +850,9 @@ func (f *sendReceiveFolder) verifyDeleteTreeCovered(root string, fileDeletions m
 		if err != errCollapseAbort {
 			f.sl.Debug("Delete-tree verification walk failed", slogutil.FilePath(root), slogutil.Error(err))
 		}
-		return false
+		return false, abortPath, abortReason
 	}
-	return true
+	return true, "", ""
 }
 
 // handleDir creates or updates the given directory
