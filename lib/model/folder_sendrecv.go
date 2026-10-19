@@ -286,7 +286,23 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 		})
 	}
 
-	fileDeletions, dirDeletions, err := f.processNeeded(ctx, dbUpdateChan, copyChan, scanChan)
+	fileDeletions, dirDeletions, deferredDeletions, err := f.processNeeded(ctx, dbUpdateChan, copyChan, scanChan)
+
+	// Deletions no longer wait for the transfer pipeline to drain. The
+	// rename/block-reuse resolution completed inside processNeeded (exact
+	// blocks-hash bucket matching consumes referenced deletions there), so
+	// everything still in the deletion sets is provably unreferenced and can
+	// be applied while pulls are in flight. A large delete wave then
+	// overlaps the round's network transfers instead of queueing behind
+	// them. An in-flight puller that was reading partial blocks from a
+	// to-be-deleted file via the block map may lose that source and falls
+	// back to the network, exactly as when a file vanishes locally.
+	var delWg sync.WaitGroup
+	if err == nil {
+		delWg.Go(func() {
+			f.processDeletions(ctx, fileDeletions, dirDeletions, dbUpdateChan, scanChan)
+		})
+	}
 
 	// Signal copy and puller routines that we are done with the in data for
 	// this iteration. Wait for them to finish.
@@ -300,8 +316,13 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 	close(finisherChan)
 	doneWg.Wait()
 
-	if err == nil {
-		f.processDeletions(ctx, fileDeletions, dirDeletions, dbUpdateChan, scanChan)
+	// Wait for the deletions alongside the pipeline.
+	delWg.Wait()
+
+	// Deletions whose local blocks served (or could have served) the round's
+	// pulls go last, once the pipeline has drained.
+	if err == nil && len(deferredDeletions) > 0 {
+		f.processDeletions(ctx, deferredDeletions, nil, dbUpdateChan, scanChan)
 	}
 
 	// Wait for db updates and scan scheduling to complete
@@ -313,10 +334,15 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 	return changed, err
 }
 
-func (f *sendReceiveFolder) processNeeded(ctx context.Context, dbUpdateChan chan<- dbUpdateJob, copyChan chan<- copyBlocksState, scanChan chan<- string) (map[string]protocol.FileInfo, []protocol.FileInfo, error) {
+func (f *sendReceiveFolder) processNeeded(ctx context.Context, dbUpdateChan chan<- dbUpdateJob, copyChan chan<- copyBlocksState, scanChan chan<- string) (map[string]protocol.FileInfo, []protocol.FileInfo, map[string]protocol.FileInfo, error) {
 	var dirDeletions []protocol.FileInfo
 	fileDeletions := map[string]protocol.FileInfo{}
 	buckets := map[string][]protocol.FileInfo{}
+	// Block hashes the round's pulls need, and the local block lists of
+	// the files we are about to delete. Their overlap decides which
+	// deletions must wait for the transfer pipeline to drain.
+	neededBlocks := map[string]struct{}{}
+	deletedBlocks := map[string][]protocol.BlockInfo{}
 
 	// Iterate the list of items that we need and sort them into piles.
 	// Regular files to pull goes into the file queue, everything else
@@ -325,7 +351,7 @@ func (f *sendReceiveFolder) processNeeded(ctx context.Context, dbUpdateChan chan
 loop:
 	for file, err := range itererr.Zip(f.model.sdb.AllNeededGlobalFiles(f.folderID, protocol.LocalDeviceID, f.Order, 0, 0)) {
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		select {
 		case <-ctx.Done():
@@ -368,7 +394,7 @@ loop:
 			default:
 				df, ok, err := f.model.sdb.GetDeviceFile(f.folderID, protocol.LocalDeviceID, file.Name)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				// Local file can be already deleted, but with a lower version
 				// number, hence the deletion coming in again as part of
@@ -376,6 +402,7 @@ loop:
 				// type if we haven't yet managed to pull it.
 				if ok && !df.IsDeleted() && !df.IsSymlink() && !df.IsDirectory() && !df.IsInvalid() {
 					fileDeletions[file.Name] = file
+					deletedBlocks[file.Name] = df.Blocks
 					// Put files into buckets per first hash
 					key := string(df.BlocksHash)
 					buckets[key] = append(buckets[key], df)
@@ -387,7 +414,7 @@ loop:
 		case file.Type == protocol.FileInfoTypeFile:
 			curFile, hasCurFile, err := f.model.sdb.GetDeviceFile(f.folderID, protocol.LocalDeviceID, file.Name)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			if hasCurFile && curFile.Type == file.Type && file.BlocksEqual(curFile) {
 				// We are supposed to copy the entire file, and then fetch nothing. We
@@ -396,6 +423,9 @@ loop:
 				f.shortcutFile(file, curFile, dbUpdateChan, scanChan)
 			} else {
 				// Queue files for processing after directories and symlinks.
+				for _, b := range file.Blocks {
+					neededBlocks[string(b.Hash)] = struct{}{}
+				}
 				f.queue.Push(file.Name, file.Size, file.ModTime())
 			}
 
@@ -427,7 +457,7 @@ loop:
 
 	select {
 	case <-ctx.Done():
-		return nil, nil, ctx.Err()
+		return nil, nil, nil, ctx.Err()
 	default:
 	}
 
@@ -437,7 +467,7 @@ nextFile:
 	for {
 		select {
 		case <-ctx.Done():
-			return fileDeletions, dirDeletions, ctx.Err()
+			return fileDeletions, dirDeletions, nil, ctx.Err()
 		default:
 		}
 
@@ -448,7 +478,7 @@ nextFile:
 
 		fi, ok, err := f.model.sdb.GetGlobalFile(f.folderID, fileName)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if !ok {
 			// File is no longer in the index. Mark it as done and drop it.
@@ -511,7 +541,37 @@ nextFile:
 		}
 	}
 
-	return fileDeletions, dirDeletions, nil
+	// Deletions whose local blocks overlap blocks the round is pulling must
+	// wait for the transfer pipeline to drain (their content may still serve
+	// copies via the block map). Everything else is provably unreferenced
+	// and can be applied while transfers are in flight.
+	var deferredDeletions map[string]protocol.FileInfo
+	if len(neededBlocks) > 0 {
+		for name, del := range fileDeletions {
+			if deletedBlocksOverlap(deletedBlocks[name], neededBlocks) {
+				if deferredDeletions == nil {
+					deferredDeletions = map[string]protocol.FileInfo{}
+				}
+				deferredDeletions[name] = del
+				delete(fileDeletions, name)
+			}
+		}
+	}
+	if len(deferredDeletions) > 0 {
+		f.sl.DebugContext(ctx, "Deferring deletions with block overlap until the pipeline drains", slog.Int("files", len(deferredDeletions)))
+	}
+	return fileDeletions, dirDeletions, deferredDeletions, nil
+}
+
+// deletedBlocksOverlap reports whether any of the file's blocks are among the
+// round's needed blocks.
+func deletedBlocksOverlap(blocks []protocol.BlockInfo, needed map[string]struct{}) bool {
+	for _, b := range blocks {
+		if _, ok := needed[string(b.Hash)]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func popCandidate(buckets map[string][]protocol.FileInfo, key string) (protocol.FileInfo, bool) {
