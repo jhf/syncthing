@@ -67,7 +67,8 @@ Crash during folder scan with 9 GiB free: the modernc.org/sqlite allocator accum
 of thousands of small anonymous mappings until mmap fails. Static binary (no cgo). Two
 panics attached, one in lib/scanner walk growslice.
 **code:** PR #10915 (merged upstream 2026-10-07, caps unbounded prepared statements) is a
-PARTIAL fix — issue remains open. Not yet in our base; arrives with the next rebase.
+PARTIAL fix — issue remains open. In our chain since the v2.1.7-rc.1 base (verified
+2026-10-19).
 **us: watching** — yarlung runs long uptimes and huge scans on exactly this allocator.
 If our linux-amd64 build crashes with "out of memory" and RAM free: check
 `wc -l /proc/$(pidof syncthing)/maps` against 65530.
