@@ -9,6 +9,8 @@
 package sqlite
 
 import (
+	"fmt"
+
 	"github.com/syncthing/syncthing/lib/build"
 	_ "modernc.org/sqlite" // register sqlite database driver
 )
@@ -20,6 +22,13 @@ const (
 	// layer.
 	commonOptions = "_pragma=foreign_keys(1)&_pragma=recursive_triggers(1)&_pragma=synchronous(1)&_txlock=immediate&_pragma=busy_timeout(30000)"
 )
+
+// pageCacheDSNOption returns a DSN option setting the page cache size, in
+// KiB, for every connection the pool opens (modernc.org/sqlite _pragma
+// options are executed on each new connection).
+func pageCacheDSNOption(kib int) string {
+	return fmt.Sprintf("&_pragma=cache_size(-%d)", kib)
+}
 
 func init() {
 	build.AddTag("modernc-sqlite")

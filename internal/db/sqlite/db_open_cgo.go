@@ -9,6 +9,8 @@
 package sqlite
 
 import (
+	"fmt"
+
 	_ "github.com/mattn/go-sqlite3" // register sqlite3 database driver
 )
 
@@ -26,3 +28,10 @@ const (
 	// so this value bounds one attempt's wait, not the total patience.
 	commonOptions = "_fk=true&_rt=true&_sync=1&_txlock=immediate&_busy_timeout=30000"
 )
+
+// pageCacheDSNOption returns a DSN option setting the page cache size, in
+// KiB, for every connection the pool opens (mattn/go-sqlite3 _cache_size is
+// passed verbatim to PRAGMA cache_size on each new connection).
+func pageCacheDSNOption(kib int) string {
+	return fmt.Sprintf("&_cache_size=-%d", kib)
+}
