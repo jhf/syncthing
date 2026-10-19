@@ -214,3 +214,25 @@ func TestAutoClosedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestGetBinaryPrefersInvocationPath(t *testing.T) {
+	// A symlink as the invocation path must be returned as the symlink
+	// itself (absolute), not resolved through to its target - otherwise a
+	// monitor restart after a symlink swap would re-exec the old binary.
+	dir := t.TempDir()
+	target := filepath.Join(dir, "binary-v1")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "current")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	got, err := getBinary(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != link {
+		t.Errorf("getBinary(%q) = %q, want the symlink path itself", link, got)
+	}
+}
