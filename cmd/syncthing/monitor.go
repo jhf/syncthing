@@ -211,6 +211,17 @@ func (c *serveCmd) monitorMain() {
 }
 
 func getBinary(args0 string) (string, error) {
+	// Fork change (jhf/syncthing): prefer the path we were invoked as when
+	// it exists. os.Executable() resolves through symlinks to the real
+	// file, so a monitor that re-execs it after a symlink swap would start
+	// the OLD binary again. Re-resolving the invocation path on each
+	// restart means: point a stable symlink at a new binary, POST
+	// /rest/system/restart, and the monitor comes up on the new image.
+	if p, lerr := exec.LookPath(args0); lerr == nil {
+		if abs, aerr := filepath.Abs(p); aerr == nil {
+			return abs, nil
+		}
+	}
 	e, err := os.Executable()
 	if err == nil {
 		return e, nil
