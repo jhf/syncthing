@@ -62,3 +62,43 @@ func TestFileInfoBatchError(t *testing.T) {
 		t.Fatalf("expected 3, got %d", called)
 	}
 }
+
+func TestFileInfoBatchSized(t *testing.T) {
+	// A sized batch flushes on its own thresholds, not the wire defaults.
+
+	var flushes, flushed int
+	b := NewFileInfoBatchSized(4, 8, func(fs []protocol.FileInfo) error {
+		flushes++
+		flushed += len(fs)
+		return nil
+	})
+
+	oneBlock := make([]protocol.BlockInfo, 1)
+	for i := 0; i < 3; i++ {
+		b.Append(protocol.FileInfo{Name: "f", Blocks: oneBlock})
+		b.FlushIfFull()
+	}
+	if flushes != 0 {
+		t.Fatal("flushed below file threshold")
+	}
+	b.Append(protocol.FileInfo{Name: "f", Blocks: oneBlock})
+	b.FlushIfFull() // 4 files -> flush
+	if flushes != 1 || flushed != 4 {
+		t.Fatalf("file threshold: flushes=%d flushed=%d", flushes, flushed)
+	}
+
+	b.Append(protocol.FileInfo{Name: "f", Blocks: make([]protocol.BlockInfo, 9)})
+	b.FlushIfFull() // 9 blocks > 8 -> flush
+	if flushes != 2 || flushed != 5 {
+		t.Fatalf("block threshold: flushes=%d flushed=%d", flushes, flushed)
+	}
+}
+
+func TestFileInfoBatchDefaultsMatchWire(t *testing.T) {
+	// The default constructor must keep the wire batch limits.
+	b := NewFileInfoBatch(nil)
+	if b.maxFiles != MaxBatchSizeFiles || b.maxBlocks != MaxBatchSizeBlocks {
+		t.Fatalf("default batch = %d files/%d blocks, want wire %d/%d",
+			b.maxFiles, b.maxBlocks, MaxBatchSizeFiles, MaxBatchSizeBlocks)
+	}
+}
