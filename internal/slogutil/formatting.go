@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/syncthing/syncthing/internal/activityhist"
 )
 
 type LineFormat struct {
@@ -128,6 +130,10 @@ func (h *formattingHandler) Handle(_ context.Context, rec slog.Record) error {
 	if h.opts.overview != nil && overviewWorthy(rec.Message, rec.Level) {
 		h.opts.overview.append(line)
 	}
+	// Every record is one activity event for the cyclical maintenance
+	// scheduler (patch/43): log rate tracks sync churn on this system,
+	// and counting here touches no upstream call site.
+	activityhist.Global.Add(rec.Time)
 	return nil
 }
 

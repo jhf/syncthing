@@ -127,6 +127,13 @@ func (a *App) LastMaintenanceTime() time.Time {
 }
 
 func (a *App) startup() error {
+	// patch/43: merge the persisted activity histogram before any folder
+	// database opens (a pending defrag records its duration into the
+	// global histogram during open), then arm the cyclical maintenance
+	// scheduler (maintenance.go).
+	a.loadActivityHist()
+	a.startMaintenanceScheduler()
+
 	a.mainService.Add(ur.NewFailureHandler(a.cfg, a.evLogger))
 
 	a.dbService = a.sdb.Service(a.opts.DBMaintenanceInterval)
