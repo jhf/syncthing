@@ -92,8 +92,24 @@ func (f *folder) btrfsReplayEligible(ctx context.Context) bool {
 		return false
 	}
 	if len(nested) > 0 {
-		f.sl.InfoContext(ctx, "Btrfs scan replay disabled: folder contains nested subvolumes", "subvolumes", nested)
-		return false
+		// patch/44: a nested subvolume escapes the snapshot diff, so changes
+		// under it would be missed by replay — unless the path is IGNORED,
+		// in which case its changes never enter the index and nothing is
+		// missed. The database directory (index-v2, under the ignored
+		// /.config/syncthing) deliberately lives in a nested subvolume so
+		// baseline snapshots stop re-sharing its extents (NOCOW cannot hold
+		// on shared extents).
+		var visible []string
+		for _, n := range nested {
+			if !f.ignores.Match(n).IsIgnored() {
+				visible = append(visible, n)
+			}
+		}
+		if len(visible) > 0 {
+			f.sl.InfoContext(ctx, "Btrfs scan replay disabled: folder contains nested subvolumes", "subvolumes", visible)
+			return false
+		}
+		f.sl.DebugContext(ctx, "Btrfs scan replay: nested subvolumes are all ignored paths", "subvolumes", nested)
 	}
 	f.btrfsOK = true
 	return true

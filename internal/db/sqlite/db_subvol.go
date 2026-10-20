@@ -84,7 +84,7 @@ func migrateDirToSubvolume(dir string, create func(string) error) error {
 		return err
 	}
 	for _, e := range entries {
-		if err := os.Rename(filepath.Join(dir, e.Name()), filepath.Join(tmp, e.Name())); err != nil {
+		if err := moveEntryAcrossSubvol(filepath.Join(dir, e.Name()), filepath.Join(tmp, e.Name())); err != nil {
 			return err
 		}
 	}
@@ -97,4 +97,31 @@ func migrateDirToSubvolume(dir string, create func(string) error) error {
 	syncParentDir(filepath.Dir(dir))
 	slog.Info("Database directory migrated to nested btrfs subvolume (excluded from folder snapshots)", slogutil.FilePath(dir))
 	return nil
+}
+
+// moveEntryAcrossSubvol renames one entry into the new subvolume. Files
+// cross the boundary by rename; directories cannot (btrfs returns EXDEV —
+// observed live on yarlung on index-v2/.tmp), so a directory is recreated
+// and its contents moved recursively, then the emptied directory removed.
+func moveEntryAcrossSubvol(src, dst string) error {
+	fi, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return os.Rename(src, dst)
+	}
+	if err := os.Mkdir(dst, fi.Mode().Perm()); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := moveEntryAcrossSubvol(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+			return err
+		}
+	}
+	return os.Remove(src)
 }

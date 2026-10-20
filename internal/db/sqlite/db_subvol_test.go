@@ -30,6 +30,15 @@ func TestMigrateDirToSubvolume(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// A subdirectory (index-v2/.tmp on a live system): btrfs cannot rename
+	// directories across the subvolume boundary (EXDEV), so it is recreated
+	// and its contents moved.
+	if err := os.Mkdir(filepath.Join(dir, ".tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".tmp", "scratch"), []byte("tmp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := migrateDirToSubvolume(dir, func(p string) error { return os.Mkdir(p, 0o700) }); err != nil {
 		t.Fatal(err)
@@ -39,6 +48,9 @@ func TestMigrateDirToSubvolume(t *testing.T) {
 		if err != nil || string(got) != want {
 			t.Errorf("%s: got %q, err %v; want %q", name, got, err, want)
 		}
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, ".tmp", "scratch")); err != nil || string(got) != "tmp" {
+		t.Errorf(".tmp/scratch: got %q, err %v", got, err)
 	}
 	if _, err := os.Stat(dir + ".subvol-tmp"); !os.IsNotExist(err) {
 		t.Error("temp subvolume dir left behind")
