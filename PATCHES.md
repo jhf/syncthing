@@ -75,6 +75,10 @@ HDD) over WAN. "Before" is stock upstream v2.1.x on the same machines.
 | GC on 45.5M-row blocks table | single 5-min+ transaction, interrupted, flag lost | per-chunk commits, interrupt-safe, no lock held across | 02, 11 |
 | Index updates racing a writer | SQLITE_BUSY killed the device connection (~20 s flap loop, 172 errors in one session, index frozen) | 30 s busy_timeout + bounded retry; zero lock errors since dev.92 | 11, 15 |
 | GUI event stream in a background tab | throttled timers stall the UI | fetch-based poll loop | 09 |
+| Receiver write amplification, small-file pull phase (2026-10-20, btrfs RAID1 on 2×2013 3TB 7200rpm, no SSD) | ~444 files/min at ~22 KiB (10 MB/min payload) cost ~550 MB/min of process writes (~55x): ~900 fsyncs/min (temp file + parent dir each) × ~0.8 MB btrfs log-tree per fsync, io pressure >40 %, plus WAL autocheckpoint churn (default 1000 pages) flushing random DB pages | writes track payload at ~1.65x (mixed stream, mean 808 KiB/file: ~517 MB/min writes for ~300 MB/min payload), io pressure 43 % and falling, pull rate +9 % and rising; WAL healthy (accumulating, truncating checkpoints, no reader pin — passive checkpoint `0\|27919\|27919`) | 34, 35 |
+| Durability commits per small-file batch | ~2 fsync per pulled file (~1800/min at 450 files/min) | 1 `syncfs(2)` per database batch (≤2 s cadence, ~30/min), same ordering guarantee (storage sync before index commit) | 35 |
+| Receiver disk health (SMART + btrfs device stats, 2026-10-20) | suspected failing drive (60 IOs inflight, 86 % io wait at ~1 MB/s) | both members PASSED; 0 reallocated/pending/uncorrectable sectors, 0 CRC; btrfs device stats all zero — slowness is 7200 rpm random IO, not hardware failure | — |
+| DB files on CoW filesystems | manual `chattr +C` only; pre-existing 9.3 GiB DB files still CoW (btrfs silently refuses NOCOW on files with extents) | auto FS_NOCOW_FL at open on btrfs/bcachefs: directory flagged so WAL/shm (and any recreated DB) are NOCOW from birth — verified live via `lsattr` | 36 |
 
 Verification status notes live per patch in the table above and in commit
 messages; the pre-2026-10-15 numbers are reproduced and extended in
