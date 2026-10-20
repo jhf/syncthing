@@ -96,6 +96,19 @@ func (a *App) maintenanceLoop() {
 	}
 }
 
+// inMaintenanceWindow reports whether now falls inside tonight's
+// maintenance window: [pick, pick + min(runLen, 3h)). A missed window
+// (machine off overnight, daytime deploy) waits for tomorrow rather than
+// spending daytime minutes on a defrag restart — first-boot on a fresh
+// install must NOT fire at 21:15 just because 21:15 is after 03:30
+// (observed doing exactly that on dev.137).
+func inMaintenanceWindow(now, pick time.Time, runLenMin int) bool {
+	if now.Before(pick) {
+		return false
+	}
+	return now.Before(pick.Add(time.Duration(min(runLenMin, 180)) * time.Minute))
+}
+
 func (a *App) maintenanceEval(dir string, now time.Time) {
 	lastPath := filepath.Join(dir, maintenanceLastFile)
 	if fi, err := os.Stat(lastPath); err == nil && now.Sub(fi.ModTime()) < minMaintenanceInterval {
@@ -116,7 +129,7 @@ func (a *App) maintenanceEval(dir string, now time.Time) {
 	} else {
 		pick, runLenMin = activityhist.Global.Pick(now)
 	}
-	if now.Before(pick) {
+	if !inMaintenanceWindow(now, pick, runLenMin) {
 		return
 	}
 
