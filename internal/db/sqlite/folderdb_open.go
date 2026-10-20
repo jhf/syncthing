@@ -36,6 +36,10 @@ type folderDB struct {
 	// queries. needBuild coordinates the builder goroutine.
 	needBuilt atomic.Bool
 	needBuild needBuildState
+
+	// mtimes batches advisory virtual-time writes into single transactions
+	// (see folderdb_mtimes.go).
+	mtimes *mtimeBatcher
 }
 
 // Close shuts the folder database down. The background need-table builder
@@ -46,6 +50,7 @@ type folderDB struct {
 // builder aborts at its next chunk boundary, and wait for it to leave before
 // closing the pool.
 func (s *folderDB) Close() error {
+	s.mtimes.close()
 	s.needBuild.mu.Lock()
 	s.needBuild.gen++
 	for s.needBuild.running {
@@ -83,6 +88,7 @@ func openFolderDB(folder, path string, deleteRetention time.Duration) (*folderDB
 		baseDB:          base,
 		deleteRetention: deleteRetention,
 	}
+	fdb.mtimes = newMtimeBatcher(fdb)
 
 	_ = fdb.PutKV("folderID", []byte(folder))
 
@@ -126,6 +132,7 @@ func openFolderDBForMigration(folder, path string, deleteRetention time.Duration
 		baseDB:          base,
 		deleteRetention: deleteRetention,
 	}
+	fdb.mtimes = newMtimeBatcher(fdb)
 
 	// Touch device IDs that should always exist and have a low index
 	// numbers, and will never change
