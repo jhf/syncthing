@@ -2146,9 +2146,13 @@ func (f *sendReceiveFolder) Jobs(page, perpage int) ([]string, []string, int) {
 }
 
 // dbUpdaterRoutine aggregates db updates and commits them in batches no
-// larger than 1000 items, and no more delayed than 2 seconds.
+// larger than dbUpdateBatchSizeFiles/Blocks items, and no more delayed than
+// 5 seconds. The sizing is an HDD-receiver tradeoff (see the constants'
+// comment in fileinfobatch.go): commit cadence dominates WAL growth on
+// small-file pulls, and the timer bounds how long a pulled file sits
+// uncommitted (crash rework) and how late completion events fire.
 func (f *sendReceiveFolder) dbUpdaterRoutine(dbUpdateChan <-chan dbUpdateJob) int {
-	const maxBatchTime = 2 * time.Second
+	const maxBatchTime = 5 * time.Second
 
 	changed := 0
 	changedDirs := make(map[string]struct{})
@@ -2156,7 +2160,7 @@ func (f *sendReceiveFolder) dbUpdaterRoutine(dbUpdateChan <-chan dbUpdateJob) in
 	var lastFile protocol.FileInfo
 	tick := time.NewTicker(maxBatchTime)
 	defer tick.Stop()
-	batch := NewFileInfoBatch(func(files []protocol.FileInfo) error {
+	batch := NewFileInfoBatchSized(dbUpdateBatchSizeFiles, dbUpdateBatchSizeBlocks, func(files []protocol.FileInfo) error {
 		f.flushPullDurability(changedDirs)
 		clear(changedDirs)
 
