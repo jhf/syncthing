@@ -51,7 +51,7 @@ func init() {
 			// The DSN already put the database in WAL mode
 			// (_journal_mode=WAL), so the threshold sticks; setting it on a
 			// non-WAL database is silently ignored.
-			_, err := conn.Exec(fmt.Sprintf("PRAGMA wal_autocheckpoint(%d)", walAutocheckpointPages()), nil)
+			_, err := conn.Exec(fmt.Sprintf("PRAGMA wal_autocheckpoint(%d)", autocheckpointPagesForConns.Load()), nil)
 			return err
 		},
 	})

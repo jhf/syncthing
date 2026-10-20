@@ -10,6 +10,7 @@ package sqlite
 
 import (
 	"os"
+	"path/filepath"
 
 	"golang.org/x/sys/unix"
 )
@@ -59,4 +60,26 @@ func setNoCOW(path string) (changed bool, err error) {
 		return false, err
 	}
 	return flags&fsNoCOWFlag != 0, nil
+}
+
+// dbRunsNoCOW reports whether a database at path runs with NOCOW effective:
+// a CoW filesystem and the flag set on the file itself, or — when the file
+// does not exist yet — on its directory (new files inherit the flag).
+func dbRunsNoCOW(path string) bool {
+	dir := filepath.Dir(path)
+	var st unix.Statfs_t
+	if err := unix.Statfs(dir, &st); err != nil || !isCoWFilesystem(st.Type) {
+		return false
+	}
+	probe := path
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		probe = dir
+	}
+	fd, err := os.Open(probe)
+	if err != nil {
+		return false
+	}
+	defer fd.Close() //nolint:errcheck
+	flags, err := unix.IoctlGetInt(int(fd.Fd()), unix.FS_IOC_GETFLAGS)
+	return err == nil && flags&fsNoCOWFlag != 0
 }

@@ -60,12 +60,18 @@ func openBase(path string, maxOpenConns, maxIdleConns int, pragmas, schemaScript
 	// when state allows: clean shutdown, enough free space (db_nocow_migrate.go).
 	migrateToNoCOW(path)
 
+	// Checkpoint threshold follows the NOCOW state probed above (patch/40):
+	// rare-and-large under CoW, small under NOCOW where checkpoints are
+	// in-place and cheap.
+	ckptPages := walAutocheckpointPagesFor(path)
+	autocheckpointPagesForConns.Store(int32(ckptPages))
+
 	// Open the database with options to enable foreign keys and recursive
 	// triggers (needed for the delete+insert triggers on row replace).
 	pathURL := url.URL{
 		Scheme:   "file",
 		Path:     fileToUriPath(path),
-		RawQuery: commonOptions + pageCacheDSNOption(pageCachePerConnKiB(maxOpenConns)) + walCheckpointDSNOption(walAutocheckpointPages()),
+		RawQuery: commonOptions + pageCacheDSNOption(pageCachePerConnKiB(maxOpenConns)) + walCheckpointDSNOption(ckptPages),
 	}
 	sqlDB, err := sqlx.Open(dbDriver, pathURL.String())
 	if err != nil {
