@@ -9,8 +9,8 @@ package model
 import (
 	"os"
 
-	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/internal/slogutil"
+	"github.com/syncthing/syncthing/lib/fs"
 )
 
 // On Linux, durability for a batch of pulled files is provided by one
