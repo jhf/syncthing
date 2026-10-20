@@ -7,20 +7,25 @@
 package sqlite
 
 import (
+	"path/filepath"
 	"testing"
 )
 
 func TestWalAutocheckpointPages(t *testing.T) {
+	// Non-CoW path (t.TempDir is tmpfs/APFS on test machines): the CoW
+	// default applies.
+	nonCoWPath := filepath.Join(t.TempDir(), "test.db")
+
 	t.Setenv("STDBWALAUTOCHECKPOINTMIB", "")
-	if got := walAutocheckpointPages(); got != defaultWalAutocheckpointMiB*pagesPerMiBAt4KiB {
+	if got := walAutocheckpointPagesFor(nonCoWPath); got != defaultWalAutocheckpointMiB*pagesPerMiBAt4KiB {
 		t.Errorf("default: got %d pages, want %d pages", got, defaultWalAutocheckpointMiB*pagesPerMiBAt4KiB)
 	}
 	t.Setenv("STDBWALAUTOCHECKPOINTMIB", "256")
-	if got := walAutocheckpointPages(); got != 256*pagesPerMiBAt4KiB {
+	if got := walAutocheckpointPagesFor(nonCoWPath); got != 256*pagesPerMiBAt4KiB {
 		t.Errorf("override: got %d pages, want %d pages", got, 256*pagesPerMiBAt4KiB)
 	}
 	t.Setenv("STDBWALAUTOCHECKPOINTMIB", "notanumber")
-	if got := walAutocheckpointPages(); got != defaultWalAutocheckpointMiB*pagesPerMiBAt4KiB {
+	if got := walAutocheckpointPagesFor(nonCoWPath); got != defaultWalAutocheckpointMiB*pagesPerMiBAt4KiB {
 		t.Errorf("invalid override ignored: got %d pages", got)
 	}
 }
