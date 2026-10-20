@@ -54,6 +54,13 @@ func openBase(path string, maxOpenConns, maxIdleConns int, pragmas, schemaScript
 	// db_nocow.go). Done before opening so the directory flag is in place
 	// when the database, WAL and shm files are created (new files inherit
 	// the directory flag); an existing database file gets the flag directly.
+	// But first (patch/44): if the database directory shares a subvolume
+	// with the folder's snapshot source, every baseline snapshot re-shares
+	// the database extents and forces CoW on the next write to each —
+	// NOCOW cannot hold. A nested subvolume is excluded from parent
+	// snapshots, so the database directory migrates into one (renames
+	// only, milliseconds, crash-safe; db_subvol.go).
+	ensureDBSubvolume(filepath.Dir(path))
 	applyNoCOW(path)
 	// A pre-existing database file cannot receive the NOCOW flag (btrfs
 	// ignores it on files with extents), so it is recreated by copy-replace
