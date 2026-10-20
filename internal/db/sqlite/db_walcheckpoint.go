@@ -9,6 +9,7 @@ package sqlite
 import (
 	"os"
 	"strconv"
+	"sync/atomic"
 )
 
 // SQLite checkpoints the WAL every 1000 pages (~4 MiB at 4 KiB pages) by
@@ -26,17 +27,45 @@ import (
 //
 // STDBWALAUTOCHECKPOINTMIB overrides the threshold in MiB of WAL (converted
 // to pages assuming the usual 4 KiB page size).
+//
+// The threshold is coupled to the NOCOW state of the database (patch/40):
+// checkpoint cost differs by two orders of magnitude between the two cases.
+// On a CoW database every checkpoint rewrites random pages as fresh extents
+// (measured pre-38: the 1 GiB checkpoint bursts dominated device writes), so
+// checkpoints should be RARE — 1 GiB. Once NOCOW is active, a checkpoint is
+// plain in-place writes (measured 2026-10-20: nine live checkpoints, excess
+// device writes at 2.04x = pure RAID1 mirroring), so the threshold only
+// bounds crash-recovery replay time and WAL disk usage, and a SMALLER value
+// is strictly nicer — 128 MiB. The state is probed at open (same moment and
+// same probes as the NOCOW machinery), so a database migrated to NOCOW this
+// run gets the small threshold immediately; the env var beats both.
 const (
 	defaultWalAutocheckpointMiB = 1024
+	noCOWWalAutocheckpointMiB   = 128
 	pagesPerMiBAt4KiB           = 256
 )
 
-func walAutocheckpointPages() int {
-	totalMiB := defaultWalAutocheckpointMiB
+// autocheckpointPagesForConns carries the threshold chosen at openBase to
+// the cgo driver's ConnectHook (which has no path context). All databases
+// of an instance share one directory and filesystem, so every open computes
+// the same value; last writer wins is therefore benign.
+var autocheckpointPagesForConns atomic.Int32
+
+func init() {
+	autocheckpointPagesForConns.Store(int32(defaultWalAutocheckpointMiB * pagesPerMiBAt4KiB))
+}
+
+// walAutocheckpointPagesFor returns the WAL autocheckpoint threshold in
+// pages for a database at path: env override, else 128 MiB when the
+// database runs NOCOW (CoW filesystem with the flag effective), else 1 GiB.
+func walAutocheckpointPagesFor(path string) int {
 	if s := os.Getenv("STDBWALAUTOCHECKPOINTMIB"); s != "" {
 		if v, err := strconv.Atoi(s); err == nil && v > 0 {
-			totalMiB = v
+			return v * pagesPerMiBAt4KiB
 		}
 	}
-	return totalMiB * pagesPerMiBAt4KiB
+	if dbRunsNoCOW(path) {
+		return noCOWWalAutocheckpointMiB * pagesPerMiBAt4KiB
+	}
+	return defaultWalAutocheckpointMiB * pagesPerMiBAt4KiB
 }

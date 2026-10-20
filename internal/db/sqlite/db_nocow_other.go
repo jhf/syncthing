@@ -17,3 +17,8 @@ const (
 func setNoCOW(string) (changed bool, err error) {
 	return false, nil
 }
+
+// dbRunsNoCOW is false off Linux (no FS_NOCOW_FL concept).
+func dbRunsNoCOW(string) bool {
+	return false
+}
