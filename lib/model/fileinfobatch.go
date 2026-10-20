@@ -16,13 +16,28 @@ const (
 	MaxBatchSizeBlocks = 5000
 )
 
+// How many pulled files the dbUpdater accumulates before committing. Larger
+// than the wire batch: measured on the HDD receiver (2026-10-20, batch of
+// 3000 x 20 KiB files), WAL growth was 134 MiB / 3000 files = 45 KiB per
+// file against a 20 KiB payload — each small commit rewrites the same hot
+// index leaf pages at 4 KiB granularity, so commit cadence, not row size,
+// dominates the WAL. Quadrupling the batch amortizes those page writes.
+// Memory cost is ~4 MiB of FileInfos; crash rework is bounded by the batch
+// plus the flush interval. These caps do not affect the wire.
+const (
+	dbUpdateBatchSizeFiles  = 4000
+	dbUpdateBatchSizeBlocks = 20000
+)
+
 // FileInfoBatch is a utility to do file operations on the database in suitably
 // sized batches.
 type FileInfoBatch struct {
-	infos   []protocol.FileInfo
-	nblocks int
-	flushFn func([]protocol.FileInfo) error
-	error   error
+	infos     []protocol.FileInfo
+	nblocks   int
+	maxFiles  int
+	maxBlocks int
+	flushFn   func([]protocol.FileInfo) error
+	error     error
 }
 
 // NewFileInfoBatch returns a new FileInfoBatch that calls fn when it's time
@@ -31,7 +46,12 @@ type FileInfoBatch struct {
 // any further calls to Flush will return the same error (unless Reset is
 // called).
 func NewFileInfoBatch(fn func([]protocol.FileInfo) error) *FileInfoBatch {
-	return &FileInfoBatch{flushFn: fn}
+	return NewFileInfoBatchSized(MaxBatchSizeFiles, MaxBatchSizeBlocks, fn)
+}
+
+// NewFileInfoBatchSized is NewFileInfoBatch with explicit flush thresholds.
+func NewFileInfoBatchSized(maxFiles, maxBlocks int, fn func([]protocol.FileInfo) error) *FileInfoBatch {
+	return &FileInfoBatch{maxFiles: maxFiles, maxBlocks: maxBlocks, flushFn: fn}
 }
 
 func (b *FileInfoBatch) SetFlushFunc(fn func([]protocol.FileInfo) error) {
@@ -43,14 +63,14 @@ func (b *FileInfoBatch) Append(f protocol.FileInfo) {
 		panic("bug: calling append on a failed batch")
 	}
 	if b.infos == nil {
-		b.infos = make([]protocol.FileInfo, 0, MaxBatchSizeFiles)
+		b.infos = make([]protocol.FileInfo, 0, min(b.maxFiles, 256))
 	}
 	b.infos = append(b.infos, f)
 	b.nblocks += len(f.Blocks)
 }
 
 func (b *FileInfoBatch) Full() bool {
-	return len(b.infos) >= MaxBatchSizeFiles || b.nblocks >= MaxBatchSizeBlocks
+	return len(b.infos) >= b.maxFiles || b.nblocks >= b.maxBlocks
 }
 
 func (b *FileInfoBatch) FlushIfFull() error {
