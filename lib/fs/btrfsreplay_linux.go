@@ -197,9 +197,10 @@ func btrfsFolderPrefix(ctx context.Context, folderRoot string) (string, error) {
 	return rel, nil
 }
 
-// BtrfsScanNestedSubvols lists btrfs subvolumes nested under folderRoot. A
-// snapshot diff does not cross subvolume boundaries, so replay must refuse to
-// arm when the folder contains one.
+// BtrfsScanNestedSubvols lists btrfs subvolumes nested under folderRoot,
+// folder-relative. A snapshot diff does not cross subvolume boundaries, so
+// replay must refuse to arm when the folder contains one that holds synced
+// content (ignored paths escape the index anyway; the caller filters).
 func BtrfsScanNestedSubvols(ctx context.Context, folderRoot string) ([]string, error) {
 	prefix, err := btrfsFolderPrefix(ctx, folderRoot)
 	if err != nil {
@@ -220,8 +221,10 @@ func BtrfsScanNestedSubvols(ctx context.Context, folderRoot string) ([]string, e
 		} else {
 			continue
 		}
-		if line == prefix || strings.HasPrefix(line, prefix+"/") {
-			nested = append(nested, line)
+		if line == prefix {
+			nested = append(nested, ".")
+		} else if strings.HasPrefix(line, prefix+"/") {
+			nested = append(nested, strings.TrimPrefix(line, prefix+"/"))
 		}
 	}
 	return nested, nil
