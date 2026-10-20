@@ -59,6 +59,12 @@ func openBase(path string, maxOpenConns, maxIdleConns int, pragmas, schemaScript
 	// ignores it on files with extents), so it is recreated by copy-replace
 	// when state allows: clean shutdown, enough free space (db_nocow_migrate.go).
 	migrateToNoCOW(path)
+	// A NOCOW database copied while the writeback backlog was large can land
+	// in tens of thousands of tiny extents (observed 210k for a 9.4 GiB
+	// file); recopy it once while the backlog is small (db_defrag.go). Runs
+	// after the migration, which itself produces a fresh NOCOW file to
+	// evaluate. Before opening: startup, closed database, no contention.
+	maybeDefragDB(path)
 
 	// Checkpoint threshold follows the NOCOW state probed above (patch/40):
 	// rare-and-large under CoW, small under NOCOW where checkpoints are
