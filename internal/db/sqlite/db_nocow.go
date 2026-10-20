@@ -21,9 +21,11 @@ import (
 // chattr +C (FS_NOCOW_FL) disables CoW for new allocations; we apply it
 // automatically when the database lives on a CoW filesystem. The directory
 // gets the flag too, so the WAL and shared-memory files created later
-// inherit it. Existing extents of a pre-existing database file become NOCOW
-// gradually as they are rewritten (first overwrite CoWs once, subsequent
-// ones land in place).
+// inherit it — as does a recreated database file. btrfs silently ignores
+// NOCOW on a file that already has extents, so a pre-existing database file
+// keeps CoW until it is recreated (stop syncthing, copy the file within the
+// flagged directory with --reflink=never, swap, restart); we detect that
+// case and leave the flag alone rather than claiming success.
 //
 // The tradeoff matches the manual chattr +C operators apply today: NOCOW
 // implies NODATASUM for new writes, so btrfs data checksums are off for
