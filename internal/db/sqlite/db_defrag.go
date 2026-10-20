@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/syncthing/syncthing/internal/activityhist"
 	"github.com/syncthing/syncthing/internal/slogutil"
 )
 
@@ -45,9 +46,26 @@ import (
 //
 // Self-terminating: a successful recopy lands in tens of extents and the
 // gate never fires again. STDBDEFRAG=0 opts out.
+//
+// patch/43 (cyclical maintenance): the recopy costs minutes of startup
+// time, so it no longer runs at every restart where the gate fires. It
+// runs only when the maintenance scheduler armed it via a pending flag
+// file (defragPendingSuffix), placed during a predicted idle window and
+// followed by a graceful self-restart — the minutes are spent at 03:00,
+// not at a daytime deploy. STDBDEFRAG=1 forces a one-shot recopy at the
+// next startup regardless of the flag (manual override).
 func maybeDefragDB(path string) {
 	if os.Getenv("STDBDEFRAG") == "0" {
 		return
+	}
+	if os.Getenv("STDBDEFRAG") != "1" {
+		if !DefragPending(path) {
+			return
+		}
+		// Consume the flag now: a crash mid-copy retries at the next
+		// startup (flag survives, defer never runs), a clean failure
+		// waits for the scheduler to re-arm tomorrow.
+		defer os.Remove(path + DefragPendingSuffix) //nolint:errcheck
 	}
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -88,6 +106,8 @@ func maybeDefragDB(path string) {
 		slog.Warn("Database defrag failed; continuing with fragmented database", slogutil.FilePath(path), slogutil.Error(err))
 		return
 	}
+	duration := time.Since(start)
+	activityhist.Global.RecordDuration("db-defrag", duration)
 	after, err := extentCount(path)
 	if err != nil {
 		after = -1
@@ -97,7 +117,46 @@ func maybeDefragDB(path string) {
 		slog.Int64("bytes", total),
 		slog.Int64("extentsBefore", extents),
 		slog.Int64("extentsAfter", after),
-		slog.Duration("duration", time.Since(start)))
+		slog.Duration("duration", duration))
+}
+
+// DefragPendingSuffix marks a database the maintenance scheduler has
+// armed for defrag at the next startup (patch/43).
+const DefragPendingSuffix = ".defrag-pending"
+
+// DefragPending reports whether the scheduler armed this database for a
+// startup defrag.
+func DefragPending(path string) bool {
+	_, err := os.Stat(path + DefragPendingSuffix)
+	return err == nil
+}
+
+// DefragDue evaluates the fragmentation gate for a running (open)
+// database without copying anything: same pure conditions as the startup
+// gate, minus the pending flag. Used by the maintenance scheduler to
+// decide whether a maintenance restart is worth having at all tonight.
+func DefragDue(path string) bool {
+	if os.Getenv("STDBDEFRAG") == "0" {
+		return false
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if !dbRunsNoCOW(path) {
+		return false
+	}
+	extents, err := extentCount(path)
+	if err != nil {
+		return false
+	}
+	var total int64 = fi.Size()
+	if wi, err := os.Stat(path + "-wal"); err == nil && wi.Size() > 0 {
+		total += wi.Size()
+	}
+	avail := freeSpaceBytes(filepath.Dir(path))
+	backlog := writebackBacklogKiB()
+	return shouldDefrag(fi.Size(), extents, total, avail, backlog)
 }
 
 const (

@@ -6,7 +6,11 @@
 
 package sqlite
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestShouldDefrag(t *testing.T) {
 	const (
@@ -55,4 +59,43 @@ Buffers:           41996 kB
 	if got := meminfoDirtyPlusWritebackKiB([]byte("MemTotal: 1 kB\n")); got != 0 {
 		t.Errorf("missing fields: got %d, want 0", got)
 	}
+}
+
+// patch/43: the startup recopy runs only when the maintenance scheduler
+// armed it via the pending flag (or STDBDEFRAG=1 forces it manually).
+// The flag is consumed by the attempt; STDBDEFRAG=0 leaves it in place.
+func TestDefragPendingFlagLifecycle(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "folder.test.db")
+	if err := os.WriteFile(db, []byte("not a real db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	flag := db + DefragPendingSuffix
+
+	// No flag, default env: gate returns without touching anything.
+	maybeDefragDB(db)
+	if DefragPending(db) {
+		t.Error("flag appeared out of nowhere")
+	}
+
+	// Armed by the scheduler: the attempt runs and consumes the flag.
+	// (On this platform the NOCOW probe declines, so no copy happens —
+	// what we verify is authorization and consumption.)
+	if err := os.WriteFile(flag, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maybeDefragDB(db)
+	if DefragPending(db) {
+		t.Error("flag not consumed by the attempt")
+	}
+
+	// STDBDEFRAG=0 opts out entirely and leaves the flag for later.
+	t.Setenv("STDBDEFRAG", "0")
+	if err := os.WriteFile(flag, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maybeDefragDB(db)
+	if !DefragPending(db) {
+		t.Error("STDBDEFRAG=0 consumed the flag; it must be left in place")
+	}
+	os.Remove(flag)
 }
