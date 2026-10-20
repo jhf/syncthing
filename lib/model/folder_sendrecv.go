@@ -1529,7 +1529,7 @@ func (f *sendReceiveFolder) handleFile(ctx context.Context, file protocol.FileIn
 		"action": "update",
 	})
 
-	s := newSharedPullerState(file, f.mtimefs, f.folderID, tempName, blocks, reused, f.IgnorePerms || file.NoPermissions, hasCurFile, curFile, !f.DisableSparseFiles, !f.DisableFsync)
+	s := newSharedPullerState(file, f.mtimefs, f.folderID, tempName, blocks, reused, f.IgnorePerms || file.NoPermissions, hasCurFile, curFile, !f.DisableSparseFiles, !f.DisableFsync && !f.batchSyncfs())
 
 	f.sl.DebugContext(ctx, "Handling file", slogutil.FilePath(file.Name), "blocksToCopy", len(blocks), "reused", len(reused))
 
@@ -2157,9 +2157,7 @@ func (f *sendReceiveFolder) dbUpdaterRoutine(dbUpdateChan <-chan dbUpdateJob) in
 	tick := time.NewTicker(maxBatchTime)
 	defer tick.Stop()
 	batch := NewFileInfoBatch(func(files []protocol.FileInfo) error {
-		if !f.DisableFsync {
-			f.fsyncDirs(changedDirs)
-		}
+		f.flushPullDurability(changedDirs)
 		clear(changedDirs)
 
 		// All updates to file/folder objects that originated remotely
