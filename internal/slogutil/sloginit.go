@@ -7,6 +7,7 @@
 package slogutil
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -25,10 +26,12 @@ var (
 		descrs: make(map[string]string),
 	}
 	globalRing      = newLogRing(logRingCapacityFromEnv())
+	globalOverview  = newLogRing(overviewRingCapacityFromEnv())
 	globalFormatter = &formattingOptions{
 		LineFormat: DefaultLineFormat,
 		recs:       []*lineRecorder{GlobalRecorder, ErrorRecorder},
 		ring:       globalRing,
+		overview:   globalOverview,
 		out:        logWriter(),
 	}
 	globalDrainer *logDrainer
@@ -60,14 +63,19 @@ func FlushLogRing(timeout time.Duration) {
 	}
 }
 
-// DumpLogRingToFile writes the entire current log ring to the given file,
-// oldest first. Intended for panic handling: the ring holds the last N
-// lines even when the crash destroys the regular log stream.
+// DumpLogRingToFile writes the current rings to the given file, oldest
+// first within each section: the overview ring (flood-resistant, spans
+// hours) first, then the full detail ring (the unfiltered recent past).
+// Intended for panic handling and log-trap dumps: the rings hold the last
+// N lines even when the crash destroys the regular log stream.
 func DumpLogRingToFile(path string) error {
 	fd, err := os.Create(path)
 	if err != nil {
 		return err
 	}
+	_, _ = fmt.Fprintf(fd, "=== overview ring: last %d lines, bulk per-file lines excluded ===\n", len(globalOverview.lines))
+	globalOverview.WriteDump(fd, DefaultLineFormat)
+	_, _ = fmt.Fprintf(fd, "=== detail ring: last %d lines, unfiltered ===\n", len(globalRing.lines))
 	globalRing.WriteDump(fd, DefaultLineFormat)
 	return fd.Close()
 }
