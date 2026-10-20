@@ -15,5 +15,8 @@ func lacksNoCOW(string) (bool, error) {
 }
 
 func freeSpaceBytes(string) int64 {
-	return 0
+	// Off Linux the space gates never gate a real operation (the callers'
+	// filesystem checks return first), but tests exercise the copy
+	// choreography cross-platform; report "unconstrained".
+	return 1 << 62
 }
