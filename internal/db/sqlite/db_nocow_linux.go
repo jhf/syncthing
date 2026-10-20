@@ -46,8 +46,17 @@ func setNoCOW(path string) (changed bool, err error) {
 	if flags&fsNoCOWFlag != 0 {
 		return false, nil
 	}
-	if err := unix.IoctlSetInt(int(fd.Fd()), unix.FS_IOC_SETFLAGS, flags|fsNoCOWFlag); err != nil {
+	// FS_IOC_SETFLAGS takes a pointer to the flags, hence IoctlSetPointerInt
+	// (IoctlSetInt passes the value itself and fails with EFAULT).
+	if err := unix.IoctlSetPointerInt(int(fd.Fd()), unix.FS_IOC_SETFLAGS, flags|fsNoCOWFlag); err != nil {
 		return false, err
 	}
-	return true, nil
+	// btrfs silently ignores NOCOW on files that already have extents
+	// (SETFLAGS succeeds, the flag stays unset); such files report
+	// changed=false and their data stays CoW until the file is recreated.
+	flags, err = unix.IoctlGetInt(int(fd.Fd()), unix.FS_IOC_GETFLAGS)
+	if err != nil {
+		return false, err
+	}
+	return flags&fsNoCOWFlag != 0, nil
 }
