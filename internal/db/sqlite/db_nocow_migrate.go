@@ -129,6 +129,16 @@ func copyReplaceAll(paths []string) error {
 	return nil
 }
 
+// readerOnly hides an *os.File behind io.Reader so io.CopyBuffer cannot
+// take the zero-copy paths: with two plain files Go resolves the copy to
+// copy_file_range(2), which btrfs implements as an extent-SHARING clone —
+// instant, but the "copy" keeps the source's physical extents, defeating
+// both this recreation (the new file must own fresh NOCOW extents) and the
+// defrag recopy (the point is replacing a fragmented layout). Observed
+// 2026-10-20 on yarlung (kernel 7.0): the 9.5 GiB defrag "copied" in 2.5 s
+// with the extent count unchanged at 235,240.
+type readerOnly struct{ io.Reader }
+
 // copyToTemp copies path to a fresh sibling temp file and fsyncs it. The
 // temp inherits the directory's NOCOW flag on CoW filesystems.
 func copyToTemp(path string) (string, error) {
@@ -150,7 +160,7 @@ func copyToTemp(path string) (string, error) {
 		return "", err
 	}
 	buf := make([]byte, 4<<20)
-	if _, err := io.CopyBuffer(dst, src, buf); err != nil {
+	if _, err := io.CopyBuffer(dst, readerOnly{src}, buf); err != nil {
 		dst.Close()    //nolint:errcheck
 		os.Remove(tmp) //nolint:errcheck
 		return "", fmt.Errorf("copy: %w", err)
