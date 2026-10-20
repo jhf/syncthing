@@ -55,6 +55,10 @@ func openBase(path string, maxOpenConns, maxIdleConns int, pragmas, schemaScript
 	// when the database, WAL and shm files are created (new files inherit
 	// the directory flag); an existing database file gets the flag directly.
 	applyNoCOW(path)
+	// A pre-existing database file cannot receive the NOCOW flag (btrfs
+	// ignores it on files with extents), so it is recreated by copy-replace
+	// when state allows: clean shutdown, enough free space (db_nocow_migrate.go).
+	migrateToNoCOW(path)
 
 	// Open the database with options to enable foreign keys and recursive
 	// triggers (needed for the delete+insert triggers on row replace).
