@@ -50,6 +50,12 @@ type baseDB struct {
 }
 
 func openBase(path string, maxOpenConns, maxIdleConns int, pragmas, schemaScripts, migrationScripts []string) (*baseDB, error) {
+	// On copy-on-write filesystems, disable CoW for the database (see
+	// db_nocow.go). Done before opening so the directory flag is in place
+	// when the database, WAL and shm files are created (new files inherit
+	// the directory flag); an existing database file gets the flag directly.
+	applyNoCOW(path)
+
 	// Open the database with options to enable foreign keys and recursive
 	// triggers (needed for the delete+insert triggers on row replace).
 	pathURL := url.URL{
