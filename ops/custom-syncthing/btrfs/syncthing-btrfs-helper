@@ -5,10 +5,19 @@
 #   snap <name>           - read-only snapshot of the subvolume as <name>
 #   diff <a> <b>          - print btrfs send --no-data -p <a> <b> | receive --dump
 #   setbaseline <name>    - make snapshot <name> the baseline (deletes old)
-#   rmsnap <name>         - delete snapshot <name> (never the baseline)
+#   rmsnap <name>         - delete snapshot <name> (never the baseline); a
+#                           missing snapshot is success (idempotent)
 #   status                - print baseline=<path|none>
 #   subvol                - print subvol=<mount path>
 #   subvols               - list nested subvolumes by path
+#   version               - print helper-version=N (drift detection via the
+#                           socket, no root needed)
+#
+# v4 (2026-10-21): rmsnap made truly idempotent — the old `[ -d x ] && delete`
+# trailing test exited 1 when x was absent, which turned every successful
+# pairing's deferred cleanup into a false-failure WRN (setbaseline renames
+# the staging snapshot to baseline, so the name is legitimately gone by then).
+# Added the version verb.
 #
 # v3 (2026-10-15): diff/diff-baseline no longer pipe send directly into
 # receive --dump. On streams larger than the pipe buffer, receive exits
@@ -72,7 +81,10 @@ case "${1:-}" in
   subvols)
     btrfs subvolume list -o "$SUB" | sed "s:.*path ::"
     ;;
+  version)
+    echo "helper-version=4"
+    ;;
   *)
-    echo "usage: $0 snap|diff|diff-baseline|setbaseline|rmsnap|status|subvol|subvols" >&2; exit 2
+    echo "usage: $0 snap|diff|diff-baseline|setbaseline|rmsnap|status|subvol|subvols|version" >&2; exit 2
     ;;
 esac
