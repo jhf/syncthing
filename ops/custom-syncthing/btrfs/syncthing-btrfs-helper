@@ -58,7 +58,10 @@ case "${1:-}" in
     ;;
   rmsnap)
     name_ok "${2:-}" || { echo "bad name" >&2; exit 2; }
-    [ -d "$DIR/$2" ] && btrfs subvolume delete "$DIR/$2" >/dev/null
+    # Idempotent: a missing snapshot is success, and the trailing test must
+    # not decide the script's exit status (`[ -d x ] && cmd` yields 1 when
+    # x is absent).
+    if [ -d "$DIR/$2" ]; then btrfs subvolume delete "$DIR/$2" >/dev/null; fi
     ;;
   status)
     if [ -d "$BASE" ]; then echo "baseline=$BASE"; else echo "baseline=none"; fi
