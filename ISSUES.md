@@ -4,8 +4,9 @@ A working map of syncthing/syncthing issues that touch our North Star workload, 
 when something misbehaves on our machines we can check here first: is this a known upstream
 bug, does someone have code for it, did we already adopt it?
 
-Status as of 2026-10-15 (scout refresh: tmp/upstream-inventory-issues.md; prior sweep:
-tmp/upstream-fix-sweep.md). Fork base: v2.1.6-64-gb8a531f46 (upstream main of ~2026-10-05).
+Status as of 2026-10-21 (scout refresh: tmp/upstream-inventory-issues.md; prior sweep:
+tmp/upstream-fix-sweep.md). Fork base: v2.1.7 final (d6d0181f7, rebased 2026-10-21,
+zero conflicts across our 147 commits).
 
 **How to use:** find your symptom in the index, open the issue, check "code" and "us".
 "us" says what we did: adopted (with patch number), carried (via dependency pin), parked
@@ -51,8 +52,13 @@ https://github.com/syncthing/syncthing/issues/10529
 WAL never truncates: reads in quick succession leave no gap for wal_checkpoint(TRUNCATE);
 positive feedback loop (bigger WAL → slower readers → fewer gaps). 11.6 GiB folder WAL
 measured by schaurian. dmih: fixing this probably also fixes #10529.
-**code:** none merged; see PR #10556. **us: partially covered** — our GC rewrite and lock
-work bound the worst of it; watching.
+**code:** none merged; see PR #10556. **us: covered for our workload** — patch/40 couples the
+WAL autocheckpoint threshold to the probed CoW state (128 MiB under NOCOW: checkpoints are
+in-place and cheap, so the threshold's remaining jobs are replay time and WAL size), and
+patch/44 moved the database into a nested NOCOW subvolume so our own baseline snapshots no
+longer re-share its extents. Live 2026-10-21: zero .wal files at rest (checkpoints complete),
+main.db 1 extent. Still watching upstream's general fix — the starvation loop itself is
+theirs to close.
 https://github.com/syncthing/syncthing/issues/10559
 
 ### #10868 — Frequent GC when dealing with a large number of small files — OPEN
@@ -67,8 +73,8 @@ Crash during folder scan with 9 GiB free: the modernc.org/sqlite allocator accum
 of thousands of small anonymous mappings until mmap fails. Static binary (no cgo). Two
 panics attached, one in lib/scanner walk growslice.
 **code:** PR #10915 (merged upstream 2026-10-07, caps unbounded prepared statements) is a
-PARTIAL fix — issue remains open. In our chain since the v2.1.7-rc.1 base (verified
-2026-10-19).
+PARTIAL fix — issue remains open. In our chain via the v2.1.7 final base (verified in-tree
+2026-10-21).
 **us: watching** — yarlung runs long uptimes and huge scans on exactly this allocator.
 If our linux-amd64 build crashes with "out of memory" and RAM free: check
 `wc -l /proc/$(pidof syncthing)/maps` against 65530.
