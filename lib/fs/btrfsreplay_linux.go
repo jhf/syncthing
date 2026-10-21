@@ -172,6 +172,29 @@ func BtrfsScanRemoveSnapshot(ctx context.Context, name string) error {
 	return err
 }
 
+// BtrfsScanSweepStaleSnapshots deletes pairing-snapshot residue, returning
+// the removed names. Conservative by construction: only basenames matching
+// pairingSnapBasename under the helper's staging dir are ever sent to the
+// helper's rmsnap, and the helper itself refuses "baseline" and anything
+// outside [a-z0-9.-]. User subvolumes elsewhere in the tree are never
+// candidates.
+func BtrfsScanSweepStaleSnapshots(ctx context.Context) ([]string, error) {
+	out, err := btrfsHelper(ctx, "subvols")
+	if err != nil {
+		return nil, err
+	}
+	var removed []string
+	var errs []error
+	for _, base := range stalePairingSnapNames(string(out)) {
+		if _, err := btrfsHelper(ctx, "rmsnap", base); err != nil {
+			errs = append(errs, fmt.Errorf("rmsnap %s: %w", base, err))
+			continue
+		}
+		removed = append(removed, base)
+	}
+	return removed, errors.Join(errs...)
+}
+
 // btrfsFolderPrefix returns the folder's path relative to the helper's
 // subvolume ("jhf" for folder /home/jhf on subvol /home), or an error when
 // the folder is not on that btrfs subvolume.

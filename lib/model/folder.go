@@ -222,6 +222,13 @@ func (f *folder) Serve(ctx context.Context) error {
 		return err // will get restarted by suture
 	}
 
+	// patch/45: audit that syncthing's own state inside this folder is
+	// ignore-covered, with ignores known-good. Runs for every folder,
+	// watcher or not; an unhealthy folder retries next boot.
+	if f.getHealthErrorAndLoadIgnores() == nil {
+		f.auditOwnStatePaths(ctx)
+	}
+
 	if f.FSWatcherEnabled && f.getHealthErrorAndLoadIgnores() == nil {
 		f.tryArmWatchReplay(ctx)
 		f.startWatch(ctx)

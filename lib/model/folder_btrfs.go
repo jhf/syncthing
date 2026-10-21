@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"slices"
 	"time"
@@ -112,6 +113,23 @@ func (f *folder) btrfsReplayEligible(ctx context.Context) bool {
 		f.sl.DebugContext(ctx, "Btrfs scan replay: nested subvolumes are all ignored paths", "subvolumes", nested)
 	}
 	f.btrfsOK = true
+
+	// patch/45: sweep pairing-snapshot residue once per folder lifetime,
+	// at boot before this run creates its own snapshots (the eligibility
+	// check is the one guaranteed-early btrfs touch point). Anything
+	// matching the pairing-name pattern in the helper's staging dir is
+	// garbage by construction — completed pairings rename to "baseline",
+	// failed ones self-remove — but a crash, SIGKILL, or helper hiccup
+	// defeats the deferred removal, and every leftover pins the blocks it
+	// shared with the live tree (observed on yarlung 2026-10-21: 12
+	// leftovers in 8 days, one pinning a 9.6 GiB old database image).
+	if os.Getenv("STBTRFSSWEEP") != "0" {
+		if removed, err := fs.BtrfsScanSweepStaleSnapshots(ctx); err != nil {
+			f.sl.WarnContext(ctx, "Failed to sweep stale btrfs pairing snapshots", "removed", removed, slogutil.Error(err))
+		} else if len(removed) > 0 {
+			f.sl.InfoContext(ctx, "Swept stale btrfs pairing snapshots", "snapshots", removed)
+		}
+	}
 	return true
 }
 
@@ -174,7 +192,13 @@ func (f *folder) tryArmBtrfsScanReplay(ctx context.Context) bool {
 		f.sl.WarnContext(ctx, "Failed to snapshot for btrfs scan diff, falling back to full scan", slogutil.Error(err))
 		return false
 	}
-	defer fs.BtrfsScanRemoveSnapshot(context.Background(), snap)
+	defer func() {
+		// patch/45: removal failures were silently discarded here, which
+		// is how staging-dir residue accumulated invisibly.
+		if err := fs.BtrfsScanRemoveSnapshot(context.Background(), snap); err != nil {
+			f.sl.WarnContext(context.Background(), "Failed to remove btrfs pairing snapshot", "snapshot", snap, slogutil.Error(err))
+		}
+	}()
 	paths, err := fs.BtrfsScanDiffBaseline(ctx, snap, f.Filesystem().URI())
 	if err != nil {
 		f.sl.WarnContext(ctx, "Failed to compute btrfs snapshot diff, falling back to full scan", slogutil.Error(err))
@@ -277,7 +301,11 @@ func (f *folder) pairBtrfsBaseline(ctx context.Context, trigger string) bool {
 	// Pin the filesystem state. Changes after this point are irrelevant to
 	// the pairing: the next boot's diff against this baseline covers them.
 	snap := btrfsSnapName(trigger, f.folderID)
-	defer fs.BtrfsScanRemoveSnapshot(context.Background(), snap)
+	defer func() {
+		if err := fs.BtrfsScanRemoveSnapshot(context.Background(), snap); err != nil {
+			f.sl.WarnContext(context.Background(), "Failed to remove btrfs pairing snapshot", "snapshot", snap, slogutil.Error(err))
+		}
+	}()
 	if err := fs.BtrfsScanSnapshot(ctx, snap); err != nil {
 		f.sl.InfoContext(ctx, "Btrfs baseline: pairing failed, snapshot error", slogutil.Error(err))
 		return false

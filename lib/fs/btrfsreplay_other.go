@@ -27,6 +27,10 @@ func BtrfsScanSetBaseline(context.Context, string) error { return errBtrfsReplay
 
 func BtrfsScanRemoveSnapshot(context.Context, string) error { return errBtrfsReplayUnsupported }
 
+// BtrfsScanSweepStaleSnapshots is a no-op off Linux: no helper, no
+// snapshots, no residue.
+func BtrfsScanSweepStaleSnapshots(context.Context) ([]string, error) { return nil, nil }
+
 func BtrfsScanNestedSubvols(context.Context, string) ([]string, error) {
 	return nil, errBtrfsReplayUnsupported
 }

@@ -9,8 +9,42 @@ package fs
 import (
 	"bufio"
 	"bytes"
+	"regexp"
 	"strings"
 )
+
+// pairingSnapBasename matches the snapshot basenames the pairing ritual
+// creates (btrfsSnapName in lib/model: "<trigger>-<folderID>-<unixnano>",
+// folderID cleaned to [a-z0-9.-]). Anything in the helper's snapshot dir
+// matching this and not named "baseline" is residue of an interrupted
+// pairing: a completed pairing renames its snapshot to the baseline, a
+// failed one removes it. Crash, SIGKILL, or a helper hiccup defeats the
+// deferred removal; the residue pins every block it shared with the live
+// tree until someone deletes it.
+var pairingSnapBasename = regexp.MustCompile(`^(?:boot|shutdown|post-replay|runtime)-[a-z0-9.-]+-[0-9]+$`)
+
+// stalePairingSnapNames extracts the pairing-snapshot residue from a
+// helper "subvols" listing: basenames matching pairingSnapBasename whose
+// parent is the helper's ".snapshots/syncthing" staging dir. A same-named
+// subvolume anywhere else in the tree is user data, never a candidate.
+// Pure; shared so the filter is testable off Linux.
+func stalePairingSnapNames(subvolsOutput string) []string {
+	var out []string
+	for line := range strings.Lines(subvolsOutput) {
+		line = strings.TrimSpace(line)
+		i := strings.LastIndexByte(line, '/')
+		if i < 0 {
+			continue
+		}
+		if !strings.HasSuffix(line[:i], "/.snapshots/syncthing") {
+			continue
+		}
+		if base := line[i+1:]; pairingSnapBasename.MatchString(base) {
+			out = append(out, base)
+		}
+	}
+	return out
+}
 
 // parseBtrfsDump parses `btrfs receive --dump` output into the set of
 // folder-relative paths touched by the diff. A dump line is a command
