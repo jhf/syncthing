@@ -301,15 +301,23 @@ func (f *folder) pairBtrfsBaseline(ctx context.Context, trigger string) bool {
 	// Pin the filesystem state. Changes after this point are irrelevant to
 	// the pairing: the next boot's diff against this baseline covers them.
 	snap := btrfsSnapName(trigger, f.folderID)
-	defer func() {
-		if err := fs.BtrfsScanRemoveSnapshot(context.Background(), snap); err != nil {
-			f.sl.WarnContext(context.Background(), "Failed to remove btrfs pairing snapshot", "snapshot", snap, slogutil.Error(err))
-		}
-	}()
 	if err := fs.BtrfsScanSnapshot(ctx, snap); err != nil {
 		f.sl.InfoContext(ctx, "Btrfs baseline: pairing failed, snapshot error", slogutil.Error(err))
 		return false
 	}
+	// setbaseline renames the staging snapshot to the baseline, so a
+	// successful pairing leaves nothing under the staging name to remove;
+	// the deferred cleanup must stand down or it fires at a name that no
+	// longer exists (a false-failure WRN, and helper exit 1).
+	consumed := false
+	defer func() {
+		if consumed {
+			return
+		}
+		if err := fs.BtrfsScanRemoveSnapshot(context.Background(), snap); err != nil {
+			f.sl.WarnContext(context.Background(), "Failed to remove btrfs pairing snapshot", "snapshot", snap, slogutil.Error(err))
+		}
+	}()
 
 	// Prove that every change up to the snapshot is in the index.
 	if !f.watchBarrier(ctx) {
@@ -321,6 +329,7 @@ func (f *folder) pairBtrfsBaseline(ctx context.Context, trigger string) bool {
 		f.sl.InfoContext(ctx, "Btrfs baseline: pairing failed, setbaseline error", slogutil.Error(err))
 		return false
 	}
+	consumed = true
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], uint64(time.Now().Unix()))
 	if err := f.db.PutKV(btrfsBaselineKVPrefix+f.folderID, b[:]); err != nil {
