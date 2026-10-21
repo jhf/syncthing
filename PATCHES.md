@@ -1,19 +1,22 @@
 # Maintained patches on top of upstream Syncthing
 
 This file is the inventory of the patches this fork carries. It lives on the
-fork's `main` branch, which is assembled from the per-patch branches listed
-below. See `FORK.md` for how the fork is maintained and rebased.
+fork's `main` branch, whose history is upstream plus every patch's commits
+as one contiguous, in-order segment per patch. See `FORK.md` for how the
+fork is maintained and rebased.
 
 Upstream tracking issue: https://github.com/syncthing/syncthing/issues/10921
 (presents the six headline changes with measurements; PRs offered one per
 patch if upstream wants them).
 
-Patches are ordered in dependency order. Each `patch/NN-*` branch contains
-everything in the branches before it plus its own piece, so
-`git diff patch/NN-1-... patch/NN-...` shows exactly one piece.
+Patches are ordered in dependency order. Each patch's commits sit
+consecutively in `main`'s history; the Commits column gives the segment
+size, so any single patch is extractable as its segment. (The per-patch
+branches that used to mark the boundaries were retired 2026-10-21; the
+history they pointed into is unchanged.)
 
-| # | Branch | Piece | Commits |
-|---|--------|-------|---------|
+| # | Patch | Piece | Commits |
+|---|-------|-------|---------|
 | 01 | `patch/01-skip-mtime-on-exists` | Skip virtual mtime lookup for existence checks (the 40% scan speedup) | 7 |
 | 02 | `patch/02-gc-chunked-commit` | GC commits each hash-range chunk; blocklist hashes retired at update; keep needs-full-scan flag across GC interruption | 3 |
 | 03 | `patch/03-need-list-perf` | Need-list queries: no SQL name ordering, cached remote need list, cached per-device need count, iterator cost accounting | 6 |
