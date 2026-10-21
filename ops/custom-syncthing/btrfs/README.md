@@ -13,6 +13,21 @@ Install (as root on the btrfs host, service user `jhf` here):
     systemctl daemon-reload
     systemctl enable --now syncthing-btrfs.socket
 
+Update (from the Mac, one command): `./install.sh` — idempotent install
+over root ssh (BatchMode keys), syntax-gates bash before it goes live,
+restarts the socket unit only when a unit or the adapter changed, and
+verifies by asking the installed helper its version through the socket.
+
+Updates deliberately do NOT use a sudo NOPASSWD entry for jhf: the helper
+runs as root, so whoever can install it controls root-executed content —
+a NOPASSWD install path would be a standing root-equivalence grant on the
+jhf account (any process running as jhf could escalate). Root ssh keeps
+installation a consciously-root act with sshd's audit trail at the same
+convenience. jhf's authority stays at invocation, via the socket.
+
+Drift check (no root): `printf 'version\n' | nc -U /run/syncthing-btrfs.sock`
+on yarlung prints `helper-version=N`; compare with the `version` arm here.
+
 Protocol: client writes one line ("<verb> [name...]") and half-closes;
 the adapter execs the helper (which owns ALL validation: fixed verbs,
 name charset [a-z0-9.-], baseline deletion refused), streams its stdout
