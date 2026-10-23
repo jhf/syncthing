@@ -703,3 +703,11 @@ func notifyTimeout(eventDelayS float64) time.Duration {
 	}
 	return time.Duration(eventDelayS * float64(time.Second))
 }
+
+// NotifyTimeout exports notifyTimeout: lib/model's drip mode derives its
+// max-hold bound from the same staleness budget the aggregator applies to
+// continuously-modified files, so the two layers stay consistent by
+// construction.
+func NotifyTimeout(eventDelayS float64) time.Duration {
+	return notifyTimeout(eventDelayS)
+}
