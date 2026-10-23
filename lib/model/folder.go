@@ -104,6 +104,14 @@ type folder struct {
 	dripArmed      atomic.Bool
 	dripFlushTimer *time.Timer
 
+	// Metadata-only update batching (patch/47): holds scan-side updates
+	// that change nothing but the mtime, flushing them piggybacked on the
+	// next real commit or at a derived latency bound. Armed only while
+	// Serve runs, like drip.
+	metaBatch      *metaBatchTracker
+	metaArmed      atomic.Bool
+	metaFlushTimer *time.Timer
+
 	scanErrors []FileError
 	pullErrors []FileError
 	errorsMut  sync.Mutex
@@ -198,6 +206,9 @@ func newFolder(model *model, ignores *ignore.Matcher, cfg config.FolderConfigura
 	f.drip = newDripTracker(cfg, time.Now, func(msg string, args ...any) { f.sl.Info(msg, args...) })
 	f.dripFlushTimer = time.NewTimer(0)
 	<-f.dripFlushTimer.C
+	f.metaBatch = newMetaBatchTracker(cfg, time.Now, func(msg string, args ...any) { f.sl.Info(msg, args...) })
+	f.metaFlushTimer = time.NewTimer(0)
+	<-f.metaFlushTimer.C
 	f.btrfsRearmTimer = time.NewTimer(0)
 	<-f.btrfsRearmTimer.C
 
@@ -221,15 +232,26 @@ func (f *folder) Serve(ctx context.Context) error {
 		f.btrfsRearmTimer.Stop()
 		f.dripFlushTimer.Stop()
 		f.dripArmed.Store(false)
+		f.metaFlushTimer.Stop()
+		f.metaArmed.Store(false)
 		if held := f.drip.flushAll(); len(held) > 0 {
 			if err := f.commitLocalsFromScanning(held); err != nil {
 				f.sl.Warn("Drip flush on folder shutdown failed", "error", err)
+			}
+		}
+		// patch/47: anything the drip shutdown flush diverted into the
+		// metabatch (or that was already pending there) commits raw here,
+		// bypassing the divert so nothing is held past shutdown.
+		if pend := f.metaBatch.flushAll(); len(pend) > 0 {
+			if err := f.commitScanBatch(pend); err != nil {
+				f.sl.Warn("Metabatch flush on folder shutdown failed", "error", err)
 			}
 		}
 		f.setState(FolderIdle)
 	}()
 
 	f.dripArmed.Store(true)
+	f.metaArmed.Store(true)
 
 	// The watch context is detached from this one (see startWatch) so the
 	// btrfs shutdown pairing can run with the watch still alive; tear it
@@ -351,6 +373,11 @@ func (f *folder) Serve(ctx context.Context) error {
 			// Drip mode (patch/46): commit held updates whose quiet or
 			// max-hold deadline passed.
 			f.serviceDripFlush()
+
+		case <-f.metaFlushTimer.C:
+			// Metadata-only batching (patch/47): commit held mtime-only
+			// updates whose latency bound passed.
+			f.serviceMetaFlush()
 
 		case req := <-f.doInSyncChan:
 			f.sl.DebugContext(ctx, "Running something due to request")
@@ -732,6 +759,38 @@ func (f *folder) serviceDripFlush() {
 	f.rearmDripTimer()
 }
 
+// serviceMetaFlush commits held mtime-only updates whose latency bound
+// passed (patch/47). Called from the flush timer and alongside
+// serviceDripFlush at scan chunk boundaries, because a long scan holds the
+// Serve loop and would otherwise starve the timer case.
+func (f *folder) serviceMetaFlush() {
+	if !f.metaArmed.Load() {
+		return
+	}
+	if due := f.metaBatch.flushDue(); len(due) > 0 {
+		f.sl.Debug("Metabatch flush serviced", "files", len(due))
+		if err := f.commitScanBatch(due); err != nil {
+			f.sl.Warn("Metabatch flush failed", "error", err)
+		}
+	}
+	f.rearmMetaFlushTimer()
+}
+
+// rearmMetaFlushTimer schedules the next metabatch flush at the latency
+// deadline of the oldest pending entry, or stops the timer when nothing is
+// held. Serve goroutine only.
+func (f *folder) rearmMetaFlushTimer() {
+	if !f.metaFlushTimer.Stop() {
+		select {
+		case <-f.metaFlushTimer.C:
+		default:
+		}
+	}
+	if d, ok := f.metaBatch.nextIn(); ok {
+		f.metaFlushTimer.Reset(d)
+	}
+}
+
 // serviceQueuedPull runs one pull iteration if the folder has one queued, and returns immediately
 // otherwise. It exists so that a chunked scan does not starve the puller: the scan and the pull both
 // run in the serve goroutine, so this is the same work the loop would have done between two selects.
@@ -863,6 +922,7 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 		pullRan, pullErr := f.serviceQueuedPull(ctx)
 		watchRan, watchErr := f.serviceQueuedWatch(ctx)
 		f.serviceDripFlush()
+		f.serviceMetaFlush()
 		limitErr := f.ioLimiter.TakeWithContext(ctx, 1)
 		if !progressed {
 			f.sl.DebugContext(ctx, "Scan chunk made no progress, growing the chunk budget", slog.String("resumeFrom", resumeFrom))
@@ -1321,6 +1381,7 @@ outer:
 				pullRan, pullErr := f.serviceQueuedPull(ctx)
 				watchRan, watchErr := f.serviceQueuedWatch(ctx)
 				f.serviceDripFlush()
+				f.serviceMetaFlush()
 				limitErr := f.ioLimiter.TakeWithContext(ctx, 1)
 				boundaryTime := time.Since(boundaryStart)
 				chunkWall := boundaryStart.Sub(chunkStart)
@@ -2174,9 +2235,38 @@ func (f *folder) updateLocalsFromScanning(fs []protocol.FileInfo) error {
 	return f.commitLocalsFromScanning(fs)
 }
 
-// commitLocalsFromScanning commits scan results immediately, with no drip
-// filtering: used by the drip flush timer and shutdown flush.
+// commitLocalsFromScanning commits scan results, routing them through the
+// metadata-only batch (patch/47): mtime-only updates are held, and any real
+// update drags all pending mtime-only updates along in the same transaction
+// (piggyback). Used by updateLocalsFromScanning, the drip flush timer, and
+// the shutdown flush.
 func (f *folder) commitLocalsFromScanning(fs []protocol.FileInfo) error {
+	if len(fs) == 0 {
+		return nil
+	}
+	if f.metaArmed.Load() {
+		defer f.rearmMetaFlushTimer()
+		fs = f.divertMetaBatch(fs)
+		// Piggyback: a real commit is going through, so pending mtime-only
+		// updates ride along for free. A held path whose real update is in
+		// this batch is dropped instead (superseded — committing the older
+		// mtime after the newer version would regress the index). The cap
+		// forces a flush even when nothing real is committing.
+		if len(fs) > 0 || f.metaBatch.due() {
+			reason := "due"
+			if len(fs) > 0 {
+				reason = "piggyback"
+			}
+			fs = append(fs, f.metaBatch.drainExcept(fileNameSet(fs), reason)...)
+		}
+	}
+	return f.commitScanBatch(fs)
+}
+
+// commitScanBatch commits scan results as-is, with no drip or metabatch
+// filtering: used by the metabatch flush paths, which commit already-held
+// updates and must not re-divert them.
+func (f *folder) commitScanBatch(fs []protocol.FileInfo) error {
 	if len(fs) == 0 {
 		return nil
 	}
@@ -2185,6 +2275,51 @@ func (f *folder) commitLocalsFromScanning(fs []protocol.FileInfo) error {
 	}
 	f.emitDiskChangeEvents(fs, events.LocalChangeDetected)
 	return nil
+}
+
+// divertMetaBatch partitions a scan batch into real updates (returned) and
+// metadata-only updates (held in the metabatch, last version wins).
+func (f *folder) divertMetaBatch(fs []protocol.FileInfo) []protocol.FileInfo {
+	if !f.metaBatch.params.enabled {
+		return fs
+	}
+	commit := fs[:0]
+	for _, fi := range fs {
+		if f.isMetadataOnlyUpdate(fi) {
+			f.sl.Debug("Metabatch holds metadata-only update", slogutil.FilePath(fi.Name))
+			f.metaBatch.hold(fi)
+			continue
+		}
+		commit = append(commit, fi)
+	}
+	return commit
+}
+
+// isMetadataOnlyUpdate reports whether fi differs from the current index
+// entry only in mtime. Anything ambiguous (no current entry, read error,
+// directory, delete, invalid) is not metadata-only and commits normally.
+func (f *folder) isMetadataOnlyUpdate(fi protocol.FileInfo) bool {
+	if fi.IsDirectory() || fi.Deleted || fi.IsInvalid() {
+		return false
+	}
+	cur, ok, err := f.db.GetDeviceFile(f.folderID, protocol.LocalDeviceID, fi.Name)
+	if err != nil || !ok {
+		return false
+	}
+	return metadataOnlyUpdate(cur, fi, protocol.FileInfoComparison{
+		IgnorePerms:     f.IgnorePerms,
+		IgnoreFlags:     f.localFlags,
+		IgnoreOwnership: !(f.SendOwnership || f.SyncOwnership),
+		IgnoreXattrs:    !(f.SendXattrs || f.SyncXattrs),
+	})
+}
+
+func fileNameSet(fs []protocol.FileInfo) map[string]struct{} {
+	names := make(map[string]struct{}, len(fs))
+	for _, fi := range fs {
+		names[fi.Name] = struct{}{}
+	}
+	return names
 }
 
 // rearmDripTimer schedules the next drip flush at the earliest pending
