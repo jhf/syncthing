@@ -97,6 +97,13 @@ type folder struct {
 	pullPause     time.Duration
 	pullFailTimer *time.Timer
 
+	// Drip mode (patch/46): coalesces repeated scan-side commits of
+	// frequently-changing files. Armed only while Serve runs, so tests
+	// driving updateLocalsFromScanning directly see unfiltered behavior.
+	drip           *dripTracker
+	dripArmed      atomic.Bool
+	dripFlushTimer *time.Timer
+
 	scanErrors []FileError
 	pullErrors []FileError
 	errorsMut  sync.Mutex
@@ -188,6 +195,9 @@ func newFolder(model *model, ignores *ignore.Matcher, cfg config.FolderConfigura
 	f.pullPause = f.pullBasePause()
 	f.pullFailTimer = time.NewTimer(0)
 	<-f.pullFailTimer.C
+	f.drip = newDripTracker(cfg, time.Now, func(msg string, args ...any) { f.sl.Info(msg, args...) })
+	f.dripFlushTimer = time.NewTimer(0)
+	<-f.dripFlushTimer.C
 	f.btrfsRearmTimer = time.NewTimer(0)
 	<-f.btrfsRearmTimer.C
 
@@ -209,8 +219,17 @@ func (f *folder) Serve(ctx context.Context) error {
 		f.scanTimer.Stop()
 		f.versionCleanupTimer.Stop()
 		f.btrfsRearmTimer.Stop()
+		f.dripFlushTimer.Stop()
+		f.dripArmed.Store(false)
+		if held := f.drip.flushAll(); len(held) > 0 {
+			if err := f.commitLocalsFromScanning(held); err != nil {
+				f.sl.Warn("Drip flush on folder shutdown failed", "error", err)
+			}
+		}
 		f.setState(FolderIdle)
 	}()
+
+	f.dripArmed.Store(true)
 
 	// The watch context is detached from this one (see startWatch) so the
 	// btrfs shutdown pairing can run with the watch still alive; tear it
@@ -327,6 +346,15 @@ func (f *folder) Serve(ctx context.Context) error {
 		case <-f.scanTimer.C:
 			f.sl.DebugContext(ctx, "Scanning due to timer")
 			err = f.scanTimerFired(ctx)
+
+		case <-f.dripFlushTimer.C:
+			// Drip mode (patch/46): commit held updates whose quiet or
+			// max-hold deadline passed.
+			if due := f.drip.flushDue(); len(due) > 0 {
+				f.sl.DebugContext(ctx, "Drip flush timer fired", "files", len(due))
+				err = f.commitLocalsFromScanning(due)
+			}
+			f.rearmDripTimer()
 
 		case req := <-f.doInSyncChan:
 			f.sl.DebugContext(ctx, "Running something due to request")
@@ -2120,11 +2148,40 @@ func (f *folder) ScheduleForceRescan(path string) {
 }
 
 func (f *folder) updateLocalsFromScanning(fs []protocol.FileInfo) error {
+	if f.dripArmed.Load() {
+		// Drip mode (patch/46): frequently-changing files are held here and
+		// committed later by the flush timer via commitLocalsFromScanning.
+		fs = f.drip.filterScanUpdate(fs)
+		defer f.rearmDripTimer()
+	}
+	return f.commitLocalsFromScanning(fs)
+}
+
+// commitLocalsFromScanning commits scan results immediately, with no drip
+// filtering: used by the drip flush timer and shutdown flush.
+func (f *folder) commitLocalsFromScanning(fs []protocol.FileInfo) error {
+	if len(fs) == 0 {
+		return nil
+	}
 	if err := f.updateLocals(fs); err != nil {
 		return err
 	}
 	f.emitDiskChangeEvents(fs, events.LocalChangeDetected)
 	return nil
+}
+
+// rearmDripTimer schedules the next drip flush at the earliest pending
+// deadline, or stops the timer when nothing is held. Serve goroutine only.
+func (f *folder) rearmDripTimer() {
+	if !f.dripFlushTimer.Stop() {
+		select {
+		case <-f.dripFlushTimer.C:
+		default:
+		}
+	}
+	if d, ok := f.drip.nextIn(); ok {
+		f.dripFlushTimer.Reset(d)
+	}
 }
 
 func (f *folder) updateLocalsFromPulling(fs []protocol.FileInfo) error {
