@@ -350,11 +350,7 @@ func (f *folder) Serve(ctx context.Context) error {
 		case <-f.dripFlushTimer.C:
 			// Drip mode (patch/46): commit held updates whose quiet or
 			// max-hold deadline passed.
-			if due := f.drip.flushDue(); len(due) > 0 {
-				f.sl.DebugContext(ctx, "Drip flush timer fired", "files", len(due))
-				err = f.commitLocalsFromScanning(due)
-			}
-			f.rearmDripTimer()
+			f.serviceDripFlush()
 
 		case req := <-f.doInSyncChan:
 			f.sl.DebugContext(ctx, "Running something due to request")
@@ -717,6 +713,25 @@ func (f *folder) serviceQueuedWatch(ctx context.Context) (bool, error) {
 	}
 }
 
+// serviceDripFlush commits held drip-mode updates whose quiet or max-hold
+// deadline passed (patch/46). The scan chunk loops call this at their
+// boundaries because a long scan holds the Serve loop for its entire
+// duration — the flush timer's select case would otherwise starve for the
+// whole scan (observed live 2026-10-23: entries held 2+ min past max-hold
+// during the boot scan).
+func (f *folder) serviceDripFlush() {
+	if !f.dripArmed.Load() {
+		return
+	}
+	if due := f.drip.flushDue(); len(due) > 0 {
+		f.sl.Debug("Drip flush serviced", "files", len(due))
+		if err := f.commitLocalsFromScanning(due); err != nil {
+			f.sl.Warn("Drip flush failed", "error", err)
+		}
+	}
+	f.rearmDripTimer()
+}
+
 // serviceQueuedPull runs one pull iteration if the folder has one queued, and returns immediately
 // otherwise. It exists so that a chunked scan does not starve the puller: the scan and the pull both
 // run in the serve goroutine, so this is the same work the loop would have done between two selects.
@@ -847,6 +862,7 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
 		f.ioLimiter.Give(1)
 		pullRan, pullErr := f.serviceQueuedPull(ctx)
 		watchRan, watchErr := f.serviceQueuedWatch(ctx)
+		f.serviceDripFlush()
 		limitErr := f.ioLimiter.TakeWithContext(ctx, 1)
 		if !progressed {
 			f.sl.DebugContext(ctx, "Scan chunk made no progress, growing the chunk budget", slog.String("resumeFrom", resumeFrom))
@@ -1304,6 +1320,7 @@ outer:
 				f.ioLimiter.Give(1)
 				pullRan, pullErr := f.serviceQueuedPull(ctx)
 				watchRan, watchErr := f.serviceQueuedWatch(ctx)
+				f.serviceDripFlush()
 				limitErr := f.ioLimiter.TakeWithContext(ctx, 1)
 				boundaryTime := time.Since(boundaryStart)
 				chunkWall := boundaryStart.Sub(chunkStart)
