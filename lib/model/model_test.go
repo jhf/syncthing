@@ -3202,6 +3202,10 @@ func TestConnCloseOnRestart(t *testing.T) {
 }
 
 func TestModTimeWindow(t *testing.T) {
+	// patch/47: mtime-only updates are metadata-only and commit deferred
+	// (metabatch); shrink the flush window so the deferred commit lands
+	// quickly and poll for it below.
+	t.Setenv("STMETABATCHWINDOWS", "1")
 	w, fcfg := newDefaultCfgWrapper(t)
 	tfs := modtimeTruncatingFS{
 		trunc:      0,
@@ -3254,11 +3258,18 @@ func TestModTimeWindow(t *testing.T) {
 
 	m.ScanFolders()
 
-	// Version should have updated
-
-	fi, _ = m.testCurrentFolderFile("default", name)
-	if fi.Version.Compare(v) != protocol.Greater {
-		t.Fatalf("Got result %v, expected %v", fi.Version.Compare(v), protocol.Greater)
+	// Version should have updated. The update is mtime-only, so patch/47
+	// holds it for the (here 1 s) metabatch window before committing; poll.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		fi, _ = m.testCurrentFolderFile("default", name)
+		if fi.Version.Compare(v) == protocol.Greater {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Got result %v, expected %v", fi.Version.Compare(v), protocol.Greater)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
