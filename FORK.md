@@ -23,11 +23,11 @@ regardless, so we maintain them ourselves, in the open, as cleanly separable
 per-patch commit segments that upstream can take at any time. If upstream merges
 them, this fork's reason to exist shrinks accordingly.
 
-Long-term posture: the protocol (BEP) is never forked — we stay
-wire-compatible with upstream syncthing indefinitely. If upstream remains
-uninterested, the fallback is not a protocol fork but a maintained
-distribution: we publish our own builds, keep tracking upstream releases,
-and interoperate with stock syncthing forever.
+Long-term posture: so far the protocol (BEP) has never been the issue —
+every patch sits above or below it, and we are wire-compatible with stock
+syncthing today. If upstream remains uninterested, the fallback is a
+maintained distribution: our own builds, tracking upstream releases, for
+as long as that remains true.
 
 ## Branch structure
 
