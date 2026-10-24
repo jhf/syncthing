@@ -10,10 +10,11 @@ Upstream tracking issue: https://github.com/syncthing/syncthing/issues/10921
 patch if upstream wants them).
 
 Patches are ordered in dependency order. Each patch's commits sit
-consecutively in `main`'s history (new commits prefixed `patch/NN:`),
-so any single patch is extractable as its segment. (The per-patch
-branches that used to mark the boundaries were retired 2026-10-21; the
-history they pointed into is unchanged.)
+consecutively in `main`'s history and carry the `patch/NN:` subject
+prefix (history rewritten 2026-10-24 to apply it retroactively; tree
+unchanged), so any single patch is extractable as its segment. (The
+per-patch branches that used to mark the boundaries were retired
+2026-10-21.)
 
 ## How to read this
 
