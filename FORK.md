@@ -13,13 +13,21 @@ The North Star is stated in the README: fast sync of one Mac home tree
 moves deliberately and merges few outside PRs; our development loop is
 AI-assisted and measured in hours, not release cycles. Some proposed fixes
 have met maintainer pushback (the mtime existence-check skip,
-`patch/01-skip-mtime-on-exists`), and the tracking issue that presents the
+`patch/01-skip-mtime-on-exists` — proposed with measurements as issue
+[#10909](https://github.com/syncthing/syncthing/issues/10909), closed as
+not-planned), and the tracking issue that presents the
 headline work with measurements
 ([syncthing#10921](https://github.com/syncthing/syncthing/issues/10921))
 states plainly where that leaves us: we run these patches in production
 regardless, so we maintain them ourselves, in the open, as cleanly separable
 per-patch commit segments that upstream can take at any time. If upstream merges
 them, this fork's reason to exist shrinks accordingly.
+
+Long-term posture: the protocol (BEP) is never forked — we stay
+wire-compatible with upstream syncthing indefinitely. If upstream remains
+uninterested, the fallback is not a protocol fork but a maintained
+distribution: we publish our own builds, keep tracking upstream releases,
+and interoperate with stock syncthing forever.
 
 ## Branch structure
 
