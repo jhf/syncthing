@@ -27,9 +27,10 @@ Long-term posture: so far the protocol (BEP) has never been the issue —
 every patch sits above or below it, and we are wire-compatible with stock
 syncthing today. If upstream remains uninterested, the fallback is a
 maintained distribution: our own builds, tracking upstream releases, for
-as long as that remains true. Protocol-level work is parked unless one of
-two triggers fires: a sync-speed need that cannot be met above or below
-BEP, or an S3-style store-and-forward target (under investigation).
+as long as that remains true. Protocol-level work is parked; the triggers
+that would make us look at BEP are encoding efficiency, protocol chatter,
+and bulk binary transfer efficiency — or an S3-style store-and-forward
+target (under investigation). None of these has become a problem yet.
 
 ## Branch structure
 
