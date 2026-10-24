@@ -114,6 +114,17 @@ https://github.com/syncthing/syncthing/issues/10264
 
 ## Scanning
 
+### #10909 — Deleted/ignored scan does a SQLite virtual-mtime lookup per file — CLOSED (not planned)
+**Filed by us (jhf)** 2026-10-05 with measurements: stock v2.1.5 on the 2.38M-file
+tree sat in `scanSubdirsDeletedAndIgnored` → `IsDeleted` → `GetMtime` for 1 h 44 min
+without finishing (pulls starved behind it); with the lookup skipped, full scans
+complete in 6–9 min. calmh: "Is this just a longwinded way of saying 'scans take
+longer than I expect'?" — closed not-planned 2026-10-15. Our reply there is the
+fork's founding statement: "I can't use it without this and several other fixes, so
+I must then keep a forked version."
+**us: fixed for ourselves** — patch/01.
+https://github.com/syncthing/syncthing/issues/10909
+
 ### #10869 — Regression since 2.1.0: very slow scanning with identical files — OPEN
 Successor to #10777 (closed, unfixable-per-reporter). Rename tracking (PR #10653, in our
 base) made findRepeat... `findRename` repeat `IsDeleted` Lstats on same-BlocksHash files →
@@ -282,16 +293,19 @@ To sweep: list items above the last-checked number
 the mark.
 
 - Last full sweep: 2026-10-21 (scout refresh), coverage through **#10918**.
-- Gap #10919–#10937 evaluated 2026-10-24. Three merged PRs matter to us —
-  all land via the next upstream rebase:
+- Gap #10919–#10937 evaluated 2026-10-24. Three merged PRs matter to us.
+  **Correction 2026-10-24 (verified by ancestry, not assumption): all three
+  are already in our base.** Our merge-base with upstream/main is
+  `d6d0181f7` — the #10929 merge commit itself — and #10925 (`f07853b51`)
+  and #10923 (`ab8dcf844`) are ancestors of HEAD. No rebase needed.
   - **#10925** (fixes #10924): the pull-side metadata shortcut could apply a
     remote version over an unscanned local change and diverge file contents —
-    the exact `shortcutFile` path patch/47's scope note discusses. Highest
-    priority of the three.
+    the exact `shortcutFile` path patch/47's scope note discusses. Already in
+    base.
   - **#10929** (fixes #10928): receive-only reconciliation did not compare
-    block hashes. We are send-receive, but take it anyway.
+    block hashes. Already in base (it IS our merge-base).
   - **#10923**: malformed protocol data now returns errors instead of
-    panicking the connection handler.
+    panicking the connection handler. Already in base.
   - Watching: #10933 (an offline device makes online devices report each
     other out-of-sync; two-node cluster, low exposure).
 - Counter checked 2026-10-24: **#10937** is the newest item. Next sweep
