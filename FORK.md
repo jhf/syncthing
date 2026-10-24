@@ -26,19 +26,17 @@ them, this fork's reason to exist shrinks accordingly.
 - `main` — the ONLY branch: upstream `main` + all patches + this fork's
   own documentation (`PATCHES.md`, this file, and the README header
   below). Day-to-day work commits directly to `main`; we build and deploy
-  from it. Each patch's commits form one contiguous, in-order segment in
-  `main`'s history; `PATCHES.md`'s Commits column gives the segment size,
-  so `patch/NN` is `git log` boundaries, not a ref. To upstream a single
-  patch, extract its segment (format-patch / cherry-pick onto upstream)
-  at that time.
-- Per-patch branches were retired 2026-10-21: they duplicated what the
-  linear history already records, and 60+ refs had become cruft. Git is
-  the historian; no commits were lost (the branches all pointed inside
-  `main`). The `feature/btrfs-scan-replay` ops archive (raw dev history
-  with binaries and incident evidence, deliberately not carried on
-  `main`) was retired the same day; its tip commit `82ee012c2` (2026-10-15)
-  remains in the object store while any pre-cleanup clone or reflog holds
-  it.
+  from it. There are no per-patch branches and never will be again: the
+  fork is one long, structured series of commits.
+- Each patch's commits form one contiguous, in-order segment in `main`'s
+  history, and every commit in the segment carries the patch's slug in
+  its subject: `patch/NN: ...` (NN is the stable key; the long name —
+  e.g. `skip-mtime-on-exists` — lives in PATCHES.md's slug column).
+  That prefix discipline is what makes regrouping and rebasing
+  mechanical. Non-patch commits (pure docs/ops/tests that belong to no
+  patch) keep their conventional prefixes (`docs:`, `ops:`, `test:`).
+  To upstream a single patch, extract its segment (format-patch /
+  cherry-pick onto upstream) at that time.
 
 ## Rebase procedure (per upstream release)
 
@@ -101,3 +99,59 @@ Machine-local (never committed; live in the working directory only):
   value. Audited 2026-10-15: zero API-key material on any pushed branch of
   either fork (syncthing + notify); the only matches upstream-wide are
   upstream's own test fixtures.
+
+## The two production machines (and why their numbers differ)
+
+Same workload both ends — the Mac's home tree (2.38M files, 394k
+directories, 262 GiB) mirroring to yarlung over WAN — on very different
+hardware:
+
+| | Mac (sender) | yarlung (receiver) |
+|---|---|---|
+| CPU | Apple M1 Max, 10-core (2021) | Intel Xeon E3-1245 v2, 4C/8T @3.4 GHz (Ivy Bridge, 2012) |
+| RAM | 64 GiB | 16 GiB |
+| Storage | NVMe SSD | btrfs RAID1 on 2×3 TB 7200 rpm HDD, no SSD |
+| syncthing RSS (2026-10-24, both ~13 h uptime, idle, 0 errors) | 105 MB | 870 MB |
+| of which Go runtime (`sys` from /rest/system/status) | 62 MB | 447 MB |
+| of which C-side (RSS minus Go sys: sqlite caches etc.) | ~43 MB | ~423 MB |
+| CPU while idle-ish | 0.0 % | ~1.5 % |
+
+Both deltas are expected and by design:
+
+**C-side memory (sqlite page cache).** This fork sets an explicit 256 MiB
+page-cache budget per database pool on every connection
+(`internal/db/sqlite/db_pagecache.go`, `STDBPAGECACHEMIB`), because the
+stock 8 MiB cache on a multi-GiB database on spinning rust made every
+random probe hit disk (observed 2026-10-19: ~400 rows/min at 1 % CPU, all
+I/O-wait, against the 8.8 GiB folder DB). The cache grows on demand.
+Yarlung's two pools (folder DB + main DB) actually fill: its scans and
+pulls walk big page ranges and every page read is precious because the
+alternative is a spindle seek. The Mac has the same budget but touches far
+fewer distinct pages in a quiet window and its NVMe makes refills cheap,
+so the cache stays small. Spending 400 MB of RAM to avoid disk seeks is
+the correct trade on a 16 GiB machine that still has ~13 GiB of page
+cache free.
+
+**Go-side memory.** Same code, same 2.38M-file tree, but every operation
+takes longer in wall time on yarlung — scans take minutes instead of
+seconds, commits wait on the spindle — so in-flight buffers, batches, and
+queues live longer, and the Go heap grows correspondingly larger before
+the scavenger returns it (alloc 258 MB vs 19 MB at the same idle moment).
+
+**CPU.** Identical work on a 2012 4-core/8-thread Ivy Bridge versus a
+2021 10-core M1 Max: a ~5x per-core gap, and slow I/O stretches every
+task's occupancy. 1.5 % of 8 threads is 0.12 cores busy — trivially fine,
+and the number to watch is disk-io wait, not CPU.
+
+**Deployment** (2026-10-23+): both ends deploy via
+`~/syncthing-custom/deploy-mac.sh` / `deploy-yarlung.sh` (synced between
+the machines, deliberately not committed: they read the local GUI key at
+runtime on the Mac and carry yarlung's on yarlung). Builds are named per
+machine — `custom-syncthing-jhf-macbook-pro.dev.N` and
+`custom-syncthing-yarlung.dev.N` — so both machines see both builds in
+the synced folder. `current` and `CURRENT-BINARY` are per-machine
+pointers, `(?d)`-ignored in `.stignore-shared` since 2026-10-20 after the
+Mac's `current` overwrote yarlung's through sync once. Yarlung builds
+natively (go1.26.4 in `~/.local/go-sdk`, clone in `~/.local/src/syncthing`
+pulling `fork/main`), which keeps its binary out of the sync path during
+the build and gives it the C sqlite backend like the Mac.

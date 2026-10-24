@@ -273,3 +273,26 @@ Refresh procedure: re-run the scout prompt (session history: "upstream inventory
 which rewrites tmp/upstream-inventory-issues.md with fresh states; then update this file's
 status lines. Sweep method and query gaps: tmp/upstream-fix-sweep.md. Adoptions are tracked
 in PATCHES.md; open-PR landscape in PRs.md.
+
+### High-water mark (where the next sweep starts)
+
+Issues and PRs share one counter on GitHub, so a single number bookmarks both.
+To sweep: list items above the last-checked number
+(`issues?state=all&sort=created&direction=desc`), evaluate the new ones, update
+the mark.
+
+- Last full sweep: 2026-10-21 (scout refresh), coverage through **#10918**.
+- Gap #10919–#10937 evaluated 2026-10-24. Three merged PRs matter to us —
+  all land via the next upstream rebase:
+  - **#10925** (fixes #10924): the pull-side metadata shortcut could apply a
+    remote version over an unscanned local change and diverge file contents —
+    the exact `shortcutFile` path patch/47's scope note discusses. Highest
+    priority of the three.
+  - **#10929** (fixes #10928): receive-only reconciliation did not compare
+    block hashes. We are send-receive, but take it anyway.
+  - **#10923**: malformed protocol data now returns errors instead of
+    panicking the connection handler.
+  - Watching: #10933 (an offline device makes online devices report each
+    other out-of-sync; two-node cluster, low exposure).
+- Counter checked 2026-10-24: **#10937** is the newest item. Next sweep
+  starts above that.
