@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -276,12 +277,140 @@ func TestChurnProcessBudgetRetainsDeniedTotals(t *testing.T) {
 	}
 }
 
+func TestChurnDeferralAndMixedDetectionCaptureRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		reason   string
+		failures uint64
+	}{{"deferrals", 2}, {"both", churnDetectFailures}} {
+		t.Run(tc.reason, func(t *testing.T) {
+			c := churnTestTracker()
+			h := new(churnTestHandler)
+			sl := slog.New(h)
+			now := c.start
+			requests := 0
+			c.capture = func() string { requests++; return "accepted" }
+			r := newPullRetryTracker(func() time.Duration { return time.Minute }, c)
+			r.budget = new(pullRetryBudget)
+			r.now = func() time.Time { return now }
+			defer r.clearAll()
+			r.failure("hot/file", "remote_no_such_file", "block_request", "missing")
+			for range churnDetectDeferrals {
+				if !r.gate("hot/file") {
+					t.Fatal("real deferral not held")
+				}
+			}
+			c.count("hot/file", "failures", tc.failures)
+			c.count("hot/file", "class.remote_no_such_file", tc.failures)
+			c.flush(now.Add(time.Minute), sl, c.budget)
+			detected := h.records[len(h.records)-1]
+			if detected.Message != "Pull churn detected" || churnAttr(detected, "detection.reason").String() != tc.reason || churnAttr(detected, "failure_count").Uint64() != tc.failures || churnAttr(detected, "deferral_count").Uint64() != churnDetectDeferrals || requests != 1 {
+				t.Fatalf("wrong trigger or capture: %+v requests=%d", detected, requests)
+			}
+			r.clearAll()
+			c.clearSuccess()
+			c.flush(now.Add(2*time.Minute), sl, c.budget)
+			if !c.active || c.quietWindows != 1 {
+				t.Fatal("one quiet window recovered")
+			}
+			for _, rec := range h.records {
+				if rec.Message == "Pull churn recovered" {
+					t.Fatal("early recovery")
+				}
+			}
+			c.flush(now.Add(3*time.Minute), sl, c.budget)
+			if c.active || h.records[len(h.records)-1].Message != "Pull churn recovered" || requests != 1 {
+				t.Fatal("two complete quiet windows failed recovery or recaptured")
+			}
+		})
+	}
+}
+
+func TestChurnQuietRecoveryRequiresCompleteConsecutiveWindows(t *testing.T) {
+	c := churnTestTracker()
+	h := new(churnTestHandler)
+	sl := slog.New(h)
+	now := c.start
+	c.active = true
+	c.clearSuccess()
+	c.flush(now.Add(30*time.Second), sl, c.budget)
+	if c.quietWindows != 0 {
+		t.Fatal("partial window counted")
+	}
+	c.flush(now.Add(90*time.Second), sl, c.budget)
+	if c.quietWindows != 1 || !c.active {
+		t.Fatal("first complete window wrong")
+	}
+	c.retryPending(1, 60)
+	c.flush(now.Add(150*time.Second), sl, c.budget)
+	if c.quietWindows != 0 || !c.active {
+		t.Fatal("pending hold did not reset recovery")
+	}
+	c.retryPending(0, 0)
+	c.flush(now.Add(210*time.Second), sl, c.budget)
+	if c.quietWindows != 0 || !c.active {
+		t.Fatal("window that began with a pending hold counted as quiet")
+	}
+	c.flush(now.Add(270*time.Second), sl, c.budget)
+	if c.quietWindows != 1 || !c.active {
+		t.Fatal("first fully quiet window missing")
+	}
+	// A transient hold that clears before the end still makes this window busy.
+	c.retryPending(1, 1)
+	c.retryPending(0, 0)
+	c.flush(now.Add(330*time.Second), sl, c.budget)
+	if c.quietWindows != 0 || !c.active {
+		t.Fatal("end-state gauge hid a hold earlier in the window")
+	}
+	c.count("hot/file", "class.local_modified", 1)
+	c.flush(now.Add(390*time.Second), sl, c.budget)
+	if c.quietWindows != 0 || !c.active {
+		t.Fatal("eligible failure did not reset recovery")
+	}
+}
+
+func TestChurnCaptureDetectionAdmissionAndBudget(t *testing.T) {
+	stop := slogutil.StartChurnCapture(t.Context(), filepath.Join(t.TempDir(), "capture"))
+	defer stop(time.Second)
+	before := slogutil.ChurnCaptureStats()
+	for range 2 {
+		c := churnTestTracker()
+		c.count("hot/file", "failures", churnDetectFailures)
+		c.flush(c.start.Add(time.Minute), slog.New(new(churnTestHandler)), c.budget)
+	}
+	after := slogutil.ChurnCaptureStats()
+	if after.Accepted-before.Accepted != 1 || after.RejectedBusy-before.RejectedBusy != 1 {
+		t.Fatalf("detector bypassed singleton: before=%+v after=%+v", before, after)
+	}
+	c := churnTestTracker()
+	requests := 0
+	c.capture = func() string { requests++; return "accepted" }
+	c.count("hot/file", "failures", churnDetectFailures)
+	c.budget.used = churnProcessLines
+	c.budget.start = c.start.Add(time.Minute)
+	c.flush(c.start.Add(time.Minute), slog.New(new(churnTestHandler)), c.budget)
+	if requests != 0 || c.active {
+		t.Fatal("denied transition silently triggered capture")
+	}
+}
+
 func TestChurnTransitionsNoAutomaticDumps(t *testing.T) {
 	before := slogutil.LogTrapStatus()
 	c := churnTestTracker()
 	h := new(churnTestHandler)
 	sl := slog.New(h)
 	now := c.start
+	requests := 0
+	c.capture = func() string {
+		if !c.mu.TryLock() {
+			t.Fatal("capture enqueue under tracker lock")
+		}
+		c.mu.Unlock()
+		if len(h.records) == 0 || h.records[len(h.records)-1].Message != "Pull churn detected" {
+			t.Fatal("capture requested before detection entered logger")
+		}
+		requests++
+		return "accepted"
+	}
 	c.count("hot/file", "failures", churnDetectFailures)
 	c.flush(now.Add(time.Minute), sl, c.budget)
 	c.count("hot/file", "failures", churnDetectFailures)
@@ -297,11 +426,14 @@ func TestChurnTransitionsNoAutomaticDumps(t *testing.T) {
 	if counts["Pull churn detected"] != 1 || counts["Pull churn recovered"] != 1 {
 		t.Fatalf("transitions=%v", counts)
 	}
+	if requests != 1 {
+		t.Fatalf("capture requests=%d", requests)
+	}
 	if !reflect.DeepEqual(before, slogutil.LogTrapStatus()) {
 		t.Fatal("churn installed or fired a trap")
 	}
-	// Guard the explicit scope boundary: no automatic dump/trap entry point is
-	// linked by this implementation. Ordinary externally armed traps are unchanged.
+	// Guard the producer boundary: only enqueue, never a synchronous dump or
+	// automatic trap registration. Explicit externally armed traps are unchanged.
 	src, err := os.ReadFile("churn.go")
 	if err != nil {
 		t.Fatal(err)
