@@ -109,6 +109,8 @@ type folder struct {
 	// whole post-replay re-arm retry budget (2026-11-25 02:18-02:32).
 	watchReady chan struct{}
 
+	churn         *churnTracker
+	churnPending  atomic.Uint32
 	pullScheduled chan struct{}
 	pullPause     time.Duration
 	pullFailTimer *time.Timer
@@ -227,7 +229,9 @@ func newFolder(model *model, ignores *ignore.Matcher, cfg config.FolderConfigura
 	f.pullPause = f.pullBasePause()
 	f.pullFailTimer = time.NewTimer(0)
 	<-f.pullFailTimer.C
+	f.churn = newChurnTracker(time.Now())
 	f.drip = newDripTracker(cfg, time.Now, func(msg string, args ...any) { f.sl.Info(msg, args...) })
+	f.drip.churn = f.churn
 	f.dripFlushTimer = time.NewTimer(0)
 	<-f.dripFlushTimer.C
 	f.metaBatch = newMetaBatchTracker(cfg, time.Now, func(msg string, args ...any) { f.sl.Info(msg, args...) })
@@ -244,6 +248,10 @@ func newFolder(model *model, ignores *ignore.Matcher, cfg config.FolderConfigura
 }
 
 func (f *folder) Serve(ctx context.Context) error {
+	churnCtx, churnCancel := context.WithCancel(context.Background())
+	churnDone := make(chan struct{})
+	go func() { defer close(churnDone); f.churn.serve(churnCtx, f.sl) }()
+	defer func() { churnCancel(); <-churnDone }()
 	f.model.foldersRunning.Add(1)
 	defer f.model.foldersRunning.Add(-1)
 
@@ -383,6 +391,7 @@ func (f *folder) Serve(ctx context.Context) error {
 			_, err = f.pull(ctx)
 
 		case <-f.pullFailTimer.C:
+			f.churnPending.Or(churnRetryTrigger)
 			var success bool
 			success, err = f.pull(ctx)
 			if (err != nil || !success) && f.pullPause < 60*f.pullBasePause() {
@@ -393,6 +402,7 @@ func (f *folder) Serve(ctx context.Context) error {
 		case <-initialCompleted:
 			// Initial scan has completed, we should do a pull
 			initialCompleted = nil // never hit this case again
+			f.churnPending.Or(churnInitialTrigger)
 			_, err = f.pull(ctx)
 
 		case <-f.forcedRescanRequested:
@@ -520,6 +530,10 @@ func (f *folder) ignoresUpdated() {
 }
 
 func (f *folder) SchedulePull() {
+	f.schedulePullChurn(churnOtherTrigger)
+}
+
+func (f *folder) notifyPull() {
 	select {
 	case f.pullScheduled <- struct{}{}:
 	default:
@@ -614,6 +628,10 @@ func (f *folder) getHealthErrorWithoutIgnores() error {
 }
 
 func (f *folder) pull(ctx context.Context) (success bool, err error) {
+	if f.churn != nil {
+		f.churn.run.Add(1)
+		f.churn.trigger.Store(f.churnPending.Swap(0))
+	}
 	f.pullFailTimer.Stop()
 	select {
 	case <-f.pullFailTimer.C:
@@ -657,6 +675,7 @@ func (f *folder) pull(ctx context.Context) (success bool, err error) {
 
 	// If there is nothing to do, don't even enter sync-waiting state.
 	needCount, err := f.db.CountNeed(f.folderID, protocol.LocalDeviceID)
+	f.churn.noteBacklog(needCount.TotalItems(), err)
 	if err != nil {
 		return false, err
 	}
@@ -698,6 +717,12 @@ func (f *folder) pull(ctx context.Context) (success bool, err error) {
 	success, err = f.puller.pull(ctx)
 
 	if success && err == nil {
+		// Only a bounded observation of actual need can clear churn. A
+		// successful attempt alone is not proof the backlog is empty.
+		if f.churn.wantsBacklogRead() {
+			count, e := f.db.CountNeed(f.folderID, protocol.LocalDeviceID)
+			f.churn.noteBacklog(count.TotalItems(), e)
+		}
 		return true, nil
 	}
 
@@ -892,7 +917,7 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) (retErr erro
 		if f.ignores.Hash() != oldHash {
 			f.sl.DebugContext(ctx, "Ignore patterns change detected while scanning; triggering puller")
 			f.ignoresUpdated()
-			f.SchedulePull()
+			f.schedulePullChurn(churnScanTrigger)
 		}
 	}()
 
@@ -960,7 +985,7 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) (retErr erro
 			f.sl.InfoContext(ctx, "Slow scan finished", slog.Duration("duration", d), slog.Bool("fullTree", fullTree), slog.Bool("pending", pending), slog.Int("subdirs", nSubdirs), slog.String("firstSubdir", firstSubdir), slog.Int("changes", changes))
 		}
 		if changes > 0 {
-			f.SchedulePull()
+			f.schedulePullChurn(churnScanTrigger)
 		}
 	}()
 
@@ -2275,7 +2300,7 @@ func (f *folder) setError(ctx context.Context, err error) {
 		}
 	} else if oldErr != nil {
 		f.sl.InfoContext(ctx, "Folder error cleared")
-		f.SchedulePull()
+		f.schedulePullChurn(churnOtherTrigger)
 	}
 
 	if f.FSWatcherEnabled {
