@@ -58,12 +58,16 @@ type pullRetryEntry struct {
 	attempt                                 uint64
 	message, class, stage                   string
 	expired                                 bool
+	firstDirDeferred                        time.Time
+	waitSequence                            uint64
+	mustAdmit                               bool
 }
 type pullRetryStatus struct {
 	nextEligible                              time.Time
 	deferredNeeded, attempted, actualFailures int
 	completeNeedWalk                          bool
 	oldest                                    time.Time
+	dirDeferred                               int
 }
 
 func (s pullRetryStatus) pureDeferral() bool {
@@ -80,6 +84,7 @@ type pullRetryTracker struct {
 	pause          func() time.Duration
 	budget         *pullRetryBudget
 	churn          *churnTracker
+	dir            *pullDirState
 }
 
 func newPullRetryTracker(pause func() time.Duration, churn *churnTracker) *pullRetryTracker {
@@ -109,6 +114,7 @@ func (r *pullRetryTracker) beginWalk() {
 		return
 	}
 	r.mu.Lock()
+	r.prepareDirLocked(r.now())
 	r.round++
 	r.status.completeNeedWalk = false
 	r.mu.Unlock()
@@ -119,6 +125,9 @@ func (r *pullRetryTracker) removeLocked(name string) bool {
 		return false
 	}
 	n := len(name) + len(e.message)
+	if r.dir != nil {
+		r.dir.releaseReservation(name)
+	}
 	delete(r.entries, name)
 	r.bytes -= n
 	r.budget.release(n)
@@ -147,9 +156,16 @@ func (r *pullRetryTracker) clearAll() {
 	for name := range r.entries {
 		r.removeLocked(name)
 	}
+	if r.dir != nil {
+		for name, b := range r.dir.buckets {
+			r.dir.remove(name, b)
+		}
+	}
 	r.status = pullRetryStatus{}
 	r.mu.Unlock()
 	r.churn.retryPending(0, 0)
+	r.churn.dirPending(0)
+	r.flushDirCounts()
 }
 func (r *pullRetryTracker) finishWalk(complete bool) {
 	if r == nil {
@@ -182,10 +198,13 @@ func (r *pullRetryTracker) gate(name string) bool {
 	if e != nil {
 		e.seen = r.round
 		held = now.Before(e.nextEligible)
-		if !held && !e.expired {
+		if !held && !e.expired && !e.nextEligible.IsZero() {
 			e.expired = true
 			expired = true
 		}
+	}
+	if !held {
+		held = r.dirGateLocked(name, now)
 	}
 	r.mu.Unlock()
 	if held {
@@ -207,6 +226,14 @@ func (r *pullRetryTracker) admit(name string) uint64 {
 	if e := r.entries[name]; e != nil {
 		e.attempt = id
 		e.seen = r.round
+		if r.dir != nil {
+			r.dir.consume(name, e.mustAdmit, r.now())
+		}
+		e.firstDirDeferred = time.Time{}
+		e.mustAdmit = false
+		if e.message == "" {
+			r.removeLocked(name)
+		}
 	}
 	r.mu.Unlock()
 	return id
@@ -262,6 +289,9 @@ func (r *pullRetryTracker) failure(name, class, stage, message string, attempt .
 		}
 	}
 	if e != nil {
+		if e.firstFailure.IsZero() {
+			e.firstFailure = now
+		}
 		e.nextEligible = now.Add(r.pause())
 		if len(attempt) > 0 {
 			e.attempt = attempt[0]
@@ -272,6 +302,9 @@ func (r *pullRetryTracker) failure(name, class, stage, message string, attempt .
 		e.class = class
 		e.stage = stage
 		e.expired = false
+	}
+	if r.dir != nil && class == "remote_no_such_file" && stage == "block_request" {
+		r.dir.failure(name, now)
 	}
 	r.mu.Unlock()
 	if bypass {
@@ -286,6 +319,7 @@ func (r *pullRetryTracker) publish() (pullRetryStatus, map[string]churnPullError
 	r.mu.Lock()
 	s := r.status
 	s.deferredNeeded = 0
+	s.dirDeferred = 0
 	s.nextEligible = time.Time{}
 	s.oldest = time.Time{}
 	messages := make(map[string]churnPullError)
@@ -295,13 +329,23 @@ func (r *pullRetryTracker) publish() (pullRetryStatus, map[string]churnPullError
 				continue
 			}
 			s.deferredNeeded++
-			if s.nextEligible.IsZero() || e.nextEligible.Before(s.nextEligible) {
-				s.nextEligible = e.nextEligible
+			wake := r.dirWakeLocked(name, e, now)
+			if s.nextEligible.IsZero() || wake.Before(s.nextEligible) {
+				s.nextEligible = wake
 			}
-			if s.oldest.IsZero() || e.firstFailure.Before(s.oldest) {
-				s.oldest = e.firstFailure
+			first := e.firstFailure
+			if !e.firstDirDeferred.IsZero() {
+				s.dirDeferred++
+				if first.IsZero() || e.firstDirDeferred.Before(first) {
+					first = e.firstDirDeferred
+				}
 			}
-			messages[name] = churnPullError{e.message, e.class}
+			if s.oldest.IsZero() || first.Before(s.oldest) {
+				s.oldest = first
+			}
+			if e.message != "" {
+				messages[name] = churnPullError{e.message, e.class}
+			}
 		}
 	}
 	r.status = s
@@ -311,6 +355,8 @@ func (r *pullRetryTracker) publish() (pullRetryStatus, map[string]churnPullError
 		age = max(0, now.Sub(s.oldest).Seconds())
 	}
 	r.churn.retryPending(s.deferredNeeded, age)
+	r.churn.dirPending(s.dirDeferred)
+	r.flushDirCounts()
 	return s, messages
 }
 func (r *pullRetryTracker) snapshot() pullRetryStatus {
