@@ -63,6 +63,54 @@ func TestPullDirProbePermitsExpireAndLateConsumption(t *testing.T) {
 	}
 }
 
+func TestPullDirExpiredPermitAtMaxHoldIsNotAProbe(t *testing.T) {
+	r, now := dirFixture(t)
+	qualifyDir(r, "top/branch")
+	name := "top/branch/waiter"
+	r.gate(name)
+	*now = now.Add(pullDirProbe)
+	r.beginWalk()
+	if r.dir.buckets["top/branch"].probeName != name {
+		t.Fatal("no initial reservation")
+	}
+	// Simulate an unpreemptible chunk without another reservation pass.
+	*now = now.Add(pullDirEpoch - pullDirProbe)
+	if r.gate(name) {
+		t.Fatal("expired epoch/max hold blocked admission")
+	}
+	r.admit(name)
+	var probe, maxHold, stale uint64
+	for i, key := range pullDirKeys {
+		switch key {
+		case "dir.probe_admit":
+			probe = r.dir.counts[i]
+		case "dir.max_hold_admit":
+			maxHold = r.dir.counts[i]
+		case "dir.probe_stale":
+			stale = r.dir.counts[i]
+		}
+	}
+	if probe != 0 || maxHold != 1 || stale != 1 {
+		t.Fatalf("probe=%d max_hold=%d stale=%d", probe, maxHold, stale)
+	}
+}
+
+func TestPullDirEpochRemovalReleasesCurrentWindowPermit(t *testing.T) {
+	r, now := dirFixture(t)
+	qualifyDir(r, "top/branch")
+	r.gate("top/branch/waiter")
+	*now = now.Add(55 * time.Second)
+	r.beginWalk()
+	if r.dir.probeUsed != 1 {
+		t.Fatal("no permit reserved in late folder window")
+	}
+	*now = now.Add(5 * time.Second)
+	r.beginWalk()
+	if r.dir.buckets["top/branch"] != nil || r.dir.probeUsed != 0 {
+		t.Fatal("epoch removal stranded a current-window reservation")
+	}
+}
+
 func TestPullDirRolloverFolderReservationCap(t *testing.T) {
 	r, now := dirFixture(t)
 	for i := range 20 {
