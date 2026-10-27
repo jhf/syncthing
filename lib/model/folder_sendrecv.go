@@ -131,7 +131,7 @@ type sendReceiveFolder struct {
 	blockPullReorderer blockPullReorderer
 	writeLimiter       *semaphore.Semaphore
 
-	tempPullErrors map[string]string // pull errors that might be just transient
+	tempPullErrors map[string]churnPullError // pull errors that might be just transient
 }
 
 func newSendReceiveFolder(model *model, ignores *ignore.Matcher, cfg config.FolderConfiguration, ver versioner.Versioner, evLogger events.Logger, ioLimiter *semaphore.Semaphore) service {
@@ -199,6 +199,9 @@ func (f *sendReceiveFolder) pull(ctx context.Context) (bool, error) {
 		// it to FolderSyncing during the last iteration.
 		f.setState(FolderSyncPreparing)
 
+		if f.churn != nil {
+			f.churn.iteration.Store(uint64(tries + 1))
+		}
 		changed, err = f.pullerIteration(ctx, scanChan)
 		if err != nil {
 			return false, err
@@ -214,19 +217,24 @@ func (f *sendReceiveFolder) pull(ctx context.Context) (bool, error) {
 	}
 
 	f.errorsMut.Lock()
+	warnings := f.tempPullErrors
 	pullErrNum := len(f.tempPullErrors)
 	if pullErrNum > 0 {
 		f.pullErrors = make([]FileError, 0, len(f.tempPullErrors))
 		for path, err := range f.tempPullErrors {
-			f.sl.WarnContext(ctx, "Failed to sync", slogutil.FilePath(path), slogutil.Error(err))
 			f.pullErrors = append(f.pullErrors, FileError{
-				Err:  err,
+				Err:  err.text,
 				Path: path,
 			})
 		}
 		f.tempPullErrors = nil
 	}
 	f.errorsMut.Unlock()
+	for path, err := range warnings {
+		if f.churn.example(path, err.class, "warn") {
+			f.sl.WarnContext(ctx, "Failed to sync", slogutil.FilePath(path), slogutil.Error(err.text))
+		}
+	}
 
 	if pullErrNum > 0 {
 		f.evLogger.Log(events.FolderErrors, map[string]any{
@@ -246,7 +254,7 @@ func (f *sendReceiveFolder) pull(ctx context.Context) (bool, error) {
 // flagged as needed in the folder.
 func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<- string) (int, error) {
 	f.errorsMut.Lock()
-	f.tempPullErrors = make(map[string]string)
+	f.tempPullErrors = make(map[string]churnPullError)
 	f.errorsMut.Unlock()
 
 	pullChan := make(chan pullBlockState, f.Copiers)
@@ -513,25 +521,40 @@ nextFile:
 
 		fi, ok, err := f.model.sdb.GetGlobalFile(f.folderID, fileName)
 		if err != nil {
+			f.churn.observe(churnSample{Path: fileName, Event: "need_revalidation", Phase: "queue_pop", Outcome: "db_error", View: "global_only"}, "need.queue_pop.db_error")
 			return err
 		}
 		if !ok {
+			f.churn.observe(churnSample{Path: fileName, Event: "need_revalidation", Phase: "queue_pop", Outcome: "global_missing", View: "global_only"}, "need.queue_pop.global_missing")
+			f.churn.count(fileName, "queue.clear_obsolete", 1)
 			// File is no longer in the index. Mark it as done and drop it.
 			f.queue.Done(fileName)
 			continue
 		}
 
 		if fi.IsDeleted() || fi.IsInvalid() || fi.Type != protocol.FileInfoTypeFile {
+			outcome := "invalid_or_type_changed"
+			if fi.IsDeleted() {
+				outcome = "tombstoned"
+			}
+			f.churn.observe(churnSample{Path: fileName, Event: "need_revalidation", Phase: "queue_pop", Outcome: outcome, Current: churnToken(fi), View: "global_only"}, "need.queue_pop."+outcome)
+			f.churn.count(fileName, "queue.clear_obsolete", 1)
 			// The item has changed type or status in the index while we
 			// were processing directories above.
 			f.queue.Done(fileName)
 			continue
 		}
 
+		// The existing read validates global status, not local need. Do not
+		// label it still_needed or add a new database read on this hot path.
+		f.churn.observe(churnSample{Path: fileName, Event: "need_revalidation", Phase: "queue_pop", Outcome: "not_checked", Current: churnToken(fi), View: "global_only"}, "need.queue_pop.not_checked")
+
 		if !f.checkParent(fi.Name, scanChan) {
 			f.queue.Done(fileName)
 			continue
 		}
+
+		f.churn.admit(fi.Name)
 
 		// Check our list of files to be removed for a match, in which case
 		// we can just do a rename instead. A deletion that can serve a
@@ -557,6 +580,7 @@ nextFile:
 			// Remove the pending deletion (as we performed it by renaming)
 			delete(deferredDeletions, candidate.Name)
 
+			f.churn.complete(fi.Name)
 			f.queue.Done(fileName)
 			continue nextFile
 		}
@@ -565,7 +589,7 @@ nextFile:
 		// processing it
 		devices := f.model.fileAvailability(f.FolderConfiguration, fi)
 		if len(devices) == 0 {
-			f.newPullError(fileName, errNotAvailable)
+			f.newPullError(fileName, churnAt("block_request", errNotAvailable), fi)
 			f.queue.Done(fileName)
 			continue
 		}
@@ -573,13 +597,13 @@ nextFile:
 		// Verify we have space to handle the file before we start
 		// creating temp files etc.
 		if err := f.CheckAvailableSpace(uint64(fi.Size)); err != nil { //nolint:gosec
-			f.newPullError(fileName, err)
+			f.newPullError(fileName, churnAt("local_copy", err), fi)
 			f.queue.Done(fileName)
 			continue
 		}
 
 		if err := f.handleFile(ctx, fi, copyChan); err != nil {
-			f.newPullError(fileName, err)
+			f.newPullError(fileName, churnAt("local_copy", err), fi)
 		}
 	}
 	return nil
@@ -1624,6 +1648,7 @@ func populateOffsets(blocks []protocol.BlockInfo) {
 // shortcutFile sets file metadata, when that's the only thing that has
 // changed.
 func (f *sendReceiveFolder) shortcutFile(file, curFile protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) {
+	f.churn.admit(file.Name)
 	f.sl.Debug("Taking metadata shortcut", slogutil.FilePath(file.Name))
 
 	f.evLogger.Log(events.ItemStarted, map[string]string{
@@ -1636,7 +1661,9 @@ func (f *sendReceiveFolder) shortcutFile(file, curFile protocol.FileInfo, dbUpda
 	var err error
 	defer func() {
 		if err != nil {
-			slog.Info("Failed to update file metadata", f.LogAttr(), file.LogAttr(), slogutil.Error(err))
+			if f.churn.example(file.Name, churnClass(err), "metadata") {
+				slog.Info("Failed to update file metadata", f.LogAttr(), file.LogAttr(), slogutil.Error(err))
+			}
 		} else {
 			slog.Info("Updated file metadata", f.LogAttr(), file.LogAttr())
 		}
@@ -1659,19 +1686,19 @@ func (f *sendReceiveFolder) shortcutFile(file, curFile protocol.FileInfo, dbUpda
 		err = f.scanIfItemChanged(file.Name, info, curFile, true, false, scanChan)
 	}
 	if err != nil {
-		f.newPullError(file.Name, fmt.Errorf("shortcut file (checking existing file): %w", err))
+		f.newPullError(file.Name, churnAt("shortcut_check", fmt.Errorf("shortcut file (checking existing file): %w", err)), file)
 		return
 	}
 
 	if !f.IgnorePerms && !file.NoPermissions {
 		if err = f.mtimefs.Chmod(file.Name, fs.FileMode(file.Permissions&0o777)); err != nil {
-			f.newPullError(file.Name, fmt.Errorf("shortcut file (setting permissions): %w", err))
+			f.newPullError(file.Name, churnAt("finalize", fmt.Errorf("shortcut file (setting permissions): %w", err)), file)
 			return
 		}
 	}
 
 	if err := f.setPlatformData(&file, file.Name); err != nil {
-		f.newPullError(file.Name, fmt.Errorf("shortcut file (setting metadata): %w", err))
+		f.newPullError(file.Name, churnAt("finalize", fmt.Errorf("shortcut file (setting metadata): %w", err)), file)
 		return
 	}
 
@@ -1692,7 +1719,7 @@ func (f *sendReceiveFolder) shortcutFile(file, curFile protocol.FileInfo, dbUpda
 			return fd.Truncate(file.Size)
 		}, f.mtimefs, file.Name, true)
 		if err != nil {
-			f.newPullError(file.Name, fmt.Errorf("writing encrypted file trailer: %w", err))
+			f.newPullError(file.Name, churnAt("finalize", fmt.Errorf("writing encrypted file trailer: %w", err)), file)
 			return
 		}
 	}
@@ -1700,6 +1727,7 @@ func (f *sendReceiveFolder) shortcutFile(file, curFile protocol.FileInfo, dbUpda
 	f.mtimefs.Chtimes(file.Name, file.ModTime(), file.ModTime()) // never fails
 
 	dbUpdateChan <- dbUpdateJob{file, dbUpdateShortcutFile}
+	f.churn.complete(file.Name)
 }
 
 // copierRoutine reads copierStates until the in channel closes and performs
@@ -1991,9 +2019,9 @@ loop:
 		found := activity.leastBusy(candidates)
 		if found == -1 {
 			if lastError != nil {
-				state.fail(fmt.Errorf("pull: %w", lastError))
+				state.fail(churnAt("block_request", fmt.Errorf("pull: %w", lastError)))
 			} else {
-				state.fail(fmt.Errorf("pull: %w", errNoDevice))
+				state.fail(churnAt("block_request", fmt.Errorf("pull: %w", errNoDevice)))
 			}
 			break
 		}
@@ -2007,9 +2035,11 @@ loop:
 		activity.using(selected)
 		var buf []byte
 		blockNo := int(state.block.Offset / int64(state.file.BlockSize()))
+		f.churn.count(state.file.Name, "block_requests", 1)
 		buf, lastError = f.model.RequestGlobal(ctx, selected.ID, f.folderID, state.file.Name, blockNo, state.block.Offset, state.block.Size, state.block.Hash, selected.FromTemporary)
 		activity.done(selected)
 		if lastError != nil {
+			f.churn.observe(churnSample{Path: state.file.Name, Event: "block_request", Class: churnClass(lastError), Stage: "block_request", Captured: churnToken(state.file), Peer: selected.ID.String(), Offset: state.block.Offset, Size: int(state.block.Size), Hash: churnHash(state.block.Hash), Temporary: selected.FromTemporary}, "block_failures")
 			f.sl.DebugContext(ctx, "Block request returned error", slogutil.FilePath(state.file.Name), "offset", state.block.Offset, "size", state.block.Size, "device", selected.ID.Short(), slogutil.Error(lastError))
 			continue
 		}
@@ -2023,6 +2053,7 @@ loop:
 			lastError = f.verifyBuffer(buf, state.block)
 		}
 		if lastError != nil {
+			f.churn.observe(churnSample{Path: state.file.Name, Event: "block_request", Class: churnClass(lastError), Stage: "block_request", Captured: churnToken(state.file), Peer: selected.ID.String(), Offset: state.block.Offset, Size: int(state.block.Size), Hash: churnHash(state.block.Hash), Temporary: selected.FromTemporary}, "block_failures")
 			f.sl.DebugContext(ctx, "Block hash mismatch", slogutil.FilePath(state.file.Name), "offset", state.block.Offset, "size", state.block.Size)
 			continue
 		}
@@ -2105,8 +2136,9 @@ func (f *sendReceiveFolder) finisherRoutine(ctx context.Context, in <-chan *shar
 			}
 
 			if err != nil {
-				f.newPullError(state.file.Name, fmt.Errorf("finishing: %w", err))
+				f.newPullError(state.file.Name, fmt.Errorf("finishing: %w", err), state.file)
 			} else {
+				f.churn.complete(state.file.Name)
 				slog.InfoContext(ctx, "Synced file", f.LogAttr(), state.file.LogAttr(), slog.Group("blocks", slog.Int("local", state.reused+state.copyTotal), slog.Int("download", state.pullTotal)))
 
 				minBlocksPerBlock := state.file.BlockSize() / protocol.MinBlockSize
@@ -2301,19 +2333,24 @@ func (f *sendReceiveFolder) moveForConflict(name, lastModBy string, scanChan cha
 	return err
 }
 
-func (f *sendReceiveFolder) newPullError(path string, err error) {
+func (f *sendReceiveFolder) newPullError(path string, err error, captured ...protocol.FileInfo) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		// Error because the folder stopped - no point logging/tracking
+		// GUI errors, but keep the admitted-attempt accounting independent.
+		if len(captured) > 0 {
+			f.churn.count(path, "cancelled", 1)
+		}
 		return
 	}
 
+	class := churnClass(err) // classify while the original typed error is available
 	f.errorsMut.Lock()
-	defer f.errorsMut.Unlock()
 
 	// We might get more than one error report for a file (i.e. error on
 	// Write() followed by Close()); we keep the first error as that is
 	// probably closer to the root cause.
 	if _, ok := f.tempPullErrors[path]; ok {
+		f.errorsMut.Unlock()
 		return
 	}
 
@@ -2321,8 +2358,14 @@ func (f *sendReceiveFolder) newPullError(path string, err error) {
 	// Use "syncing" as opposed to "pulling" as the latter might be used
 	// for errors occurring specifically in the puller routine.
 	errStr := fmt.Sprintf("syncing: %s", err)
-	f.tempPullErrors[path] = errStr
+	f.tempPullErrors[path] = churnPullError{errStr, class}
+	f.errorsMut.Unlock()
 
+	var desired *protocol.FileInfo
+	if len(captured) > 0 {
+		desired = &captured[0]
+	}
+	f.churnFailure(path, err, desired)
 	f.sl.Debug("New pull error", slogutil.FilePath(path), slogutil.Error(err))
 }
 
