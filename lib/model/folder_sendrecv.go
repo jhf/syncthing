@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -132,6 +133,7 @@ type sendReceiveFolder struct {
 	writeLimiter       *semaphore.Semaphore
 
 	tempPullErrors map[string]churnPullError // pull errors that might be just transient
+	retry          *pullRetryTracker
 }
 
 func newSendReceiveFolder(model *model, ignores *ignore.Matcher, cfg config.FolderConfiguration, ver versioner.Versioner, evLogger events.Logger, ioLimiter *semaphore.Semaphore) service {
@@ -142,6 +144,13 @@ func newSendReceiveFolder(model *model, ignores *ignore.Matcher, cfg config.Fold
 		writeLimiter:       semaphore.New(cfg.MaxConcurrentWrites),
 	}
 	f.puller = f
+	if (cfg.Type == config.FolderTypeSendReceive || cfg.Type == config.FolderTypeReceiveOnly) && os.Getenv("STPULLRETRYCOOLDOWN") != "0" {
+		f.retry = newPullRetryTracker(f.pullBasePause, f.churn)
+	} else if cfg.Type == config.FolderTypeReceiveEncrypted {
+		f.churn.count("", "queue.scope_receive_encrypted", 1)
+	} else {
+		f.churn.count("", "queue.disabled", 1)
+	}
 
 	if f.Copiers == 0 {
 		// "Copiers" is effectively the concurrency level for a number of
@@ -168,6 +177,7 @@ func newSendReceiveFolder(model *model, ignores *ignore.Matcher, cfg config.Fold
 // pull returns true if it manages to get all needed items from peers, i.e. get
 // the device in sync with the global state.
 func (f *sendReceiveFolder) pull(ctx context.Context) (bool, error) {
+	f.retry.begin()
 	f.sl.DebugContext(ctx, "Pulling")
 
 	scanChan := make(chan string)
@@ -183,6 +193,7 @@ func (f *sendReceiveFolder) pull(ctx context.Context) (bool, error) {
 
 	changed := 0
 
+	previousErrors := f.Errors()
 	f.errorsMut.Lock()
 	f.pullErrors = nil
 	f.errorsMut.Unlock()
@@ -216,8 +227,17 @@ func (f *sendReceiveFolder) pull(ctx context.Context) (bool, error) {
 		}
 	}
 
+	status, retained := f.retry.publish()
 	f.errorsMut.Lock()
 	warnings := f.tempPullErrors
+	merged := make(map[string]churnPullError, len(warnings)+len(retained))
+	for name, item := range retained {
+		merged[name] = item
+	}
+	for name, item := range warnings {
+		merged[name] = item
+	}
+	f.tempPullErrors = merged
 	pullErrNum := len(f.tempPullErrors)
 	if pullErrNum > 0 {
 		f.pullErrors = make([]FileError, 0, len(f.tempPullErrors))
@@ -236,16 +256,25 @@ func (f *sendReceiveFolder) pull(ctx context.Context) (bool, error) {
 		}
 	}
 
-	if pullErrNum > 0 {
+	currentErrors := f.Errors()
+	compareErrors := func(a, b FileError) int {
+		if n := strings.Compare(a.Path, b.Path); n != 0 {
+			return n
+		}
+		return strings.Compare(a.Err, b.Err)
+	}
+	slices.SortFunc(previousErrors, compareErrors)
+	slices.SortFunc(currentErrors, compareErrors)
+	if !slices.Equal(previousErrors, currentErrors) {
 		f.evLogger.Log(events.FolderErrors, map[string]any{
 			"folder": f.folderID,
-			"errors": f.Errors(),
+			"errors": currentErrors,
 		})
 	}
 
 	// We're done if we didn't change anything and didn't fail to change
 	// anything
-	return changed == 0 && pullErrNum == 0, nil
+	return changed == 0 && pullErrNum == 0 && status.deferredNeeded == 0, nil
 }
 
 // pullerIteration runs a single puller iteration for the given folder and
@@ -270,9 +299,10 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 	f.sl.DebugContext(ctx, "Starting puller iteration", "copiers", f.Copiers, "pullerPendingKiB", f.PullerMaxPendingKiB)
 
 	var changed int // only read after updateWg closes
+	var updateErr error
 	updateWg.Go(func() {
 		// dbUpdaterRoutine finishes when dbUpdateChan is closed
-		changed = f.dbUpdaterRoutine(dbUpdateChan)
+		changed, updateErr = f.dbUpdaterRoutine(dbUpdateChan)
 	})
 
 	for range f.Copiers {
@@ -342,10 +372,13 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 
 	f.queue.Reset()
 
-	return changed, err
+	return changed, errors.Join(err, updateErr)
 }
 
 func (f *sendReceiveFolder) processNeeded(ctx context.Context, dbUpdateChan chan<- dbUpdateJob, copyChan chan<- copyBlocksState, scanChan chan<- string) (map[string]protocol.FileInfo, []protocol.FileInfo, map[string]protocol.FileInfo, map[string][]protocol.FileInfo, error) {
+	f.retry.beginWalk()
+	completeWalk := false
+	defer func() { f.retry.finishWalk(completeWalk) }()
 	var dirDeletions []protocol.FileInfo
 	fileDeletions := map[string]protocol.FileInfo{}
 	buckets := map[string][]protocol.FileInfo{}
@@ -432,6 +465,14 @@ loop:
 			// file makes that deletion a rename candidate; record the hash
 			// even when the shortcut path means no blocks move.
 			pulledBlocksHashes[string(file.BlocksHash)] = struct{}{}
+			// Record dependencies before holding work, including shortcut work.
+			for _, b := range file.Blocks {
+				neededBlocks[string(b.Hash)] = struct{}{}
+			}
+			if f.retry.gate(file.Name) {
+				f.queue.HoldDuringBuild(file.Name)
+				continue
+			}
 			if hasCurFile && curFile.Type == file.Type && file.BlocksEqual(curFile) {
 				// We are supposed to copy the entire file, and then fetch nothing. We
 				// are only updating metadata, so we don't actually *need* to make the
@@ -498,6 +539,7 @@ loop:
 	if len(deferredDeletions) > 0 {
 		f.sl.DebugContext(ctx, "Deferring deletions with block overlap or rename potential until the queue settles", slog.Int("files", len(deferredDeletions)))
 	}
+	completeWalk = true
 	return fileDeletions, dirDeletions, deferredDeletions, buckets, nil
 }
 
@@ -525,6 +567,7 @@ nextFile:
 			return err
 		}
 		if !ok {
+			f.retry.clear(fileName, false)
 			f.churn.observe(churnSample{Path: fileName, Event: "need_revalidation", Phase: "queue_pop", Outcome: "global_missing", View: "global_only"}, "need.queue_pop.global_missing")
 			f.churn.count(fileName, "queue.clear_obsolete", 1)
 			// File is no longer in the index. Mark it as done and drop it.
@@ -533,6 +576,7 @@ nextFile:
 		}
 
 		if fi.IsDeleted() || fi.IsInvalid() || fi.Type != protocol.FileInfoTypeFile {
+			f.retry.clear(fileName, false)
 			outcome := "invalid_or_type_changed"
 			if fi.IsDeleted() {
 				outcome = "tombstoned"
@@ -548,6 +592,10 @@ nextFile:
 		// The existing read validates global status, not local need. Do not
 		// label it still_needed or add a new database read on this hot path.
 		f.churn.observe(churnSample{Path: fileName, Event: "need_revalidation", Phase: "queue_pop", Outcome: "not_checked", Current: churnToken(fi), View: "global_only"}, "need.queue_pop.not_checked")
+		if f.retry.gate(fileName) {
+			f.queue.HoldInProgress(fileName)
+			continue
+		}
 
 		if !f.checkParent(fi.Name, scanChan) {
 			f.queue.Done(fileName)
@@ -555,6 +603,7 @@ nextFile:
 		}
 
 		f.churn.admit(fi.Name)
+		attemptID := f.retry.admit(fi.Name)
 
 		// Check our list of files to be removed for a match, in which case
 		// we can just do a rename instead. A deletion that can serve a
@@ -589,7 +638,7 @@ nextFile:
 		// processing it
 		devices := f.model.fileAvailability(f.FolderConfiguration, fi)
 		if len(devices) == 0 {
-			f.newPullError(fileName, churnAt("block_request", errNotAvailable), fi)
+			f.newPullError(fileName, retryAttemptError(churnAt("block_request", errNotAvailable), attemptID), fi)
 			f.queue.Done(fileName)
 			continue
 		}
@@ -597,13 +646,13 @@ nextFile:
 		// Verify we have space to handle the file before we start
 		// creating temp files etc.
 		if err := f.CheckAvailableSpace(uint64(fi.Size)); err != nil { //nolint:gosec
-			f.newPullError(fileName, churnAt("local_copy", err), fi)
+			f.newPullError(fileName, retryAttemptError(churnAt("local_copy", err), attemptID), fi)
 			f.queue.Done(fileName)
 			continue
 		}
 
-		if err := f.handleFile(ctx, fi, copyChan); err != nil {
-			f.newPullError(fileName, churnAt("local_copy", err), fi)
+		if err := f.handleFile(ctx, fi, copyChan, attemptID); err != nil {
+			f.newPullError(fileName, retryAttemptError(churnAt("local_copy", err), attemptID), fi)
 		}
 	}
 	return nil
@@ -1515,7 +1564,7 @@ func (f *sendReceiveFolder) renameFile(cur, source, target protocol.FileInfo, db
 
 // handleFile queues the copies and pulls as necessary for a single new or
 // changed file.
-func (f *sendReceiveFolder) handleFile(ctx context.Context, file protocol.FileInfo, copyChan chan<- copyBlocksState) error {
+func (f *sendReceiveFolder) handleFile(ctx context.Context, file protocol.FileInfo, copyChan chan<- copyBlocksState, attempt ...uint64) error {
 	curFile, hasCurFile, err := f.model.sdb.GetDeviceFile(f.folderID, protocol.LocalDeviceID, file.Name)
 	if err != nil {
 		return err
@@ -1554,6 +1603,9 @@ func (f *sendReceiveFolder) handleFile(ctx context.Context, file protocol.FileIn
 	})
 
 	s := newSharedPullerState(file, f.mtimefs, f.folderID, tempName, blocks, reused, f.IgnorePerms || file.NoPermissions, hasCurFile, curFile, !f.DisableSparseFiles, !f.DisableFsync && !f.batchSyncfs())
+	if len(attempt) > 0 {
+		s.attemptID = attempt[0]
+	}
 
 	f.sl.DebugContext(ctx, "Handling file", slogutil.FilePath(file.Name), "blocksToCopy", len(blocks), "reused", len(reused))
 
@@ -1649,6 +1701,7 @@ func populateOffsets(blocks []protocol.BlockInfo) {
 // changed.
 func (f *sendReceiveFolder) shortcutFile(file, curFile protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) {
 	f.churn.admit(file.Name)
+	attemptID := f.retry.admit(file.Name)
 	f.sl.Debug("Taking metadata shortcut", slogutil.FilePath(file.Name))
 
 	f.evLogger.Log(events.ItemStarted, map[string]string{
@@ -1686,19 +1739,19 @@ func (f *sendReceiveFolder) shortcutFile(file, curFile protocol.FileInfo, dbUpda
 		err = f.scanIfItemChanged(file.Name, info, curFile, true, false, scanChan)
 	}
 	if err != nil {
-		f.newPullError(file.Name, churnAt("shortcut_check", fmt.Errorf("shortcut file (checking existing file): %w", err)), file)
+		f.newPullError(file.Name, retryAttemptError(churnAt("shortcut_check", fmt.Errorf("shortcut file (checking existing file): %w", err)), attemptID), file)
 		return
 	}
 
 	if !f.IgnorePerms && !file.NoPermissions {
 		if err = f.mtimefs.Chmod(file.Name, fs.FileMode(file.Permissions&0o777)); err != nil {
-			f.newPullError(file.Name, churnAt("finalize", fmt.Errorf("shortcut file (setting permissions): %w", err)), file)
+			f.newPullError(file.Name, retryAttemptError(churnAt("finalize", fmt.Errorf("shortcut file (setting permissions): %w", err)), attemptID), file)
 			return
 		}
 	}
 
 	if err := f.setPlatformData(&file, file.Name); err != nil {
-		f.newPullError(file.Name, churnAt("finalize", fmt.Errorf("shortcut file (setting metadata): %w", err)), file)
+		f.newPullError(file.Name, retryAttemptError(churnAt("finalize", fmt.Errorf("shortcut file (setting metadata): %w", err)), attemptID), file)
 		return
 	}
 
@@ -2136,7 +2189,7 @@ func (f *sendReceiveFolder) finisherRoutine(ctx context.Context, in <-chan *shar
 			}
 
 			if err != nil {
-				f.newPullError(state.file.Name, fmt.Errorf("finishing: %w", err), state.file)
+				f.newPullError(state.file.Name, retryAttemptError(fmt.Errorf("finishing: %w", err), state.attemptID), state.file)
 			} else {
 				f.churn.complete(state.file.Name)
 				slog.InfoContext(ctx, "Synced file", f.LogAttr(), state.file.LogAttr(), slog.Group("blocks", slog.Int("local", state.reused+state.copyTotal), slog.Int("download", state.pullTotal)))
@@ -2183,13 +2236,14 @@ func (f *sendReceiveFolder) Jobs(page, perpage int) ([]string, []string, int) {
 // comment in fileinfobatch.go): commit cadence dominates WAL growth on
 // small-file pulls, and the timer bounds how long a pulled file sits
 // uncommitted (crash rework) and how late completion events fire.
-func (f *sendReceiveFolder) dbUpdaterRoutine(dbUpdateChan <-chan dbUpdateJob) int {
+func (f *sendReceiveFolder) dbUpdaterRoutine(dbUpdateChan <-chan dbUpdateJob) (int, error) {
 	const maxBatchTime = 5 * time.Second
 
 	changed := 0
 	changedDirs := make(map[string]struct{})
 	found := false
 	var lastFile protocol.FileInfo
+	var updateErr error
 	tick := time.NewTicker(maxBatchTime)
 	defer tick.Stop()
 	batch := NewFileInfoBatchSized(dbUpdateBatchSizeFiles, dbUpdateBatchSizeBlocks, func(files []protocol.FileInfo) error {
@@ -2198,7 +2252,12 @@ func (f *sendReceiveFolder) dbUpdaterRoutine(dbUpdateChan <-chan dbUpdateJob) in
 
 		// All updates to file/folder objects that originated remotely
 		// (across the network) use this call to updateLocals
-		f.updateLocalsFromPulling(files)
+		if err := f.updateLocalsFromPulling(files); err != nil {
+			return err
+		}
+		for _, file := range files {
+			f.retry.clear(file.Name, !file.IsDeleted() && !file.IsInvalid() && file.Type == protocol.FileInfoTypeFile)
+		}
 
 		if found {
 			f.ReceivedFile(lastFile.Name, lastFile.IsDeleted())
@@ -2214,6 +2273,11 @@ loop:
 		case job, ok := <-dbUpdateChan:
 			if !ok {
 				break loop
+			}
+			if updateErr != nil {
+				// Continue draining producers. A failed batch has unknown
+				// per-file outcomes and FileInfoBatch cannot accept more jobs.
+				continue
 			}
 
 			switch job.jobType {
@@ -2236,16 +2300,20 @@ loop:
 			job.file.Sequence = 0
 
 			batch.Append(job.file)
-			batch.FlushIfFull()
+			updateErr = batch.FlushIfFull()
 			changed++
 
 		case <-tick.C:
-			batch.Flush()
+			if updateErr == nil {
+				updateErr = batch.Flush()
+			}
 		}
 	}
 
-	batch.Flush()
-	return changed
+	if updateErr == nil {
+		updateErr = batch.Flush()
+	}
+	return changed, updateErr
 }
 
 func (f *sendReceiveFolder) fsyncDirs(changedDirs map[string]struct{}) {
@@ -2360,6 +2428,11 @@ func (f *sendReceiveFolder) newPullError(path string, err error, captured ...pro
 	errStr := fmt.Sprintf("syncing: %s", err)
 	f.tempPullErrors[path] = churnPullError{errStr, class}
 	f.errorsMut.Unlock()
+	if len(captured) > 0 {
+		f.retry.failure(path, class, churnStage(err, "finalize"), errStr, retryAttemptID(err))
+	} else {
+		f.retry.otherFailure()
+	}
 
 	var desired *protocol.FileInfo
 	if len(captured) > 0 {

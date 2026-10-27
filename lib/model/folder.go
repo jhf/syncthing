@@ -235,6 +235,10 @@ func (f *folder) Serve(ctx context.Context) error {
 	f.setState(FolderStarting)
 
 	defer func() {
+		f.pullFailTimer.Stop()
+		if retry, ok := f.puller.(interface{ ClearRetryState() }); ok {
+			retry.ClearRetryState()
+		}
 		f.scanTimer.Stop()
 		f.versionCleanupTimer.Stop()
 		f.btrfsRearmTimer.Stop()
@@ -358,13 +362,7 @@ func (f *folder) Serve(ctx context.Context) error {
 			_, err = f.pull(ctx)
 
 		case <-f.pullFailTimer.C:
-			f.churnPending.Or(churnRetryTrigger)
-			var success bool
-			success, err = f.pull(ctx)
-			if (err != nil || !success) && f.pullPause < 60*f.pullBasePause() {
-				// Back off from retrying to pull
-				f.pullPause *= 2
-			}
+			err = f.serviceRetryPull(ctx)
 
 		case <-initialCompleted:
 			// Initial scan has completed, we should do a pull
@@ -623,6 +621,9 @@ func (f *folder) pull(ctx context.Context) (success bool, err error) {
 		return false, err
 	}
 	if needCount.TotalItems() == 0 {
+		if retry, ok := f.puller.(interface{ ClearRetryState() }); ok {
+			retry.ClearRetryState()
+		}
 		// Clears pull failures on items that were needed before, but aren't anymore.
 		f.errorsMut.Lock()
 		f.pullErrors = nil
@@ -671,6 +672,14 @@ func (f *folder) pull(ctx context.Context) (success bool, err error) {
 
 	// Pulling failed, try again later.
 	delay := f.pullPause + time.Since(startTime)
+	if err == nil {
+		if retry, ok := f.puller.(interface{ RetryStatus() pullRetryStatus }); ok {
+			status := retry.RetryStatus()
+			if status.completeNeedWalk && !status.nextEligible.IsZero() {
+				delay = min(delay, max(10*time.Millisecond, time.Until(status.nextEligible)))
+			}
+		}
+	}
 	f.sl.InfoContext(ctx, "Folder failed to sync, will be retried", slog.String("wait", stringutil.NiceDurationString(delay)))
 	f.pullFailTimer.Reset(delay)
 
@@ -823,12 +832,38 @@ func (f *folder) rearmMetaFlushTimer() {
 // keep the quantum small.
 func (f *folder) serviceQueuedPull(ctx context.Context) (bool, error) {
 	select {
+	case <-f.pullFailTimer.C:
+		return true, f.serviceRetryPull(ctx)
 	case <-f.pullScheduled:
 		_, err := f.pull(ctx)
 		return true, err
 	default:
 		return false, nil
 	}
+}
+
+// Serve and scan chunk boundaries share retry/backoff ownership. Workers never
+// consume or reset the folder timer.
+func (f *folder) serviceRetryPull(ctx context.Context) error {
+	if retry, ok := f.puller.(interface{ RetryStatus() pullRetryStatus }); ok {
+		status := retry.RetryStatus()
+		if status.completeNeedWalk && !status.nextEligible.IsZero() {
+			f.churn.count("", "queue.wake", 1)
+			f.churn.count("", "queue.wake_late_ms", uint64(max(0, time.Since(status.nextEligible).Milliseconds())))
+		}
+	}
+	f.churnPending.Or(churnRetryTrigger)
+	success, err := f.pull(ctx)
+	pureDeferral := false
+	if err == nil {
+		if retry, ok := f.puller.(interface{ RetryStatus() pullRetryStatus }); ok {
+			pureDeferral = retry.RetryStatus().pureDeferral()
+		}
+	}
+	if (err != nil || !success) && !pureDeferral && f.pullPause < 60*f.pullBasePause() {
+		f.pullPause *= 2
+	}
+	return err
 }
 
 func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
