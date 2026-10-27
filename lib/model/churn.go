@@ -49,6 +49,8 @@ var churnKeys = [...]string{
 	"need.failure_sample.still_needed", "need.failure_sample.superseded", "need.failure_sample.tombstoned", "need.failure_sample.global_missing", "need.failure_sample.already_satisfied", "need.failure_sample.invalid_or_type_changed", "need.failure_sample.db_error", "need.failure_sample.not_checked",
 	"source.real_missing", "source.nonregular", "source.stat_other", "source.traversal", "source.temp_missing_or_nonregular", "source.hash_mismatch", "source.read_other",
 	"queue.admit", "queue.defer", "queue.expire", "queue.clear_success", "queue.clear_obsolete",
+	"queue.retry_clear_success", "queue.retry_clear_obsolete", "queue.stale_clear", "queue.state_capacity_bypass",
+	"queue.scope_receive_encrypted", "queue.disabled", "queue.wake", "queue.wake_late_ms",
 	"drip.held_updates", "drip.released_entries", "drip.coalesced_away", "drip.quiet", "drip.max_hold", "drip.shutdown",
 	"drip.discarded_entries", "drip.discarded_updates", "drip.superseded_immediate",
 	"backlog.zero", "backlog.nonzero", "backlog.db_error",
@@ -72,6 +74,7 @@ type churnSample struct {
 	LocalState string `json:"local_state,omitempty"`
 	At         string `json:"at"`
 	Run        uint64 `json:"run,omitempty"`
+	Attempt    uint64 `json:"attempt,omitempty"`
 	Iteration  uint64 `json:"iteration,omitempty"`
 	Trigger    string `json:"trigger,omitempty"`
 	Class      string `json:"class,omitempty"`
@@ -126,24 +129,35 @@ func (c *churnCounts) sample(s churnSample) bool {
 // No logging, database calls, or user callbacks under mu. The first four
 // representative observations form a bounded reservoir (not a random sample).
 type churnTracker struct {
-	activity       *activityhist.Hist
-	budget         *churnBudget
-	mu             sync.Mutex
-	start          time.Time
-	parents        map[string]*churnCounts
-	other, total   churnCounts
-	examples       uint8
-	failureSamples int
-	backlogRead    bool
-	settled        bool
-	active         bool
-	emissionDenied uint64
-	run, iteration atomic.Uint64
-	trigger        atomic.Uint32
+	activity        *activityhist.Hist
+	budget          *churnBudget
+	mu              sync.Mutex
+	start           time.Time
+	parents         map[string]*churnCounts
+	other, total    churnCounts
+	examples        uint8
+	failureSamples  int
+	backlogRead     bool
+	settled         bool
+	active          bool
+	emissionDenied  uint64
+	deferredPending int
+	deferredOldest  float64
+	run, iteration  atomic.Uint64
+	trigger         atomic.Uint32
 }
 
 func newChurnTracker(now time.Time) *churnTracker {
 	return &churnTracker{start: now, parents: make(map[string]*churnCounts), budget: &globalChurnBudget, activity: activityhist.Global}
+}
+
+func (c *churnTracker) retryPending(pending int, oldest float64) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.deferredPending, c.deferredOldest = pending, oldest
+	c.mu.Unlock()
 }
 func (c *churnTracker) bucket(path string) *churnCounts {
 	parent := filepath.ToSlash(filepath.Dir(path))
@@ -337,7 +351,7 @@ func (c *churnTracker) flush(now time.Time, sl *slog.Logger, budget *churnBudget
 	detected := !c.active && rate >= churnDetectFailures
 	// Recovery means no failures AND a successful zero-need pull observed in
 	// this window. An idle but still failed folder is not falsely recovered.
-	recovered := c.active && failures == 0 && c.settled
+	recovered := c.active && failures == 0 && c.settled && c.deferredPending == 0
 	if c.total.first.IsZero() && !recovered {
 		c.examples = 0
 		c.failureSamples = 0
@@ -383,6 +397,7 @@ func (c *churnTracker) flush(now time.Time, sl *slog.Logger, budget *churnBudget
 		c.active = detected
 	}
 	start, denied := c.start, c.emissionDenied
+	pending, oldest := c.deferredPending, c.deferredOldest
 	c.start = now
 	c.parents = make(map[string]*churnCounts)
 	c.other = churnCounts{}
@@ -395,6 +410,15 @@ func (c *churnTracker) flush(now time.Time, sl *slog.Logger, budget *churnBudget
 	for _, r := range records {
 		if r.kind != "" {
 			r.args = churnAttrs(r.counts, start, now, r.parent, r.kind, denied, c.budget.denied.Load())
+			// These are folder gauges, not parent operation counts.
+			for i := 0; i < len(r.args); i += 2 {
+				if r.args[i] == "deferred_pending" {
+					r.args[i+1] = pending
+				}
+				if r.args[i] == "deferred_oldest_s" {
+					r.args[i+1] = oldest
+				}
+			}
 			r.args = append(r.args, "process_shutdown_unemitted_windows", c.budget.shutdownUnemitted.Load())
 			if r.kind == "total" {
 				for i, key := range churnKeys {
@@ -560,7 +584,7 @@ func (f *sendReceiveFolder) churnFailure(path string, err error, captured *proto
 		c.failureSamples++
 	}
 	c.mu.Unlock()
-	s := churnSample{Path: path, Event: "pull_failure", Phase: "failure_sample", Class: class, Stage: stage, Outcome: "not_checked", View: "not_checked"}
+	s := churnSample{Path: path, Event: "pull_failure", Phase: "failure_sample", Class: class, Stage: stage, Attempt: retryAttemptID(err), Outcome: "not_checked", View: "not_checked"}
 	if check {
 		s.Captured = churnToken(*captured)
 		global, ok, e := f.db.GetGlobalFile(f.folderID, path)
