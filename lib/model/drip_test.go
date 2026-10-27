@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -323,6 +324,53 @@ func TestDripSameBatchDeleteCreateOrder(t *testing.T) {
 		t.Fatal("same-batch superseded positive survived")
 	}
 }
+
+func TestChurnDripSupersededImmediateCounters(t *testing.T) {
+	now := time.Unix(1000, 0)
+	d := newDripTracker(config.FolderConfiguration{}, func() time.Time { return now }, nil)
+	d.params = dripParams{enabled: true, detectN: 3, window: time.Minute, quiet: 20 * time.Second, maxHold: time.Minute}
+	c := churnTestTracker()
+	d.churn = c
+	for tick := 1; tick <= 4; tick++ {
+		d.filterScanUpdate([]protocol.FileInfo{dripFile("parent/x", tick)})
+	}
+	d.logf = func(string, ...any) { t.Fatal("per-path discard log bypassed churn aggregation") }
+	now = now.Add(5 * time.Second)
+	del := dripFile("parent/x", 5)
+	del.Deleted = true
+	d.filterScanUpdate([]protocol.FileInfo{del})
+	d.filterScanUpdate([]protocol.FileInfo{del}) // No double counting without a held cohort.
+	d.flushAll()
+	for key, want := range map[string]uint64{
+		"drip.discarded_entries": 1, "drip.discarded_updates": 2, "drip.superseded_immediate": 1,
+		"drip.held_updates": 0, "drip.released_entries": 0, "drip.coalesced_away": 0,
+		"drip.quiet": 0, "drip.max_hold": 0, "drip.shutdown": 0,
+	} {
+		for _, counts := range []*churnCounts{&c.total, c.parents["parent"]} {
+			if counts == nil || counts.values[churnIndex(key)] != want {
+				t.Fatalf("counter %s: got %+v, want %d", key, counts, want)
+			}
+		}
+	}
+	if c.total.heldMax != 5 || c.total.sampleN != 1 || c.total.samples[0].Outcome != "superseded_immediate" {
+		t.Fatalf("missing discard reason or age: %+v", c.total)
+	}
+	h := new(churnTestHandler)
+	c.flush(time.Now().Add(time.Minute), slog.New(h), c.budget)
+	found := false
+	for _, record := range h.records {
+		if record.Message == "Pull churn totals" {
+			found = true
+			if churnAttr(record, "drip.discarded_entries").Uint64() != 1 || churnAttr(record, "drip.discarded_updates").Uint64() != 2 {
+				t.Fatal("discard counters absent from ring-bound total record")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no churn total record emitted")
+	}
+}
+
 // TestDripReplayIncidentTrace replays the real .inspect/last.json drip
 // timeline (11,728 pull retries over 9.2 h on 2026-10-23, second offsets
 // from yarlung's serve log) through the tracker with production defaults.
