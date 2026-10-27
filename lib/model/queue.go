@@ -15,6 +15,8 @@ import (
 type jobQueue struct {
 	progress []string
 	queued   []jobQueueEntry
+	held     []string
+	heldSet  map[string]struct{}
 	mut      sync.Mutex
 }
 
@@ -81,6 +83,37 @@ func (q *jobQueue) Done(file string) {
 	}
 }
 
+// HoldDuringBuild registers pending work before deletion decisions begin.
+func (q *jobQueue) HoldDuringBuild(name string) {
+	q.mut.Lock()
+	defer q.mut.Unlock()
+	q.holdLocked(name)
+}
+
+// HoldInProgress preserves membership continuously while removing a popped job
+// from progress. Done intentionally cannot remove round-held protection.
+func (q *jobQueue) HoldInProgress(name string) {
+	q.mut.Lock()
+	defer q.mut.Unlock()
+	q.holdLocked(name)
+	for i, n := range q.progress {
+		if n == name {
+			q.progress = append(q.progress[:i], q.progress[i+1:]...)
+			break
+		}
+	}
+}
+
+func (q *jobQueue) holdLocked(name string) {
+	if q.heldSet == nil {
+		q.heldSet = make(map[string]struct{})
+	}
+	if _, ok := q.heldSet[name]; !ok {
+		q.heldSet[name] = struct{}{}
+		q.held = append(q.held, name)
+	}
+}
+
 // ContainsPathUnder reports whether any queued or in-progress job's path sits
 // under the given directory. Queue membership only shrinks over a round
 // (nothing pushes mid-round), so a false answer stays false for the rest of
@@ -100,6 +133,11 @@ func (q *jobQueue) ContainsPathUnder(dir string) bool {
 			return true
 		}
 	}
+	for _, name := range q.held {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -111,7 +149,7 @@ func (q *jobQueue) Jobs(page, perpage int) ([]string, []string, int) {
 
 	toSkip := (page - 1) * perpage
 	plen := len(q.progress)
-	qlen := len(q.queued)
+	qlen := len(q.queued) + len(q.held)
 
 	if tot := plen + qlen; tot <= toSkip {
 		return nil, nil, tot
@@ -139,7 +177,12 @@ func (q *jobQueue) Jobs(page, perpage int) ([]string, []string, int) {
 		queued = make([]string, perpage-len(progress))
 	}
 	for i := range queued {
-		queued[i] = q.queued[i+toSkip].name
+		index := i + toSkip
+		if index < len(q.queued) {
+			queued[i] = q.queued[index].name
+		} else {
+			queued[i] = q.held[index-len(q.queued)]
+		}
 	}
 
 	return progress, queued, (page - 1) * perpage
@@ -150,6 +193,8 @@ func (q *jobQueue) Reset() {
 	defer q.mut.Unlock()
 	q.progress = nil
 	q.queued = nil
+	q.held = nil
+	q.heldSet = nil
 }
 
 func (q *jobQueue) lenQueued() int {

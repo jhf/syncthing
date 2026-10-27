@@ -221,3 +221,33 @@ func TestCollapseDeletionsSkipsQueuedPullTree(t *testing.T) {
 		t.Errorf("tree should be gone after the queue cleared, stat err = %v", err)
 	}
 }
+
+func TestCollapseDeletionsSkipsHeldPullTree(t *testing.T) {
+	for _, popped := range []bool{false, true} {
+		t.Run(fmt.Sprint(popped), func(t *testing.T) {
+			_, f := setupSendReceiveFolder(t)
+			setupCollapseTree(t, f, "tree", 60)
+			if popped {
+				f.queue.Push("tree/d1/held", 1, time.Now())
+				name, _ := f.queue.Pop()
+				f.queue.HoldInProgress(name)
+			} else {
+				f.queue.HoldDuringBuild("tree/d1/held")
+			}
+			f.queue.Done("tree/d1/held")
+			files, dirs := collapseWave(t, f, "tree")
+			updates := make(chan dbUpdateJob, 1000)
+			if collapsed := f.collapseDeletions(t.Context(), files, dirs, nil, updates); len(collapsed) != 0 {
+				t.Fatalf("collapse covered round-held descendant: %v", collapsed)
+			}
+			if _, err := f.mtimefs.Lstat("tree"); err != nil {
+				t.Fatal(err)
+			}
+			f.queue.Reset()
+			files, dirs = collapseWave(t, f, "tree")
+			if collapsed := f.collapseDeletions(t.Context(), files, dirs, nil, updates); len(collapsed) == 0 {
+				t.Fatal("collapse did not resume after drained reset")
+			}
+		})
+	}
+}

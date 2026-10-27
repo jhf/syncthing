@@ -38,6 +38,7 @@ type sharedPullerState struct {
 	sparse        bool
 	created       time.Time
 	fsync         bool
+	attemptID     uint64 // Immutable after dispatch to the copier pipeline.
 
 	// Mutable, must be locked for access
 	err              error           // The first error we hit
