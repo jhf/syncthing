@@ -121,6 +121,7 @@ func (d *pullDirState) bucket(name string, now time.Time) *pullDirBucket {
 	return b
 }
 func (d *pullDirState) remove(name string, b *pullDirBucket) {
+	d.releaseProbe(b)
 	delete(d.buckets, name)
 	d.bytes -= b.bytes
 	d.budget.bytes.Add(-int64(b.bytes))
@@ -227,22 +228,34 @@ func (d *pullDirState) match(name string, now time.Time) (string, *pullDirBucket
 	}
 	return "", nil, 0
 }
+func (d *pullDirState) releaseProbe(b *pullDirBucket) {
+	if b.probeName == "" {
+		return
+	}
+	b.probeName = ""
+	if b.probeWindow.Equal(d.probeWindow) && d.probeUsed > 0 {
+		d.probeUsed--
+	}
+	b.nextProbe = time.Time{}
+	d.count("dir.probe_stale")
+}
 func (d *pullDirState) releaseReservation(name string) {
 	for _, b := range d.buckets {
 		if b.probeName != name {
 			continue
 		}
-		b.probeName = ""
-		if b.probeWindow.Equal(d.probeWindow) && d.probeUsed > 0 {
-			d.probeUsed--
-		}
-		b.nextProbe = time.Time{}
-		d.count("dir.probe_stale")
+		d.releaseProbe(b)
 	}
 }
 func (d *pullDirState) consume(name string, must bool, now time.Time) {
 	for ancestor, b := range d.buckets {
 		if b.probeName == name {
+			// A long walk can outlive both the permit and its epoch without
+			// another prepare pass. That admission is not a consumed probe.
+			if must || !now.Before(b.probeWindow.Add(pullDirProbe)) || !now.Before(b.holdUntil) {
+				d.releaseProbe(b)
+				continue
+			}
 			b.probeName = ""
 			b.nextProbe = now.Add(pullDirProbe)
 			d.count("dir.probe_admit")
@@ -261,10 +274,9 @@ func (r *pullRetryTracker) prepareDirLocked(now time.Time) {
 	}
 	if d.probeWindow.IsZero() || !now.Before(d.probeWindow.Add(pullDirProbe)) {
 		for _, b := range d.buckets {
-			if b.probeName != "" {
-				b.probeName = ""
-				d.count("dir.probe_stale")
-			}
+			nextProbe := b.nextProbe
+			d.releaseProbe(b)
+			b.nextProbe = nextProbe
 		}
 		d.probeWindow = now
 		d.probeUsed = 0
