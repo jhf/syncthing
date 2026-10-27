@@ -62,6 +62,7 @@ type dripHeld struct {
 // dripTracker is not internally synchronized; the folder Serve goroutine is
 // the only caller (scan batch flushes and the flush timer both run there).
 type dripTracker struct {
+	churn  *churnTracker
 	params dripParams
 	now    func() time.Time
 
@@ -193,7 +194,9 @@ func (d *dripTracker) flushDue() []protocol.FileInfo {
 	due, names, reasons := d.dueLocked(d.now())
 	for i, name := range names {
 		h := d.held[name]
-		if d.logf != nil {
+		if d.churn != nil {
+			d.churn.dripFlush(name, h.coalesced, d.now().Sub(h.firstHeld).Seconds(), reasons[i])
+		} else if d.logf != nil {
 			d.logf("Drip flush: coalesced updates committed", "path", name,
 				"coalesced", h.coalesced, "heldS", d.now().Sub(h.firstHeld).Seconds(), "reason", reasons[i])
 		}
@@ -209,7 +212,9 @@ func (d *dripTracker) flushDue() []protocol.FileInfo {
 func (d *dripTracker) flushAll() []protocol.FileInfo {
 	all := make([]protocol.FileInfo, 0, len(d.held))
 	for name, h := range d.held {
-		if d.logf != nil {
+		if d.churn != nil {
+			d.churn.dripFlush(name, h.coalesced, d.now().Sub(h.firstHeld).Seconds(), "shutdown")
+		} else if d.logf != nil {
 			d.logf("Drip flush: coalesced updates committed", "path", name,
 				"coalesced", h.coalesced, "heldS", d.now().Sub(h.firstHeld).Seconds(), "reason", "shutdown")
 		}

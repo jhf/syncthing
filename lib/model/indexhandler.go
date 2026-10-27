@@ -367,7 +367,7 @@ func (s *indexHandler) receive(fs []protocol.FileInfo, update bool, op string, p
 		return fmt.Errorf("%v: %w", s.folder, ErrFolderPaused)
 	}
 
-	defer runner.SchedulePull()
+	defer scheduleIndexPull(runner)
 
 	s.downloads.Update(s.folder, makeForgetUpdate(fs))
 
@@ -587,7 +587,7 @@ func (r *indexHandlerRegistry) startLocked(folder config.FolderConfiguration, ru
 	r.indexHandlers.Add(folder.ID, is)
 
 	// This new connection might help us get in sync.
-	runner.SchedulePull()
+	scheduleIndexPull(runner)
 	return nil
 }
 

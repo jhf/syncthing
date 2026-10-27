@@ -249,7 +249,7 @@ func (s *sharedPullerState) failLocked(err error) {
 		return
 	}
 
-	s.err = err
+	s.err = churnAt(churnStage(err, "local_copy"), err)
 }
 
 func (s *sharedPullerState) failed() error {
@@ -338,15 +338,15 @@ func (s *sharedPullerState) finalClose() (bool, error) {
 		// if we're using sparse file. If we already errored there's nothing
 		// to do about it here.
 		if err := s.addWriterLocked(); err != nil {
-			s.failLocked(err)
+			s.failLocked(churnAt("finalize", err))
 		}
 	}
 
 	if s.writer != nil {
 		if len(s.file.Encrypted) > 0 {
-			s.failLocked(s.finalizeEncrypted())
+			s.failLocked(churnAt("finalize", s.finalizeEncrypted()))
 		}
-		s.failLocked(s.writer.SyncClose(s.fsync))
+		s.failLocked(churnAt("finalize", s.writer.SyncClose(s.fsync)))
 		s.writer = nil
 	}
 
