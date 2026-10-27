@@ -51,6 +51,8 @@ var churnKeys = [...]string{
 	"queue.admit", "queue.defer", "queue.expire", "queue.clear_success", "queue.clear_obsolete",
 	"queue.retry_clear_success", "queue.retry_clear_obsolete", "queue.stale_clear", "queue.state_capacity_bypass",
 	"queue.scope_receive_encrypted", "queue.disabled", "queue.wake", "queue.wake_late_ms",
+	"dir.qualified", "dir.promoted", "dir.defer", "dir.probe_reserved", "dir.probe_admit", "dir.probe_stale", "dir.max_hold_latched", "dir.max_hold_admit", "dir.epoch_expired", "dir.evidence_overflow", "dir.state_capacity_bypass",
+	"dir.sampled", "dir.samples_omitted",
 	"drip.held_updates", "drip.released_entries", "drip.coalesced_away", "drip.quiet", "drip.max_hold", "drip.shutdown",
 	"drip.discarded_entries", "drip.discarded_updates", "drip.superseded_immediate",
 	"backlog.zero", "backlog.nonzero", "backlog.db_error",
@@ -68,27 +70,31 @@ type churnCounts struct {
 }
 
 type churnSample struct {
-	Path       string `json:"path"`
-	Event      string `json:"event"`
-	Phase      string `json:"phase,omitempty"`
-	LocalState string `json:"local_state,omitempty"`
-	At         string `json:"at"`
-	Run        uint64 `json:"run,omitempty"`
-	Attempt    uint64 `json:"attempt,omitempty"`
-	Iteration  uint64 `json:"iteration,omitempty"`
-	Trigger    string `json:"trigger,omitempty"`
-	Class      string `json:"class,omitempty"`
-	Stage      string `json:"stage,omitempty"`
-	Outcome    string `json:"outcome,omitempty"`
-	Captured   string `json:"captured,omitempty"`
-	Current    string `json:"current,omitempty"`
-	Local      string `json:"local,omitempty"`
-	View       string `json:"view,omitempty"`
-	Peer       string `json:"peer,omitempty"`
-	Offset     int64  `json:"offset,omitempty"`
-	Size       int    `json:"size,omitempty"`
-	Hash       string `json:"hash,omitempty"`
-	Temporary  bool   `json:"temporary,omitempty"`
+	Ancestor   string  `json:"ancestor,omitempty"`
+	Depth      int     `json:"ancestor_depth,omitempty"`
+	Distinct   int     `json:"distinct_lower_bound,omitempty"`
+	EpochAge   float64 `json:"epoch_age_s,omitempty"`
+	Path       string  `json:"path"`
+	Event      string  `json:"event"`
+	Phase      string  `json:"phase,omitempty"`
+	LocalState string  `json:"local_state,omitempty"`
+	At         string  `json:"at"`
+	Run        uint64  `json:"run,omitempty"`
+	Attempt    uint64  `json:"attempt,omitempty"`
+	Iteration  uint64  `json:"iteration,omitempty"`
+	Trigger    string  `json:"trigger,omitempty"`
+	Class      string  `json:"class,omitempty"`
+	Stage      string  `json:"stage,omitempty"`
+	Outcome    string  `json:"outcome,omitempty"`
+	Captured   string  `json:"captured,omitempty"`
+	Current    string  `json:"current,omitempty"`
+	Local      string  `json:"local,omitempty"`
+	View       string  `json:"view,omitempty"`
+	Peer       string  `json:"peer,omitempty"`
+	Offset     int64   `json:"offset,omitempty"`
+	Size       int     `json:"size,omitempty"`
+	Hash       string  `json:"hash,omitempty"`
+	Temporary  bool    `json:"temporary,omitempty"`
 }
 
 func churnIndex(key string) int {
@@ -143,6 +149,7 @@ type churnTracker struct {
 	emissionDenied  uint64
 	deferredPending int
 	deferredOldest  float64
+	dirDeferred     int
 	run, iteration  atomic.Uint64
 	trigger         atomic.Uint32
 }
@@ -157,6 +164,15 @@ func (c *churnTracker) retryPending(pending int, oldest float64) {
 	}
 	c.mu.Lock()
 	c.deferredPending, c.deferredOldest = pending, oldest
+	c.mu.Unlock()
+}
+
+func (c *churnTracker) dirPending(pending int) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.dirDeferred = pending
 	c.mu.Unlock()
 }
 func (c *churnTracker) bucket(path string) *churnCounts {
@@ -398,6 +414,7 @@ func (c *churnTracker) flush(now time.Time, sl *slog.Logger, budget *churnBudget
 	}
 	start, denied := c.start, c.emissionDenied
 	pending, oldest := c.deferredPending, c.deferredOldest
+	dirPending := c.dirDeferred
 	c.start = now
 	c.parents = make(map[string]*churnCounts)
 	c.other = churnCounts{}
@@ -410,6 +427,7 @@ func (c *churnTracker) flush(now time.Time, sl *slog.Logger, budget *churnBudget
 	for _, r := range records {
 		if r.kind != "" {
 			r.args = churnAttrs(r.counts, start, now, r.parent, r.kind, denied, c.budget.denied.Load())
+			r.args = append(r.args, "dir.deferred_pending", dirPending)
 			// These are folder gauges, not parent operation counts.
 			for i := 0; i < len(r.args); i += 2 {
 				if r.args[i] == "deferred_pending" {
