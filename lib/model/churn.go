@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/syncthing/syncthing/internal/activityhist"
+	"github.com/syncthing/syncthing/internal/slogutil"
 	"github.com/syncthing/syncthing/lib/protocol"
 )
 
@@ -32,12 +33,14 @@ type churnPullError struct{ text, class string }
 func (e churnPullError) String() string { return e.text }
 
 const (
-	churnWindow         = time.Minute
-	churnParents        = 8
-	churnSamples        = 4
-	churnStringBytes    = 256
-	churnProcessLines   = 120
-	churnDetectFailures = 30 // 5x patch/46's 3-6/min post-drip WARN proxy baseline
+	churnWindow          = time.Minute
+	churnParents         = 8
+	churnSamples         = 4
+	churnStringBytes     = 256
+	churnProcessLines    = 120
+	churnDetectFailures  = 30  // 5x patch/46's 3-6/min post-drip WARN proxy baseline
+	churnDetectDeferrals = 128 // Provisional design-5.3 policy, real gate decisions only.
+	churnRecoveryWindows = 2
 )
 
 // All dimensions are finite constants, never paths, peers or error strings.
@@ -146,16 +149,19 @@ type churnTracker struct {
 	backlogRead     bool
 	settled         bool
 	active          bool
+	quietWindows    int
 	emissionDenied  uint64
 	deferredPending int
+	pendingSeen     bool
 	deferredOldest  float64
 	dirDeferred     int
+	capture         func() string
 	run, iteration  atomic.Uint64
 	trigger         atomic.Uint32
 }
 
 func newChurnTracker(now time.Time) *churnTracker {
-	return &churnTracker{start: now, parents: make(map[string]*churnCounts), budget: &globalChurnBudget, activity: activityhist.Global}
+	return &churnTracker{start: now, parents: make(map[string]*churnCounts), budget: &globalChurnBudget, activity: activityhist.Global, capture: slogutil.RequestChurnCapture}
 }
 
 func (c *churnTracker) retryPending(pending int, oldest float64) {
@@ -164,6 +170,7 @@ func (c *churnTracker) retryPending(pending int, oldest float64) {
 	}
 	c.mu.Lock()
 	c.deferredPending, c.deferredOldest = pending, oldest
+	c.pendingSeen = c.pendingSeen || pending > 0
 	c.mu.Unlock()
 }
 
@@ -199,6 +206,9 @@ func (c *churnTracker) count(path, key string, n uint64) {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if key == "queue.defer" && n > 0 {
+		c.pendingSeen = true
+	}
 	c.bucket(path).add(now, key, n)
 	c.total.add(now, key, n)
 }
@@ -363,12 +373,32 @@ func (c *churnTracker) flush(now time.Time, sl *slog.Logger, budget *churnBudget
 	}
 	c.mu.Lock()
 	failures := c.total.values[churnIndex("failures")]
+	deferrals := c.total.values[churnIndex("queue.defer")]
+	eligibleFailures := c.total.values[churnIndex("class.remote_no_such_file")] + c.total.values[churnIndex("class.local_modified")]
 	rate := float64(failures) * float64(churnWindow) / float64(max(now.Sub(c.start), churnWindow))
-	detected := !c.active && rate >= churnDetectFailures
-	// Recovery means no failures AND a successful zero-need pull observed in
-	// this window. An idle but still failed folder is not falsely recovered.
-	recovered := c.active && failures == 0 && c.settled && c.deferredPending == 0
+	deferralRate := float64(deferrals) * float64(churnWindow) / float64(max(now.Sub(c.start), churnWindow))
+	failureTrigger, deferralTrigger := rate >= churnDetectFailures, deferralRate >= churnDetectDeferrals
+	detected := !c.active && (failureTrigger || deferralTrigger)
+	reason := "failures"
+	if deferralTrigger {
+		reason = "deferrals"
+		if failureTrigger {
+			reason = "both"
+		}
+	}
+	// Two complete quiet windows, with a confirmed zero-need state. Silence
+	// after disconnection is not recovery. Denied windows cannot be counted
+	// repeatedly because the proposed count commits only with the window.
+	quietWindows := c.quietWindows
+	if eligibleFailures != 0 || c.deferredPending != 0 || c.pendingSeen || !c.settled {
+		quietWindows = 0
+	} else if c.active && !now.Before(c.start.Add(churnWindow)) {
+		quietWindows++
+	}
+	recovered := c.active && quietWindows >= churnRecoveryWindows
 	if c.total.first.IsZero() && !recovered {
+		c.quietWindows = quietWindows
+		c.pendingSeen = c.deferredPending > 0
 		c.examples = 0
 		c.failureSamples = 0
 		c.backlogRead = false
@@ -406,15 +436,23 @@ func (c *churnTracker) flush(now time.Time, sl *slog.Logger, budget *churnBudget
 	records = append(records, record{msg: "Pull churn totals", level: slog.LevelInfo, counts: c.total, kind: "total"})
 	if detected || recovered {
 		msg, level := "Pull churn recovered", slog.LevelInfo
+		if recovered {
+			reason = "quiet"
+		}
 		if detected {
 			msg, level = "Pull churn detected", slog.LevelWarn
 		}
-		records = append(records, record{msg: msg, level: level, args: []any{"window.start", c.start.UTC().Format(time.RFC3339Nano), "window.end", now.UTC().Format(time.RFC3339Nano), "churn.schema", 1, "failure_rate_per_minute", rate, "threshold", churnDetectFailures}})
+		records = append(records, record{msg: msg, level: level, args: []any{"window.start", c.start.UTC().Format(time.RFC3339Nano), "window.end", now.UTC().Format(time.RFC3339Nano), "churn.schema", 1, "detection.reason", reason, "failure_count", failures, "deferral_count", deferrals, "eligible_failure_count", eligibleFailures, "failure_rate_per_minute", rate, "deferral_rate_per_minute", deferralRate, "threshold", churnDetectFailures, "deferral_threshold", churnDetectDeferrals, "quiet_windows", quietWindows, "recovery_quiet_windows_required", churnRecoveryWindows}})
 		c.active = detected
+	}
+	c.quietWindows = quietWindows
+	if detected {
+		c.quietWindows = 0
 	}
 	start, denied := c.start, c.emissionDenied
 	pending, oldest := c.deferredPending, c.deferredOldest
 	dirPending := c.dirDeferred
+	c.pendingSeen = pending > 0
 	c.start = now
 	c.parents = make(map[string]*churnCounts)
 	c.other = churnCounts{}
@@ -439,6 +477,8 @@ func (c *churnTracker) flush(now time.Time, sl *slog.Logger, budget *churnBudget
 			}
 			r.args = append(r.args, "process_shutdown_unemitted_windows", c.budget.shutdownUnemitted.Load())
 			if r.kind == "total" {
+				stats := slogutil.ChurnCaptureStats()
+				r.args = append(r.args, "capture.process.accepted", stats.Accepted, "capture.process.rejected_busy", stats.RejectedBusy, "capture.process.rejected_cooldown", stats.RejectedCooldown, "capture.process.unavailable", stats.Unavailable, "capture.process.completed", stats.Completed, "capture.process.failed", stats.Failed, "capture.process.cancelled", stats.Cancelled)
 				for i, key := range churnKeys {
 					if n := c.budget.shutdownCounts[i].Load(); n > 0 {
 						r.args = append(r.args, "process_shutdown_unemitted."+key, n)
@@ -447,6 +487,11 @@ func (c *churnTracker) flush(now time.Time, sl *slog.Logger, budget *churnBudget
 			}
 		}
 		sl.Log(context.Background(), r.level, r.msg, r.args...)
+		if r.msg == "Pull churn detected" && c.capture != nil {
+			// Only a nonblocking token enqueue, after the transition is in the
+			// rings and after releasing all tracker locks. No dumping here.
+			c.capture()
+		}
 	}
 }
 func (c *churnTracker) complete(path string) {

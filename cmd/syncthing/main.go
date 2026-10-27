@@ -472,6 +472,7 @@ func (c *serveCmd) syncthingMain() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	stopCapture := slogutil.StartChurnCapture(ctx, filepath.Join(locations.GetBaseDir(locations.DataBaseDir), "churn-captures"))
 
 	// earlyService is a supervisor that runs the services needed for or
 	// before app startup; the event logger, and the config service.
@@ -625,6 +626,10 @@ func (c *serveCmd) syncthingMain() {
 	}
 
 	status := app.Wait()
+	// os.Exit below bypasses defers. Bound shutdown even on stalled storage.
+	if !stopCapture(2 * time.Second) {
+		slog.Warn("Pull churn capture shutdown timed out")
+	}
 
 	if status == svcutil.ExitError {
 		slog.Error("Syncthing stopped with error", slogutil.Error(app.Error()))
