@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,6 +153,221 @@ func TestDripDisabled(t *testing.T) {
 	}
 	if d.heldCount() != 0 {
 		t.Fatal("disabled tracker holds nothing")
+	}
+}
+
+func TestDripImmediateUpdateDiscardsHeld(t *testing.T) {
+	for _, transition := range []string{"deleted", "directory", "invalid"} {
+		for _, flush := range []string{"quiet", "max_hold", "shutdown"} {
+			t.Run(transition+"/"+flush, func(t *testing.T) {
+				now := time.Unix(1000, 0)
+				d := newDripTracker(config.FolderConfiguration{}, func() time.Time { return now }, nil)
+				d.params = dripParams{enabled: true, detectN: 3, window: time.Minute, quiet: 20 * time.Second, maxHold: time.Minute}
+				for tick := 1; tick <= 4; tick++ {
+					got := d.filterScanUpdate([]protocol.FileInfo{dripFile("x", tick)})
+					if want := tick < 3; (len(got) == 1) != want {
+						t.Fatalf("tick %d: committed %d entries", tick, len(got))
+					}
+				}
+				if h := d.held["x"]; h == nil || h.coalesced != 2 {
+					t.Fatalf("expected two held updates, got %+v", h)
+				}
+				// A different path's state must not be cleared by x's transition.
+				d.recent["other"] = []time.Time{now}
+				otherHeld := &dripHeld{fi: dripFile("other", 1), firstHeld: now, lastUpdate: now, coalesced: 1}
+				d.held["other"] = otherHeld
+				immediate := dripFile("x", 5)
+				switch transition {
+				case "deleted":
+					immediate.Deleted = true
+				case "directory":
+					immediate.Type = protocol.FileInfoTypeDirectory
+				case "invalid":
+					immediate.LocalFlags = protocol.FlagLocalRemoteInvalid
+				}
+				got := d.filterScanUpdate([]protocol.FileInfo{immediate})
+				if len(got) != 1 || got[0].ModifiedS != immediate.ModifiedS || got[0].Deleted != immediate.Deleted || got[0].Type != immediate.Type || got[0].LocalFlags != immediate.LocalFlags {
+					t.Fatalf("immediate update changed or held: %+v", got)
+				}
+				if _, ok := d.held["x"]; ok {
+					t.Error("superseded positive remains held")
+				}
+				if _, ok := d.recent["x"]; ok {
+					t.Error("superseded path retains hot history")
+				}
+				if len(d.recent["other"]) != 1 || d.held["other"] != otherHeld {
+					t.Error("unrelated held update or history was cleared")
+				}
+				switch flush {
+				case "quiet":
+					now = now.Add(d.params.quiet)
+					got = d.flushDue()
+				case "max_hold":
+					d.params.quiet = 2 * d.params.maxHold
+					now = now.Add(d.params.maxHold)
+					got = d.flushDue()
+				case "shutdown":
+					got = d.flushAll()
+				}
+				if len(got) != 1 || got[0].Name != "other" {
+					t.Fatalf("%s must release only the unrelated held file: %+v", flush, got)
+				}
+				if _, ok := d.nextIn(); ok {
+					t.Fatal("superseded positive left a pending deadline")
+				}
+			})
+		}
+	}
+}
+
+func TestDripDeleteCreateFinalDBState(t *testing.T) {
+	for _, recreate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recreate=%v", recreate), func(t *testing.T) {
+			sdb, err := sqlite.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sdb.Close()
+			now := time.Unix(1000, 0)
+			d := newDripTracker(config.FolderConfiguration{}, func() time.Time { return now }, nil)
+			d.params = dripParams{enabled: true, detectN: 3, window: time.Minute, quiet: 20 * time.Second, maxHold: time.Minute}
+			commit := func(fs []protocol.FileInfo) {
+				t.Helper()
+				if len(fs) != 0 {
+					if err := sdb.Update("test", protocol.LocalDeviceID, fs); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			var version protocol.Vector
+			next := func(tick int) protocol.FileInfo {
+				fi := dripFile("x", tick)
+				version = version.Copy().Update(42)
+				fi.Version = version
+				return fi
+			}
+			for tick := 1; tick <= 4; tick++ {
+				commit(d.filterScanUpdate([]protocol.FileInfo{next(tick)}))
+			}
+			final := next(5)
+			final.Deleted = true
+			final.Size, final.Blocks = 0, nil
+			got := d.filterScanUpdate([]protocol.FileInfo{final})
+			if len(got) != 1 || !got[0].Deleted {
+				t.Fatal("same-name tombstone did not pass immediately")
+			}
+			commit(got)
+			if recreate {
+				final = next(6)
+				got = d.filterScanUpdate([]protocol.FileInfo{final})
+				if len(got) != 1 {
+					t.Fatal("recreate inherited stale hot-path history")
+				}
+				commit(got)
+			}
+			assertFinal := func() {
+				t.Helper()
+				got, ok, err := sdb.GetDeviceFile("test", protocol.LocalDeviceID, "x")
+				if err != nil || !ok {
+					t.Fatalf("read final file: exists=%v error=%v", ok, err)
+				}
+				if got.Deleted != final.Deleted || got.ModifiedS != final.ModifiedS || !got.Version.Equal(final.Version) || !got.BlocksEqual(final) {
+					t.Fatalf("final DB state overwritten: got %v, want %v", got, final)
+				}
+			}
+			assertFinal()
+			now = now.Add(d.params.quiet)
+			commit(d.flushDue())
+			assertFinal()
+			now = now.Add(d.params.maxHold)
+			commit(d.flushDue())
+			assertFinal()
+			commit(d.flushAll())
+			assertFinal()
+		})
+	}
+}
+
+func TestDripImmediateUpdateClearsUnheldHistory(t *testing.T) {
+	now := time.Unix(1000, 0)
+	d := newDripTracker(config.FolderConfiguration{}, func() time.Time { return now }, nil)
+	d.params = dripParams{enabled: true, detectN: 3, window: time.Minute, quiet: 20 * time.Second, maxHold: time.Minute}
+	for tick := 1; tick <= 2; tick++ {
+		d.filterScanUpdate([]protocol.FileInfo{dripFile("x", tick)})
+	}
+	del := dripFile("x", 3)
+	del.Deleted = true
+	d.filterScanUpdate([]protocol.FileInfo{del})
+	if _, ok := d.recent["x"]; ok {
+		t.Fatal("immediate update retained history without a held entry")
+	}
+	if got := d.filterScanUpdate([]protocol.FileInfo{dripFile("x", 4)}); len(got) != 1 {
+		t.Fatal("recreated path inherited hot history")
+	}
+}
+
+func TestDripSameBatchDeleteCreateOrder(t *testing.T) {
+	now := time.Unix(1000, 0)
+	d := newDripTracker(config.FolderConfiguration{}, func() time.Time { return now }, nil)
+	d.params = dripParams{enabled: true, detectN: 3, window: time.Minute, quiet: 20 * time.Second, maxHold: time.Minute}
+	for tick := 1; tick <= 2; tick++ {
+		d.filterScanUpdate([]protocol.FileInfo{dripFile("x", tick)})
+	}
+	del := dripFile("x", 4)
+	del.Deleted = true
+	recreated := dripFile("x", 5)
+	got := d.filterScanUpdate([]protocol.FileInfo{dripFile("x", 3), del, recreated})
+	if len(got) != 2 || !got[0].Deleted || got[1].Deleted || got[1].ModifiedS != recreated.ModifiedS {
+		t.Fatalf("same-batch last-update order lost: %+v", got)
+	}
+	if len(d.flushAll()) != 0 {
+		t.Fatal("same-batch superseded positive survived")
+	}
+}
+
+func TestChurnDripSupersededImmediateCounters(t *testing.T) {
+	now := time.Unix(1000, 0)
+	d := newDripTracker(config.FolderConfiguration{}, func() time.Time { return now }, nil)
+	d.params = dripParams{enabled: true, detectN: 3, window: time.Minute, quiet: 20 * time.Second, maxHold: time.Minute}
+	c := churnTestTracker()
+	d.churn = c
+	for tick := 1; tick <= 4; tick++ {
+		d.filterScanUpdate([]protocol.FileInfo{dripFile("parent/x", tick)})
+	}
+	d.logf = func(string, ...any) { t.Fatal("per-path discard log bypassed churn aggregation") }
+	now = now.Add(5 * time.Second)
+	del := dripFile("parent/x", 5)
+	del.Deleted = true
+	d.filterScanUpdate([]protocol.FileInfo{del})
+	d.filterScanUpdate([]protocol.FileInfo{del}) // No double counting without a held cohort.
+	d.flushAll()
+	for key, want := range map[string]uint64{
+		"drip.discarded_entries": 1, "drip.discarded_updates": 2, "drip.superseded_immediate": 1,
+		"drip.held_updates": 0, "drip.released_entries": 0, "drip.coalesced_away": 0,
+		"drip.quiet": 0, "drip.max_hold": 0, "drip.shutdown": 0,
+	} {
+		for _, counts := range []*churnCounts{&c.total, c.parents["parent"]} {
+			if counts == nil || counts.values[churnIndex(key)] != want {
+				t.Fatalf("counter %s: got %+v, want %d", key, counts, want)
+			}
+		}
+	}
+	if c.total.heldMax != 5 || c.total.sampleN != 1 || c.total.samples[0].Outcome != "superseded_immediate" {
+		t.Fatalf("missing discard reason or age: %+v", c.total)
+	}
+	h := new(churnTestHandler)
+	c.flush(time.Now().Add(time.Minute), slog.New(h), c.budget)
+	found := false
+	for _, record := range h.records {
+		if record.Message == "Pull churn totals" {
+			found = true
+			if churnAttr(record, "drip.discarded_entries").Uint64() != 1 || churnAttr(record, "drip.discarded_updates").Uint64() != 2 {
+				t.Fatal("discard counters absent from ring-bound total record")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no churn total record emitted")
 	}
 }
 

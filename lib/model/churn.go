@@ -50,6 +50,7 @@ var churnKeys = [...]string{
 	"source.real_missing", "source.nonregular", "source.stat_other", "source.traversal", "source.temp_missing_or_nonregular", "source.hash_mismatch", "source.read_other",
 	"queue.admit", "queue.defer", "queue.expire", "queue.clear_success", "queue.clear_obsolete",
 	"drip.held_updates", "drip.released_entries", "drip.coalesced_away", "drip.quiet", "drip.max_hold", "drip.shutdown",
+	"drip.discarded_entries", "drip.discarded_updates", "drip.superseded_immediate",
 	"backlog.zero", "backlog.nonzero", "backlog.db_error",
 	"trigger.index", "trigger.scan", "trigger.retry", "trigger.initial", "trigger.other", "trigger.mixed", "trigger.unknown",
 }
@@ -206,6 +207,25 @@ func (c *churnTracker) dripFlush(path string, held int, age float64, reason stri
 		dst.add(now, "drip."+reason, 1)
 		dst.heldMax = max(dst.heldMax, age)
 		dst.sample(churnSample{Path: path, Event: "drip_coalescing", Outcome: reason, At: now.UTC().Format(time.RFC3339Nano)})
+	}
+}
+
+// Discarded cohorts never reach the DB and are not released/coalesced-away
+// flush cohorts. Keep their update count separate from dripFlush's counters.
+func (c *churnTracker) dripDiscard(path string, held int, age float64) {
+	if c == nil {
+		return
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b := c.bucket(path)
+	for _, dst := range []*churnCounts{b, &c.total} {
+		dst.add(now, "drip.discarded_entries", 1)
+		dst.add(now, "drip.discarded_updates", uint64(held))
+		dst.add(now, "drip.superseded_immediate", 1)
+		dst.heldMax = max(dst.heldMax, age)
+		dst.sample(churnSample{Path: path, Event: "drip_coalescing", Outcome: "superseded_immediate", At: now.UTC().Format(time.RFC3339Nano)})
 	}
 }
 
