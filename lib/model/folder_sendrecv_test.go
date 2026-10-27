@@ -118,7 +118,7 @@ func setupSendReceiveFolder(t testing.TB, files ...protocol.FileInfo) (*testMode
 	<-model.stopped
 	r, _ := model.folderRunners.Get(fcfg.ID)
 	f := r.(*sendReceiveFolder)
-	f.tempPullErrors = make(map[string]string)
+	f.tempPullErrors = make(map[string]churnPullError)
 
 	// Update index
 	if files != nil {
@@ -1165,7 +1165,7 @@ func testPullCaseOnlyDirOrSymlink(t *testing.T, dir bool) {
 	}
 	if errStr, ok := f.tempPullErrors[remote.Name]; !ok {
 		t.Error("missing error for", remote.Name)
-	} else if !strings.Contains(errStr, "uses different upper or lowercase") {
+	} else if !strings.Contains(errStr.text, "uses different upper or lowercase") {
 		t.Error("unexpected error", errStr, "for", remote.Name)
 	}
 }

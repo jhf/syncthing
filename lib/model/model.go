@@ -2090,6 +2090,7 @@ func (m *model) Request(conn protocol.Connection, req *protocol.Request) (out pr
 	folderFs := folderCfg.Filesystem()
 
 	if err := osutil.TraversesSymlink(folderFs, filepath.Dir(req.Name)); err != nil {
+		m.noteChurnSourceReject(req, "traversal")
 		l.Debugf("%v REQ(in) traversal check: %s - %s: %q / %q o=%d s=%d", m, err, deviceID.Short(), req.Folder, req.Name, req.Offset, req.Size)
 		return nil, protocol.ErrNoSuchFile
 	}
@@ -2102,6 +2103,7 @@ func (m *model) Request(conn protocol.Connection, req *protocol.Request) (out pr
 		if info, err := folderFs.Lstat(tempFn); err != nil || !info.IsRegular() {
 			// Reject reads for anything that doesn't exist or is something
 			// other than a regular file.
+			m.noteChurnSourceReject(req, "temp_missing_or_nonregular")
 			l.Debugf("%v REQ(in) failed stating temp file (%v): %s: %q / %q o=%d s=%d", m, err, deviceID.Short(), req.Folder, req.Name, req.Offset, req.Size)
 			return nil, protocol.ErrNoSuchFile
 		}
@@ -2116,6 +2118,13 @@ func (m *model) Request(conn protocol.Connection, req *protocol.Request) (out pr
 	if info, err := folderFs.Lstat(req.Name); err != nil || !info.IsRegular() {
 		// Reject reads for anything that doesn't exist or is something
 		// other than a regular file.
+		reason := "nonregular"
+		if fs.IsNotExist(err) {
+			reason = "real_missing"
+		} else if err != nil {
+			reason = "stat_other"
+		}
+		m.noteChurnSourceReject(req, reason)
 		l.Debugf("%v REQ(in) failed stating file (%v): %s: %q / %q o=%d s=%d", m, err, deviceID.Short(), req.Folder, req.Name, req.Offset, req.Size)
 		if fs.IsNotExist(err) {
 			m.noteStaleRequestedFile(req.Folder, req.Name)
@@ -2126,6 +2135,7 @@ func (m *model) Request(conn protocol.Connection, req *protocol.Request) (out pr
 	n, err := readOffsetIntoBuf(folderFs, req.Name, req.Offset, res.data)
 	switch {
 	case fs.IsNotExist(err):
+		m.noteChurnSourceReject(req, "real_missing")
 		l.Debugf("%v REQ(in) file doesn't exist: %s: %q / %q o=%d s=%d", m, deviceID.Short(), req.Folder, req.Name, req.Offset, req.Size)
 		m.noteStaleRequestedFile(req.Folder, req.Name)
 		return nil, protocol.ErrNoSuchFile
@@ -2136,11 +2146,13 @@ func (m *model) Request(conn protocol.Connection, req *protocol.Request) (out pr
 		// next step take care of it, by only hashing the part we actually
 		// managed to read.
 	case err != nil:
+		m.noteChurnSourceReject(req, "read_other")
 		l.Debugf("%v REQ(in) failed reading file (%v): %s: %q / %q o=%d s=%d", m, err, deviceID.Short(), req.Folder, req.Name, req.Offset, req.Size)
 		return nil, protocol.ErrGeneric
 	}
 
 	if folderCfg.Type != config.FolderTypeReceiveEncrypted && !scanner.Validate(res.data[:n], req.Hash) {
+		m.noteChurnSourceReject(req, "hash_mismatch")
 		m.recheckFile(deviceID, req.Folder, req.Name, req.Offset, req.Hash)
 		l.Debugf("%v REQ(in) failed validating data: %s: %q / %q o=%d s=%d", m, deviceID.Short(), req.Folder, req.Name, req.Offset, req.Size)
 		return nil, protocol.ErrNoSuchFile
