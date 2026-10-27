@@ -146,6 +146,11 @@ func newSendReceiveFolder(model *model, ignores *ignore.Matcher, cfg config.Fold
 	f.puller = f
 	if (cfg.Type == config.FolderTypeSendReceive || cfg.Type == config.FolderTypeReceiveOnly) && os.Getenv("STPULLRETRYCOOLDOWN") != "0" {
 		f.retry = newPullRetryTracker(f.pullBasePause, f.churn)
+		// User decision 2026-10-27 overrides the design's default-off B.
+		// A's kill switch disables the whole dependent scheduler.
+		if os.Getenv("STPULLDIRCOOLDOWN") != "0" {
+			f.retry.dir = newPullDirState()
+		}
 	} else if cfg.Type == config.FolderTypeReceiveEncrypted {
 		f.churn.count("", "queue.scope_receive_encrypted", 1)
 	} else {
