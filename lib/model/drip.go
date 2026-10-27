@@ -117,7 +117,8 @@ func newDripTracker(cfg config.FolderConfiguration, now func() time.Time, logf f
 // filterScanUpdate partitions a scan batch into files to commit now and
 // files to hold. Held entries are last-wins: a newer version of an already
 // held path replaces the pending one. Detection and holding apply to plain
-// files only; directories, deletes, and invalid entries pass unrecorded.
+// files only; directories, deletes, and invalid entries pass immediately,
+// discarding any older held update and detection history for the same name.
 func (d *dripTracker) filterScanUpdate(fs []protocol.FileInfo) []protocol.FileInfo {
 	if !d.params.enabled || len(fs) == 0 {
 		return fs
@@ -126,6 +127,19 @@ func (d *dripTracker) filterScanUpdate(fs []protocol.FileInfo) []protocol.FileIn
 	commit := fs[:0]
 	for _, fi := range fs {
 		if fi.IsDirectory() || fi.Deleted || fi.IsInvalid() {
+			// The immediate update supersedes a held positive. Releasing the
+			// positive later would overwrite the deletion or type change.
+			h := d.held[fi.Name]
+			delete(d.held, fi.Name)
+			delete(d.recent, fi.Name)
+			if h != nil {
+				if d.churn != nil {
+					d.churn.dripDiscard(fi.Name, h.coalesced, now.Sub(h.firstHeld).Seconds())
+				} else if d.logf != nil {
+					d.logf("Drip discard: superseded held updates", "path", fi.Name,
+						"coalesced", h.coalesced, "reason", "superseded_immediate")
+				}
+			}
 			commit = append(commit, fi)
 			continue
 		}
