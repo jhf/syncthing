@@ -25,19 +25,22 @@ import (
 // costs minutes of startup time — should not happen at an arbitrary
 // restart. This scheduler watches the clock against the activity
 // histogram (internal/activityhist, fed by the log sink): each night, at
-// the middle of the deepest predicted idle run (minute-of-day precision,
+// the START of the deepest predicted idle run (minute-of-day precision,
 // hour-of-week weighting, weekly decay, deterministic per-day jitter,
 // default sleep window 01:00-06:00 until ~7 days of data exist), it
 // evaluates the fragmentation gate for every database. If any database
 // is due, it arms it via a pending flag file and gracefully restarts
 // itself through the standard ExitRestart path — the monitor re-execs,
-// the defrag runs at 03:00, and daytime restarts stay fast.
+// the defrag runs in the small hours, and daytime restarts stay fast.
 //
 // Admission control: a job starts only when the predicted idle run is at
-// least durationSafetyFactor times the job's EMA duration estimate
-// (recorded by the job itself into the histogram). A too-short night is
-// skipped with an INF line rather than spending the window on a job that
-// cannot finish.
+// least durationSafetyFactor times the job's size-scaled duration
+// estimate (the job's own per-byte rate EMA times the bytes now due).
+// Starting at the run's beginning leaves the whole run available, so a
+// 1.5x margin for variation suffices; the old mid-run pick with a 2x
+// margin discarded half the window and still demanded more (patch/53).
+// A too-short night is skipped with an INF line rather than spending
+// the window on a job that cannot finish.
 //
 // Static overrides, per fork convention: STMAINTENANCETIME=HH:MM pins a
 // fixed daily time (histogram ignored), STDBDEFRAG=0 disables the whole
@@ -52,8 +55,8 @@ const (
 	minMaintenanceInterval = 20 * time.Hour
 
 	// durationSafetyFactor: the idle run must fit this many expected
-	// durations before we spend it.
-	durationSafetyFactor = 2
+	// durations before we spend it (1.5x margin for variation).
+	durationSafetyFactor = 1.5
 
 	maintenanceTick      = time.Minute
 	activityHistSaveTick = 5 * time.Minute
@@ -147,11 +150,21 @@ func (a *App) maintenanceEval(dir string, now time.Time) {
 		return
 	}
 
-	if expected := activityhist.Global.ExpectedDuration("db-defrag"); expected > 0 &&
-		time.Duration(runLenMin)*time.Minute < durationSafetyFactor*expected {
+	var dueBytes int64
+	for _, db := range due {
+		if fi, err := os.Stat(db); err == nil {
+			dueBytes += fi.Size()
+			if wi, err := os.Stat(db + "-wal"); err == nil {
+				dueBytes += wi.Size()
+			}
+		}
+	}
+	if expected := activityhist.Global.ExpectedDurationFor("db-defrag", dueBytes); expected > 0 &&
+		time.Duration(runLenMin)*time.Minute < time.Duration(durationSafetyFactor*float64(expected)) {
 		slog.Info("Maintenance skipped: predicted idle run too short for database defrag",
 			slog.Int("idleRunMinutes", runLenMin),
 			slog.Duration("expectedDuration", expected),
+			slog.Int64("dueBytes", dueBytes),
 			slog.Int("databasesDue", len(due)))
 		return
 	}

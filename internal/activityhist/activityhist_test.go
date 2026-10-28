@@ -115,12 +115,40 @@ func TestDurationEMA(t *testing.T) {
 	}
 }
 
+func TestDurationRateScaling(t *testing.T) {
+	h := &Hist{}
+	const gib = 1 << 30
+	// Exactly 1 ns/byte: 5 GiB in 5 GiB nanoseconds (~5.37 s).
+	h.RecordDurationBytes("db-defrag", time.Duration(5*gib), 5*gib)
+	if got := h.ExpectedDurationFor("db-defrag", 10*gib); got != time.Duration(10*gib) {
+		t.Errorf("10 GiB estimate = %v, want %v (scales with size)", got, time.Duration(10*gib))
+	}
+	if got := h.ExpectedDurationFor("db-defrag", 2*gib+(512<<20)); got != time.Duration(5*gib/2) {
+		t.Errorf("2.5 GiB estimate = %v, want %v", got, time.Duration(5*gib/2))
+	}
+	if got := h.ExpectedDurationFor("never-run", 10*gib); got != 0 {
+		t.Errorf("unknown job = %v, want 0 (admissible)", got)
+	}
+	// A size-less observation falls back to the absolute EMA.
+	h.RecordDurationBytes("other", 3*time.Minute, 0)
+	if got := h.ExpectedDurationFor("other", 0); got != 3*time.Minute {
+		t.Errorf("absolute fallback = %v, want 3m", got)
+	}
+	// EMA of rates on a fresh hist: 2 then 4 ns/byte -> 1+2 = 3.
+	h2 := &Hist{}
+	h2.RecordDurationBytes("db-defrag", time.Duration(10*gib), 5*gib) // 2 ns/byte
+	h2.RecordDurationBytes("db-defrag", time.Duration(20*gib), 5*gib) // 4 ns/byte
+	if got := h2.ExpectedDurationFor("db-defrag", 5*gib); got != time.Duration(15*gib) {
+		t.Errorf("rate EMA = %v, want %v", got, time.Duration(15*gib))
+	}
+}
+
 func TestPickDefaultsToSleepWindow(t *testing.T) {
 	h := &Hist{Days: map[string]bool{}} // no data
 	pick, runLen := h.Pick(day("2026-10-20 12:00"))
-	hour := pick.Hour()
-	if hour < 0 || hour > 6 { // middle of 01:00-06:00 = 03:30, ±15m jitter
-		t.Errorf("pick = %v, want ~03:30 (window 00:45-06:15 with jitter)", pick)
+	minute := pick.Hour()*60 + pick.Minute()
+	if minute < 45 || minute > 75 { // start of 01:00-06:00 = 01:00, ±15m jitter
+		t.Errorf("pick = %v, want ~01:00 (window 00:45-01:15 with jitter)", pick)
 	}
 	if runLen != 300 {
 		t.Errorf("runLen = %d, want 300 (default window)", runLen)
@@ -141,8 +169,8 @@ func TestPickFindsIdleRun(t *testing.T) {
 		}
 	}
 	pick, runLen := h.Pick(day("2026-10-20 12:00"))
-	if pick.Hour() < 1 || pick.Hour() > 5 {
-		t.Errorf("pick = %v, want middle of the 00:00-06:00 quiet run (~03:00)", pick)
+	if pick.Hour() > 2 && pick.Hour() < 22 {
+		t.Errorf("pick = %v, want start of the 00:00-06:00 quiet run (~00:00)", pick)
 	}
 	if runLen < 5*60 {
 		t.Errorf("runLen = %d, want at least the 5 quiet hours", runLen)

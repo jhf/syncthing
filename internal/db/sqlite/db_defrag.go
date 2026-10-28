@@ -107,7 +107,7 @@ func maybeDefragDB(path string) {
 		return
 	}
 	duration := time.Since(start)
-	activityhist.Global.RecordDuration("db-defrag", duration)
+	activityhist.Global.RecordDurationBytes("db-defrag", duration, total)
 	after, err := extentCount(path)
 	if err != nil {
 		after = -1
