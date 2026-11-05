@@ -70,7 +70,7 @@ func TestPullRetryFailedCommitRetainsStateAndDrains(t *testing.T) {
 	f.db = d
 	jobs := make(chan dbUpdateJob)
 	done := make(chan error, 1)
-	go func() { _, err := f.dbUpdaterRoutine(jobs); done <- err }()
+	go func() { _, err := f.dbUpdaterRoutine(t.Context(), jobs); done <- err }()
 	for i := range dbUpdateBatchSizeFiles + 10 {
 		name := "held"
 		if i > 0 {
@@ -100,7 +100,7 @@ func TestPullRetryFailedCommitRetainsStateAndDrains(t *testing.T) {
 	jobs = make(chan dbUpdateJob, 1)
 	jobs <- dbUpdateJob{protocol.FileInfo{Name: "stable", Version: protocol.Vector{}.Update(1)}, dbUpdateHandleFile}
 	close(jobs)
-	_, err = f.dbUpdaterRoutine(jobs)
+	_, err = f.dbUpdaterRoutine(t.Context(), jobs)
 	must(t, err)
 	last, err := f.GetLastFile()
 	must(t, err)
@@ -115,7 +115,7 @@ func TestPullRetryFailedCommitRetainsStateAndDrains(t *testing.T) {
 	jobs = make(chan dbUpdateJob, 1)
 	jobs <- dbUpdateJob{protocol.FileInfo{Name: "held", Version: protocol.Vector{}.Update(1)}, dbUpdateHandleFile}
 	close(jobs)
-	_, err = f.dbUpdaterRoutine(jobs)
+	_, err = f.dbUpdaterRoutine(t.Context(), jobs)
 	must(t, err)
 	if len(f.retry.entries) != 0 {
 		t.Fatal("confirmed successful commit did not clear cooldown")
