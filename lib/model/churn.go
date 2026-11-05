@@ -59,6 +59,8 @@ var churnKeys = [...]string{
 	"drip.held_updates", "drip.released_entries", "drip.coalesced_away", "drip.quiet", "drip.max_hold", "drip.shutdown",
 	"drip.discarded_entries", "drip.discarded_updates", "drip.superseded_immediate",
 	"backlog.zero", "backlog.nonzero", "backlog.db_error",
+	"db_update.lock_retry_exhausted",
+	"db_update.lock_wait_warning",
 	"trigger.index", "trigger.scan", "trigger.retry", "trigger.initial", "trigger.other", "trigger.mixed", "trigger.unknown",
 }
 
