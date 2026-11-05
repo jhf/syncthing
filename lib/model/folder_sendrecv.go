@@ -25,6 +25,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/internal/itererr"
 	"github.com/syncthing/syncthing/internal/slogutil"
 	"github.com/syncthing/syncthing/lib/build"
@@ -2258,7 +2259,24 @@ func (f *sendReceiveFolder) dbUpdaterRoutine(dbUpdateChan <-chan dbUpdateJob) (i
 
 		// All updates to file/folder objects that originated remotely
 		// (across the network) use this call to updateLocals
-		if err := f.updateLocalsFromPulling(files); err != nil {
+		// Disk already contains these versions. Keep the same batch alive
+		// through transient lock contention, rather than letting a later scan
+		// mistake our own installed bytes for a new local edit. Retry inside
+		// the callback: FileInfoBatch treats any returned error as terminal.
+		err := f.updateLocalsFromPulling(files)
+		for attempt := 0; err != nil && db.IsLockContention(err) && attempt < len(indexLockBackoff); attempt++ {
+			if attempt == 0 {
+				slog.Info("Pull database update hit lock contention, retrying", f.LogAttr(), slog.Int("files", len(files)))
+			}
+			time.Sleep(indexLockBackoff[attempt])
+			err = f.updateLocalsFromPulling(files)
+		}
+		if err != nil {
+			if db.IsLockContention(err) {
+				// One count per exhausted batch, not per file or attempt.
+				f.churn.count("", "db_update.lock_retry_exhausted", 1)
+				slog.Warn("Pull database update lock retries exhausted", f.LogAttr(), slog.Int("files", len(files)), slog.Int("retries", len(indexLockBackoff)), slogutil.Error(err))
+			}
 			return err
 		}
 		for _, file := range files {
