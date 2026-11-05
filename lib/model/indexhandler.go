@@ -465,7 +465,7 @@ func (s *indexHandler) receive(fs []protocol.FileInfo, update bool, op string, p
 	return nil
 }
 
-// indexLockBackoff is the retry schedule for an index-update batch that hit
+// indexLockBackoff is shared by index-update and pull-completion batches that hit
 // SQLite lock contention (SQLITE_BUSY past busy_timeout). An error here is
 // connection-fatal upstream — the protocol layer kills the device connection
 // on any index-update error — yet contention is transient by definition:
