@@ -134,8 +134,9 @@ type sendReceiveFolder struct {
 	blockPullReorderer blockPullReorderer
 	writeLimiter       *semaphore.Semaphore
 
-	tempPullErrors map[string]churnPullError // pull errors that might be just transient
-	retry          *pullRetryTracker
+	tempPullErrors    map[string]churnPullError // pull errors that might be just transient
+	retry             *pullRetryTracker
+	pullDBRetryPolicy *pullDBRetryPolicy // nil selects production clock/backoff
 }
 
 func newSendReceiveFolder(model *model, ignores *ignore.Matcher, cfg config.FolderConfiguration, ver versioner.Versioner, evLogger events.Logger, ioLimiter *semaphore.Semaphore) service {
@@ -306,7 +307,7 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 	var updateErr error
 	updateWg.Go(func() {
 		// dbUpdaterRoutine finishes when dbUpdateChan is closed
-		changed, updateErr = f.dbUpdaterRoutine(dbUpdateChan)
+		changed, updateErr = f.dbUpdaterRoutine(ctx, dbUpdateChan)
 	})
 
 	for range f.Copiers {
@@ -2239,7 +2240,7 @@ func (f *sendReceiveFolder) Jobs(page, perpage int) ([]string, []string, int) {
 // comment in fileinfobatch.go): commit cadence dominates WAL growth on
 // small-file pulls, and the timer bounds how long a pulled file sits
 // uncommitted (crash rework) and how late completion events fire.
-func (f *sendReceiveFolder) dbUpdaterRoutine(dbUpdateChan <-chan dbUpdateJob) (int, error) {
+func (f *sendReceiveFolder) dbUpdaterRoutine(ctx context.Context, dbUpdateChan <-chan dbUpdateJob) (int, error) {
 	const maxBatchTime = 5 * time.Second
 
 	changed := 0
@@ -2249,13 +2250,20 @@ func (f *sendReceiveFolder) dbUpdaterRoutine(dbUpdateChan <-chan dbUpdateJob) (i
 	var updateErr error
 	tick := time.NewTicker(maxBatchTime)
 	defer tick.Stop()
+	var observer pullDBObserver
+	defer observer.close()
 	batch := NewFileInfoBatchSized(dbUpdateBatchSizeFiles, dbUpdateBatchSizeBlocks, func(files []protocol.FileInfo) error {
 		f.flushPullDurability(changedDirs)
 		clear(changedDirs)
 
 		// All updates to file/folder objects that originated remotely
 		// (across the network) use this call to updateLocals
-		if err := f.updateLocalsFromPulling(files); err != nil {
+		// Disk already contains these versions. Keep the same batch alive
+		// through transient lock contention, rather than letting a later scan
+		// mistake our own installed bytes for a new local edit. Retry inside
+		// the callback: FileInfoBatch treats any returned error as terminal.
+		err := f.updatePullDBWithRetry(ctx, files, &observer)
+		if err != nil {
 			return err
 		}
 		for _, file := range files {
@@ -2270,9 +2278,16 @@ func (f *sendReceiveFolder) dbUpdaterRoutine(dbUpdateChan <-chan dbUpdateJob) (i
 		return nil
 	})
 
+	cancelled := ctx.Done()
 loop:
 	for {
 		select {
+		case <-cancelled:
+			// Stop DB work immediately but drain the bounded producer pipeline:
+			// several upstream sends intentionally are not cancellation-selects.
+			// Each installed regular file already has a durable intent.
+			updateErr = ctx.Err()
+			cancelled = nil
 		case job, ok := <-dbUpdateChan:
 			if !ok {
 				break loop

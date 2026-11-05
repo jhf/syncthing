@@ -7,6 +7,7 @@
 package db
 
 import (
+	"context"
 	"iter"
 	"time"
 
@@ -59,6 +60,7 @@ func WithSkipBlockIndex() UpdateOption {
 }
 
 type DB interface {
+	OpenDataVersionObserver(ctx context.Context, folder string) (DataVersionObserver, error)
 	// Create a service that performs database maintenance periodically (no
 	// more often than the requested interval)
 	Service(maintenanceInterval time.Duration) DBService
