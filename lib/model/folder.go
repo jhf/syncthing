@@ -873,6 +873,11 @@ func (f *folder) serviceRetryPull(ctx context.Context) error {
 }
 
 func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) error {
+	if recovery, ok := f.puller.(interface{ RecoverPendingInstalls(context.Context) error }); ok {
+		if err := recovery.RecoverPendingInstalls(ctx); err != nil {
+			return err
+		}
+	}
 	f.sl.DebugContext(ctx, "Scanning")
 	if subDirs == nil {
 		f.fullScanCount.Add(1)
@@ -2417,8 +2422,7 @@ func (f *folder) updateLocalsFromPulling(fs []protocol.FileInfo) error {
 	return nil
 }
 
-func (f *folder) updateLocals(fs []protocol.FileInfo) error {
-	var opts []db.UpdateOption
+func (f *folder) updateLocals(fs []protocol.FileInfo, opts ...db.UpdateOption) error {
 	if !f.BlockIndexing {
 		opts = append(opts, db.WithSkipBlockIndex())
 	}

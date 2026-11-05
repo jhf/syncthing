@@ -24,13 +24,14 @@ type FlagLocal uint32
 
 // FileInfo.LocalFlags flags
 const (
-	FlagLocalUnsupported   FlagLocal = 1 << 0 // 1: The kind is unsupported, e.g. symlinks on Windows
-	FlagLocalIgnored       FlagLocal = 1 << 1 // 2: Matches local ignore patterns
-	FlagLocalMustRescan    FlagLocal = 1 << 2 // 4: Doesn't match content on disk, must be rechecked fully
-	FlagLocalReceiveOnly   FlagLocal = 1 << 3 // 8: Change detected on receive only folder
-	FlagLocalGlobal        FlagLocal = 1 << 4 // 16: This is the global file version
-	FlagLocalNeeded        FlagLocal = 1 << 5 // 32: We need this file
-	FlagLocalRemoteInvalid FlagLocal = 1 << 6 // 64: The remote marked this as invalid
+	FlagLocalUnsupported    FlagLocal = 1 << 0 // 1: The kind is unsupported, e.g. symlinks on Windows
+	FlagLocalIgnored        FlagLocal = 1 << 1 // 2: Matches local ignore patterns
+	FlagLocalMustRescan     FlagLocal = 1 << 2 // 4: Doesn't match content on disk, must be rechecked fully
+	FlagLocalReceiveOnly    FlagLocal = 1 << 3 // 8: Change detected on receive only folder
+	FlagLocalGlobal         FlagLocal = 1 << 4 // 16: This is the global file version
+	FlagLocalNeeded         FlagLocal = 1 << 5 // 32: We need this file
+	FlagLocalRemoteInvalid  FlagLocal = 1 << 6 // 64: The remote marked this as invalid
+	FlagLocalInstallPending FlagLocal = 1 << 7 // Durable index entry awaiting temp publication
 
 	// Flags that should result in the Invalid bit on outgoing updates (or had it on ingoing ones)
 	LocalInvalidFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalMustRescan | FlagLocalReceiveOnly | FlagLocalRemoteInvalid
@@ -40,19 +41,20 @@ const (
 	// disk.
 	LocalConflictFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalReceiveOnly
 
-	LocalAllFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalMustRescan | FlagLocalReceiveOnly | FlagLocalGlobal | FlagLocalNeeded | FlagLocalRemoteInvalid
+	LocalAllFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalMustRescan | FlagLocalReceiveOnly | FlagLocalGlobal | FlagLocalNeeded | FlagLocalRemoteInvalid | FlagLocalInstallPending
 )
 
 // localFlagBitNames maps flag values to characters which can be used to
 // build a permission-like bit string for easier reading.
 var localFlagBitNames = map[FlagLocal]string{
-	FlagLocalUnsupported:   "u",
-	FlagLocalIgnored:       "i",
-	FlagLocalMustRescan:    "r",
-	FlagLocalReceiveOnly:   "e",
-	FlagLocalGlobal:        "G",
-	FlagLocalNeeded:        "n",
-	FlagLocalRemoteInvalid: "v",
+	FlagLocalUnsupported:    "u",
+	FlagLocalIgnored:        "i",
+	FlagLocalMustRescan:     "r",
+	FlagLocalReceiveOnly:    "e",
+	FlagLocalGlobal:         "G",
+	FlagLocalNeeded:         "n",
+	FlagLocalRemoteInvalid:  "v",
+	FlagLocalInstallPending: "p",
 }
 
 func (f FlagLocal) IsInvalid() bool {

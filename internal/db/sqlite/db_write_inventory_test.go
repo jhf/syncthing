@@ -45,6 +45,7 @@ var sqlBoundaryNames = map[string]bool{
 	"stmt": true, "runScripts": true, "vacuumAndOptimize": true, "expandTemplateVars": true,
 	"recalcNeedForFile": true, "periodicCheckpointLocked": true,
 	"deviceIdxLocked": true, "folderIdxLocked": true,
+	"pullCommitConnectionLocked": true,
 	"garbageCollectNamesAndVersions": true, "garbageCollectOldDeletedLocked": true,
 	"recalcGlobalForFile": true, "recalcGlobalForFolder": true,
 	"insertBlocksLocked": true, "resetNeedTracking": true, "backfillNeedForDevice": true,

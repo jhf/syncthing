@@ -95,7 +95,7 @@ func TestPostPullScanTimestampPrecision(t *testing.T) {
 					if job.jobType != dbUpdateHandleFile || !job.file.Version.Equal(remote.Version) || len(scans) != 0 {
 						t.Fatal("unexpected finish completion or scan request")
 					}
-					must(t, f.updateLocalsFromPulling([]protocol.FileInfo{job.file}))
+					commitQueuedFinishForTest(t, f, job)
 					current := func() protocol.FileInfo {
 						t.Helper()
 						fi, ok, err := f.db.GetDeviceFile(f.folderID, protocol.LocalDeviceID, name)
