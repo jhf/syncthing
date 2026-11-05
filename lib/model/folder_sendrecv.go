@@ -21,7 +21,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/syncthing/syncthing/internal/itererr"
 	"github.com/syncthing/syncthing/internal/slogutil"
@@ -1382,6 +1384,7 @@ func (f *sendReceiveFolder) deleteFileWithCurrent(file, cur protocol.FileInfo, h
 
 	if err == nil || fs.IsNotExist(err) {
 		// It was removed or it doesn't exist to start with
+		err = nil
 		dbUpdateChan <- dbUpdateJob{file, dbUpdateDeleteFile}
 		return
 	}
@@ -1394,8 +1397,6 @@ func (f *sendReceiveFolder) deleteFileWithCurrent(file, cur protocol.FileInfo, h
 		err = nil
 		dbUpdateChan <- dbUpdateJob{file, dbUpdateDeleteFile}
 	}
-
-	slog.Info("Deleted file", f.LogAttr(), file.LogAttr())
 }
 
 // renameFile attempts to rename an existing file to a destination
@@ -2378,8 +2379,15 @@ func (f *sendReceiveFolder) moveForConflict(name, lastModBy string, scanChan cha
 	}
 
 	metricFolderConflictsTotal.WithLabelValues(f.ID).Inc()
-	newName := conflictName(name, lastModBy)
+	suffix := time.Now().Format(".sync-conflict-20060102-150405-") + lastModBy
+	newName := conflictNameWithSuffix(name, suffix, conflictHashed)
 	err := f.mtimefs.Rename(name, newName)
+	if conflictNameTooLong(err) {
+		// caseFilesystem can return the destination Lstat error before Rename.
+		// Preserve the same timestamp and retry exactly once, never loop.
+		newName = conflictNameWithSuffix(name, suffix, conflictHashOnly)
+		err = f.mtimefs.Rename(name, newName)
+	}
 	if fs.IsNotExist(err) {
 		// We were supposed to move a file away but it does not exist. Either
 		// the user has already moved it away, or the conflict was between a
@@ -2391,6 +2399,11 @@ func (f *sendReceiveFolder) moveForConflict(name, lastModBy string, scanChan cha
 		matches := existingConflicts(name, f.mtimefs)
 		if len(matches) > f.MaxConflicts {
 			slices.SortFunc(matches, func(a, b string) int {
+				// Prefixes differ between legacy, shortened and hash-only copies.
+				// Retain the newest timestamp, not the lexically largest prefix.
+				if cmp := strings.Compare(b[strings.LastIndex(b, ".sync-conflict-"):], a[strings.LastIndex(a, ".sync-conflict-"):]); cmp != 0 {
+					return cmp
+				}
 				return strings.Compare(b, a)
 			})
 			for _, match := range matches[f.MaxConflicts:] {
@@ -2735,19 +2748,96 @@ type FileError struct {
 }
 
 func conflictName(name, lastModBy string) string {
-	ext := filepath.Ext(name)
-	return name[:len(name)-len(ext)] + time.Now().Format(".sync-conflict-20060102-150405-") + lastModBy + ext
+	return conflictNameWithSuffix(name, time.Now().Format(".sync-conflict-20060102-150405-")+lastModBy, conflictHashed)
+}
+
+const (
+	conflictHashed = iota
+	conflictHashOnly
+	// Conservative encrypted-filesystem budget, not a universal NAME_MAX.
+	// EncFS block filename encoding documents a 143-byte limit with a
+	// 255-byte backing filesystem. A failed retry is returned to the caller.
+	conflictFallbackLimit = 143
+)
+
+func conflictNameTooLong(err error) bool {
+	return errors.Is(err, syscall.ENAMETOOLONG) || conflictWindowsNameTooLong(err)
+}
+
+func conflictNameWithSuffix(name, suffix string, mode int) string {
+	dir, base := filepath.Split(name)
+	ext := filepath.Ext(base)
+	stem := base[:len(base)-len(ext)]
+	limit := 255
+	identity := ""
+	if mode == conflictHashOnly {
+		limit = conflictFallbackLimit
+		identity = fmt.Sprintf("~%x", sha256.Sum256([]byte(base)))[:17]
+		stem = ""
+	} else if mode == conflictHashed && len(base)+len(suffix) > limit {
+		identity = fmt.Sprintf("~%x", sha256.Sum256([]byte(base)))[:9]
+	}
+	// Budget the identity and entire suffix before either stem or extension.
+	if len(ext) > limit-len(identity)-len(suffix) {
+		stem = ""
+	}
+	ext = conflictPrefix(ext, limit-len(identity)-len(suffix))
+	stem = conflictPrefix(stem, limit-len(identity)-len(suffix)-len(ext))
+	return dir + stem + identity + suffix + ext
+}
+
+// conflictPrefix cuts at a UTF-8 character boundary within the byte budget.
+func conflictPrefix(s string, budget int) string {
+	if len(s) <= budget {
+		return s
+	}
+	cut := max(0, budget)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func isConflict(name string) bool {
 	return strings.Contains(filepath.Base(name), ".sync-conflict-")
 }
 
-func existingConflicts(name string, fs fs.Filesystem) []string {
-	ext := filepath.Ext(name)
-	matches, err := fs.Glob(name[:len(name)-len(ext)] + ".sync-conflict-????????-??????*" + ext)
+func existingConflicts(name string, filesystem fs.Filesystem) []string {
+	name = filepath.Clean(name)
+	dir := filepath.Dir(name)
+	names, err := filesystem.DirNames(dir)
 	if err != nil {
-		slog.Debug("Globbing for conflicts failed", slogutil.Error(err))
+		slog.Debug("Listing conflicts failed", slogutil.Error(err))
+		return nil
+	}
+	var matches []string
+	for _, candidate := range names {
+		idx := strings.LastIndex(candidate, ".sync-conflict-")
+		if idx < 0 {
+			continue
+		}
+		tail := candidate[idx:]
+		const timestampEnd = len(".sync-conflict-20060102-150405-")
+		if len(tail) < timestampEnd || tail[timestampEnd-1] != '-' {
+			continue
+		}
+		if _, err := time.Parse(".sync-conflict-20060102-150405-", tail[:timestampEnd]); err != nil {
+			continue
+		}
+		path := filepath.Join(dir, candidate)
+		for _, idLen := range []int{protocol.ShortIDStringLength, 0} {
+			if len(tail) < timestampEnd+idLen {
+				continue
+			}
+			suffix := tail[:timestampEnd+idLen]
+			ext := filepath.Ext(name)
+			legacy := name[:len(name)-len(ext)] + suffix + ext
+			if path == legacy || path == conflictNameWithSuffix(name, suffix, conflictHashed) ||
+				path == conflictNameWithSuffix(name, suffix, conflictHashOnly) {
+				matches = append(matches, path)
+				break
+			}
+		}
 	}
 	return matches
 }
