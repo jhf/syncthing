@@ -113,14 +113,18 @@ func (o *pullDBObserver) sample(ctx context.Context, s *pullDBRetryState) string
 	return s.heartbeat(version, err)
 }
 
-func (f *sendReceiveFolder) updatePullDBWithRetry(ctx context.Context, files []protocol.FileInfo, observer *pullDBObserver) error {
+func (f *sendReceiveFolder) updatePullDBWithRetry(ctx context.Context, files []protocol.FileInfo, observer *pullDBObserver, durable bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	p := f.pullDBPolicy()
 	started := p.now()
 	state := pullDBRetryState{delay: p.initial, maximum: p.maximum, started: started, nextWarning: started.Add(p.warningInterval), attempts: 1}
-	err := f.updateLocalsFromPulling(files)
+	var opts []db.UpdateOption
+	if durable {
+		opts = append(opts, db.WithDurable())
+	}
+	err := f.updateLocals(files, opts...)
 	if err == nil || !db.IsLockContention(err) {
 		return err
 	}
@@ -161,7 +165,7 @@ func (f *sendReceiveFolder) updatePullDBWithRetry(ctx context.Context, files []p
 			return err
 		}
 		state.attempted()
-		err = f.updateLocalsFromPulling(files)
+		err = f.updateLocals(files, opts...)
 		if err == nil || !db.IsLockContention(err) {
 			return err
 		}
