@@ -5,6 +5,25 @@ No production changes, fix, push, or installed receiver file edits.
 
 ## Findings
 
+### Receiver-only invariant and incident fixtures
+
+The user confirmed on 2026-11-05 at 22:25 UTC that **NOTHING but Syncthing
+writes to the synced folder on yarlung**, by design. In particular `.hermes/*`
+and `ssb/statbus/*` are written only on the Mac. Thus a receiver-side counter
+(device WFF4CNJ) on these sender files is minted by Syncthing itself, never a
+legitimate concurrent local edit. This invariant is why the receiver authorship
+asserted here is a bug even when the predecessor-hash shortcut avoids a copy.
+
+Both named fixture paths run both predecessor-hash cases (four leaf subtests):
+
+- `.hermes/gateway_state.json`: live 2026-11-05 case, pulled 21:32:55, DB batch
+  failed 21:33:51, receiver counter `WFF4CNJ:1793916777` minted 22:12:57 on
+  Syncthing's own write, as supplied in the incident report.
+- `ssb/jsonb_stats/src/lib.rs`: the 2026-11-03 conflict-copy case.
+
+These paths identify the real cases. Test payloads, device IDs and counters
+remain synthetic, and no incident timing or exact-vector replay is claimed.
+
 `TestPullDBBusyRescanCreatesFalseConflict` in
 `lib/model/folder_sendrecv_dbbusy_test.go` passes against the current bug with
 both `previous_hash_matches_S1=false` and `previous_hash_matches_S1=true`.
@@ -89,4 +108,29 @@ ok  	github.com/syncthing/syncthing/internal/db/sqlite	6.108s
 
 $ go test -race ./lib/model -run '^TestPullDBBusyRescanCreatesFalseConflict$' -count=20
 ok  	github.com/syncthing/syncthing/lib/model	2.672s
+```
+
+### Follow-up: confirmed invariant and both incident paths
+
+The initial results above are from `7dfc38d11`, before expanding to four leaf
+subtests. After adding the user-confirmed invariant and both named fixtures,
+all required validation was rerun. Logs: `tmp/patch58/fixtures-targeted.log`,
+`fixtures-full.log`, and `fixtures-race.log`. Verbatim results:
+
+```text
+$ go test ./lib/model -run '^TestPullDBBusyRescanCreatesFalseConflict$' -count=1 -v
+--- PASS: TestPullDBBusyRescanCreatesFalseConflict (0.06s)
+    --- PASS: TestPullDBBusyRescanCreatesFalseConflict/.hermes/gateway_state.json/previous_hash_matches_S1=false (0.02s)
+    --- PASS: TestPullDBBusyRescanCreatesFalseConflict/.hermes/gateway_state.json/previous_hash_matches_S1=true (0.01s)
+    --- PASS: TestPullDBBusyRescanCreatesFalseConflict/ssb/jsonb_stats/src/lib.rs/previous_hash_matches_S1=false (0.02s)
+    --- PASS: TestPullDBBusyRescanCreatesFalseConflict/ssb/jsonb_stats/src/lib.rs/previous_hash_matches_S1=true (0.02s)
+PASS
+ok  	github.com/syncthing/syncthing/lib/model	0.655s
+
+$ go test ./lib/model ./internal/db/sqlite -count=1
+ok  	github.com/syncthing/syncthing/lib/model	67.777s
+ok  	github.com/syncthing/syncthing/internal/db/sqlite	5.708s
+
+$ go test -race ./lib/model -run '^TestPullDBBusyRescanCreatesFalseConflict$' -count=20
+ok  	github.com/syncthing/syncthing/lib/model	3.808s
 ```
