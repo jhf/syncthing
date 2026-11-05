@@ -34,8 +34,17 @@ func unexportedField[T any](v reflect.Value) *T {
 
 type inflightScanDB struct {
 	db.DB
-	generated chan protocol.FileInfo
-	resume    chan struct{}
+	generated    chan protocol.FileInfo
+	resume       chan struct{}
+	pendingRead  chan struct{}
+	continueScan chan struct{}
+}
+
+func (d *inflightScanDB) PendingInstalls(folder string) ([]protocol.FileInfo, error) {
+	files, err := d.DB.PendingInstalls(folder)
+	close(d.pendingRead)
+	<-d.continueScan
+	return files, err
 }
 
 func (d *inflightScanDB) Update(folder string, device protocol.DeviceID, files []protocol.FileInfo, opts ...db.UpdateOption) error {
@@ -129,7 +138,7 @@ func TestPostPullScanDuringMtimeFlushKeepsSenderVersion(t *testing.T) {
 	temp := fs.TempName(name)
 	writeFile(t, f.mtimefs, temp, oldContent)
 	must(t, f.performFinish(v1, protocol.FileInfo{}, false, temp, jobs, scans))
-	must(t, f.updateLocalsFromPulling([]protocol.FileInfo{(<-jobs).file}))
+	commitQueuedFinishForTest(t, f, <-jobs)
 	if !current(name).Version.Equal(v1.Version) {
 		t.Fatal("pull changed sender vector")
 	}
@@ -142,9 +151,27 @@ func TestPostPullScanDuringMtimeFlushKeepsSenderVersion(t *testing.T) {
 	if !disk.Equal(raw.ModTime()) || !virtual.Equal(stamp) {
 		t.Fatal("pull did not create required mapping")
 	}
+	// Let the real pending-install precheck finish before starting the advisory
+	// mtime flush. Its new updateLock scope otherwise blocks this intentionally
+	// in-flight scan before it can exercise the older mapping visibility race.
+	originalDB := f.db
+	probe := &inflightScanDB{DB: originalDB, generated: make(chan protocol.FileInfo, 1), resume: make(chan struct{}), pendingRead: make(chan struct{}), continueScan: make(chan struct{})}
+	f.db = probe
+	scanDone := make(chan error, 1)
+	go func() { scanDone <- f.scanSubdirs(t.Context(), []string{name}) }()
+	allowWalk := sync.OnceFunc(func() { close(probe.continueScan) })
+	resume := sync.OnceFunc(func() { close(probe.resume) })
+	release := func() {}
+	defer func() { release(); allowWalk(); resume(); <-scanDone; f.db = originalDB }()
+	select {
+	case <-probe.pendingRead:
+	case <-time.After(5 * time.Second):
+		t.Fatal("scanner did not finish pending-install precheck")
+	}
+
 	lock := unexportedField[sync.Mutex](folderDB.FieldByName("updateLock"))
 	lock.Lock()
-	release := sync.OnceFunc(lock.Unlock)
+	release = sync.OnceFunc(lock.Unlock)
 	defer release()
 	batchMut.Lock()
 	pending := batch.FieldByName("pending").Len()
@@ -189,13 +216,7 @@ func TestPostPullScanDuringMtimeFlushKeepsSenderVersion(t *testing.T) {
 	// without writing: before the batcher kept in-flight batches visible it
 	// saw the physical whole-second timestamp here and minted a receiver
 	// version of the unchanged sender bytes.
-	originalDB := f.db
-	probe := &inflightScanDB{DB: originalDB, generated: make(chan protocol.FileInfo, 1), resume: make(chan struct{})}
-	f.db = probe
-	scanDone := make(chan error, 1)
-	go func() { scanDone <- f.scanSubdirs(t.Context(), []string{name}) }()
-	resume := sync.OnceFunc(func() { close(probe.resume) })
-	defer func() { release(); resume(); <-scanDone; f.db = originalDB }()
+	allowWalk()
 	select {
 	case generated := <-probe.generated:
 		resume()
@@ -226,7 +247,7 @@ func TestPostPullScanDuringMtimeFlushKeepsSenderVersion(t *testing.T) {
 	}
 	writeFile(t, f.mtimefs, temp, newContent)
 	must(t, f.performFinish(v4, cur, true, temp, jobs, scans))
-	must(t, f.updateLocalsFromPulling([]protocol.FileInfo{(<-jobs).file}))
+	commitQueuedFinishForTest(t, f, <-jobs)
 	if !bytes.Equal(read(name), newContent) || !current(name).Version.Equal(v4.Version) {
 		t.Fatal("sender v4 not installed")
 	}
