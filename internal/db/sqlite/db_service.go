@@ -8,6 +8,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
@@ -38,6 +39,21 @@ var gcRetiredBatchSize = 10_000
 // gcRetiredBatchHook, when set, runs between retired-GC batches with
 // updateLock released. Tests only.
 var gcRetiredBatchHook func()
+
+// gcLiveHoldTarget is how long one live-table GC chunk may hold updateLock.
+// It is the same quantum a scan chunk holds the folder's Serve loop
+// (lib/model scanChunkBudget): a writer queued behind GC waits at most about
+// this long. The key span of a chunk adapts to it from the measured cost of
+// the previous chunk. A var so tests can force one-key chunks.
+var gcLiveHoldTarget = 250 * time.Millisecond
+
+// gcLiveSpanStart is the key span of the first live-table GC chunk; later
+// chunks adapt. A var so tests can force one-key chunks.
+var gcLiveSpanStart int64 = 4096
+
+// gcLiveChunkHook, when set, runs between live-table GC chunks with
+// updateLock released. Tests only.
+var gcLiveChunkHook func()
 
 // gcMaxRuntime is the max time to spend on gc, per table, per run. It is a var
 // rather than a const so tests can force the interrupted path.
@@ -132,8 +148,7 @@ func (s *Service) periodic(ctx context.Context) error {
 	t1 := time.Now()
 	defer func() { slog.DebugContext(ctx, "Periodic done in", "t1", time.Since(t1), "t0t1", t1.Sub(t0)) }()
 
-	// tidy needs no lock; see the folder-GC tidy call below.
-	if err := tidy(ctx, s.sdb.sql); err != nil {
+	if err := tidy(ctx, s.sdb.baseDB); err != nil {
 		return err
 	}
 
@@ -160,18 +175,12 @@ func (s *Service) periodic(ctx context.Context) error {
 			}
 		}
 
-		// Run the GC steps, in a function to be able to use a deferred
-		// unlock. Only the live-table steps need updateLock; the blocklist
-		// GC releases it internally per chunk/batch.
-		if err := func() error {
-			fdb.updateLock.Lock()
-			defer fdb.updateLock.Unlock()
-
-			if err := garbageCollectOldDeletedLocked(ctx, fdb); err != nil {
-				return wrap(err)
-			}
-			return garbageCollectNamesAndVersions(ctx, fdb)
-		}(); err != nil {
+		// Every GC step takes updateLock per bounded chunk and releases it
+		// between chunks, checking ctx there.
+		if err := garbageCollectOldDeleted(ctx, fdb); err != nil {
+			return wrap(err)
+		}
+		if err := garbageCollectNamesAndVersions(ctx, fdb); err != nil {
 			return wrap(err)
 		}
 
@@ -179,11 +188,8 @@ func (s *Service) periodic(ctx context.Context) error {
 			return wrap(err)
 		}
 
-		// tidy runs unlocked: ANALYZE on a multi-million-row folder takes
-		// many minutes, and holding updateLock across it wedges every
-		// Update behind it (observed live on yarlung 2026-10-13 as a ~10
-		// minute stall that parked a connection dispatcher).
-		if err := tidy(ctx, fdb.sql); err != nil {
+		// Maintenance yields updateLock between bounded statements.
+		if err := tidy(ctx, fdb.baseDB); err != nil {
 			return wrap(err)
 		}
 
@@ -192,49 +198,181 @@ func (s *Service) periodic(ctx context.Context) error {
 	}))
 }
 
-func tidy(ctx context.Context, db *sqlx.DB) error {
-	conn, err := db.Conn(ctx)
+const tidyVacuumPages = 64
+
+// Work limits bound SQLite work, not elapsed time on stalled storage.
+func tidy(ctx context.Context, db *baseDB) error {
+	conn, err := db.sql.Conn(ctx)
 	if err != nil {
 		return wrap(err)
 	}
 	defer conn.Close()
-	_, _ = conn.ExecContext(ctx, `ANALYZE`)
-	_, _ = conn.ExecContext(ctx, `PRAGMA optimize`)
-	_, _ = conn.ExecContext(ctx, `PRAGMA incremental_vacuum`)
-	_, _ = conn.ExecContext(ctx, `PRAGMA journal_size_limit = 8388608`)
-	_, _ = conn.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
-	return nil
+
+	step := func(stmt string, scan func(*sql.Rows) ([]any, error)) error {
+		db.updateLock.Lock()
+		start := time.Now()
+		rows, err := conn.QueryContext(ctx, stmt)
+		count := 0
+		var values []any
+		if err == nil {
+			for rows.Next() {
+				count++
+				if scan != nil {
+					if values, err = scan(rows); err != nil {
+						break
+					}
+				} else {
+					cols, _ := rows.Columns()
+					values = make([]any, len(cols))
+					ptrs := make([]any, len(cols))
+					for i := range ptrs {
+						ptrs[i] = &values[i]
+					}
+					if err = rows.Scan(ptrs...); err != nil {
+						break
+					}
+				}
+			}
+			if err == nil {
+				err = rows.Err()
+			}
+			if closeErr := rows.Close(); err == nil {
+				err = closeErr
+			}
+		}
+		duration := time.Since(start)
+		db.updateLock.Unlock()
+		slog.InfoContext(ctx, "Database tidy statement", "db", db.path, "statement", stmt, "duration", duration, "rows", count, "result", values, "error", err)
+		return wrap(err)
+	}
+
+	// Statistics are refreshed only by PRAGMA optimize, under a hard time
+	// budget. Full per-table ANALYZE moved to the offline maintenance
+	// restart (analyzeOffline, db_analyze.go): on yarlung's 10 GB HDD folder
+	// DB, ANALYZE "blocks" (4M rows, WITHOUT ROWID) walked the whole table
+	// despite analysis_limit and held updateLock for 7m48s (2026-11-06 15:00
+	// UTC), stalling Update and index handling into connection resets.
+	// optimize re-analyzes only tables whose row count drifted materially;
+	// statistics are rarely stale here. analysis_limit is per connection.
+	if err := step(`PRAGMA analysis_limit = 1000`, nil); err != nil {
+		return err
+	}
+	if err := tidyBudgetedStep(ctx, db, conn, `PRAGMA optimize`, tidyOptimizeBudget); err != nil {
+		return err
+	}
+	freePages := 0
+	readFree := func() error {
+		return step(`PRAGMA freelist_count`, func(rows *sql.Rows) ([]any, error) {
+			err := rows.Scan(&freePages)
+			return []any{freePages}, err
+		})
+	}
+	if err := readFree(); err != nil {
+		return err
+	}
+	// Cap this run at its initial freelist, even if concurrent Updates free
+	// more pages. Stop if auto_vacuum is off or a batch makes no progress.
+	for budget := freePages; budget > 0; budget -= tidyVacuumPages {
+		before := freePages
+		if err := step(`PRAGMA incremental_vacuum(64)`, nil); err != nil {
+			return err
+		}
+		if err := readFree(); err != nil {
+			return err
+		}
+		if freePages == 0 || freePages >= before {
+			break
+		}
+	}
+	if err := step(`PRAGMA journal_size_limit = 8388608`, nil); err != nil {
+		return err
+	}
+	// TRUNCATE can wait on a pinned reader whose consumer is waiting for
+	// Update and hence this mutex. PASSIVE never waits for readers/writers.
+	// Its result reports busy, WAL pages and checkpointed pages in the log.
+	return step(`PRAGMA wal_checkpoint(PASSIVE)`, nil)
 }
 
 func garbageCollectNamesAndVersions(ctx context.Context, fdb *folderDB) error {
 	l := slog.With("folder", fdb.folderID, "fdb", fdb.baseName)
 
-	res, err := fdb.stmt(`
-		DELETE FROM file_names
-		WHERE NOT EXISTS (SELECT 1 FROM files f WHERE f.name_idx = idx)
-	`).Exec()
-	if err != nil {
-		return wrap(err, "delete names")
+	for _, t := range []struct{ table, column string }{
+		{"file_names", "name_idx"},
+		{"file_versions", "version_idx"},
+	} {
+		var affected int64
+		err := gcLiveChunks(ctx, fdb, `SELECT COALESCE(MAX(idx), 0) FROM `+t.table, func(lo, hi int64) (int64, error) {
+			res, err := fdb.sql.ExecContext(ctx, `
+				DELETE FROM `+t.table+`
+				WHERE idx >= ? AND idx < ?
+					AND NOT EXISTS (SELECT 1 FROM files f WHERE f.`+t.column+` = `+t.table+`.idx)
+			`, lo, hi)
+			if err != nil {
+				return 0, err
+			}
+			n, err := res.RowsAffected()
+			affected += n
+			return n, err
+		})
+		if err != nil {
+			return wrap(err, "delete "+t.table)
+		}
+		l.DebugContext(ctx, "Removed unreferenced rows", "table", t.table, "affected", affected)
 	}
-	if aff, err := res.RowsAffected(); err == nil {
-		l.DebugContext(ctx, "Removed old file names", "affected", aff)
-	}
-
-	res, err = fdb.stmt(`
-		DELETE FROM file_versions
-		WHERE NOT EXISTS (SELECT 1 FROM files f WHERE f.version_idx = idx)
-	`).Exec()
-	if err != nil {
-		return wrap(err, "delete versions")
-	}
-	if aff, err := res.RowsAffected(); err == nil {
-		l.DebugContext(ctx, "Removed old file versions", "affected", aff)
-	}
-
 	return nil
 }
 
-func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB) error {
+// gcLiveChunks runs fn over [lo, hi) key spans of a live table, up to the
+// maximum key the query returns at the start, holding updateLock for one span
+// at a time. Rows added later have higher keys and wait for the next run.
+// Before this, the deleted-file and name/version GC each held updateLock
+// for one statement over the whole table: on yarlung (2026-11-26, 18.8M
+// files rows, 12.9M names) a run held it for over 30 min, with the folder's
+// Serve loop and the index receiver queued behind it, and a stop in that
+// window overran its budget because the statements ignored ctx.
+//
+// The span adapts to gcLiveHoldTarget from the measured hold of the previous
+// span: it doubles while a span holds the lock for under half the target and
+// halves when one exceeds it. fn returns the number of rows it changed.
+func gcLiveChunks(ctx context.Context, fdb *folderDB, maxKeyQuery string, fn func(lo, hi int64) (int64, error)) error {
+	var maxKey int64
+	if err := fdb.sql.GetContext(ctx, &maxKey, maxKeyQuery); err != nil {
+		return err
+	}
+	span := max(gcLiveSpanStart, 1)
+	for lo := int64(0); lo <= maxKey; {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		hi := lo + span
+		fdb.updateLock.Lock()
+		t0 := time.Now()
+		n, err := fn(lo, hi)
+		if err == nil && n > 0 {
+			// Readers between chunks must not see need counts cached from
+			// before the rows this chunk dropped.
+			fdb.invalidateNeedCounts()
+		}
+		held := time.Since(t0)
+		fdb.updateLock.Unlock()
+		if err != nil {
+			return err
+		}
+		if gcLiveChunkHook != nil {
+			gcLiveChunkHook()
+		}
+		lo = hi
+		switch {
+		case held > gcLiveHoldTarget:
+			span = max(span/2, 1)
+		case held < gcLiveHoldTarget/2:
+			span *= 2
+		}
+	}
+	return nil
+}
+
+func garbageCollectOldDeleted(ctx context.Context, fdb *folderDB) error {
 	l := slog.With("folder", fdb.folderID, "fdb", fdb.baseName)
 	if fdb.deleteRetention <= 0 {
 		slog.DebugContext(ctx, "Delete retention is infinite, skipping cleanup")
@@ -248,73 +386,87 @@ func garbageCollectOldDeletedLocked(ctx context.Context, fdb *folderDB) error {
 	// Remove deleted files that are marked as not needed (we have processed
 	// them) and they were deleted more than MaxDeletedFileAge ago.
 	// Keep the local high-water mark reachable by the index sender.
-	// Dropping rows can change what a device is counted as needing.
-	defer fdb.invalidateNeedCounts()
 	l.DebugContext(ctx, "Forgetting deleted files", "retention", fdb.deleteRetention)
 	cutoff := time.Now().Add(-fdb.deleteRetention).UnixNano()
+	var affected int64
+	err := gcLiveChunks(ctx, fdb, `SELECT COALESCE(MAX(sequence), 0) FROM files`, func(lo, hi int64) (int64, error) {
+		n, err := garbageCollectOldDeletedSpan(ctx, fdb, recvEncModified, cutoff, lo, hi)
+		affected += n
+		return n, err
+	})
+	if err != nil {
+		return err
+	}
+	l.DebugContext(ctx, "Removed old deleted file records", "affected", affected)
+	return nil
+}
+
+// garbageCollectOldDeletedSpan drops the old deleted rows with a sequence in
+// [lo, hi). The caller holds updateLock; this must not take it again
+// (sync.Mutex is not reentrant: a re-lock self-deadlocks the GC service and
+// wedges every later Update, observed live as a phantom connection whose
+// dispatcherLoop blocked in Update forever).
+func garbageCollectOldDeletedSpan(ctx context.Context, fdb *folderDB, recvEncModified time.Duration, cutoff, lo, hi int64) (int64, error) {
 	if !fdb.needBuilt.Load() {
-		res, err := fdb.stmt(`
+		res, err := fdb.sql.ExecContext(ctx, fdb.expandTemplateVars(`
 			DELETE FROM files
-			WHERE deleted
+			WHERE sequence >= ? AND sequence < ?
+				AND deleted
 				AND modified != ?
 				AND modified < ?
 				AND local_flags & {{.FlagLocalNeeded}} == 0
 				AND sequence NOT IN (
 					SELECT sequence FROM indexids WHERE device_idx = {{.LocalDeviceIdx}}
 				)
-		`).Exec(recvEncModified, cutoff)
+		`), lo, hi, recvEncModified, cutoff)
 		if err != nil {
-			return wrap(err)
+			return 0, err
 		}
-		if aff, err := res.RowsAffected(); err == nil {
-			l.DebugContext(ctx, "Removed old deleted file records", "affected", aff)
-		}
-		return nil
+		return res.RowsAffected()
 	}
 
 	// With the need tables maintained, dropping rows must be followed by a
 	// per-name recalc: the dropped row may have carried the global flag or
 	// been the row that satisfied a device's need. Receive-encrypted rows
 	// (fixed sentinel timestamp) and rows still referenced by the index
-	// sender's high-water mark are never dropped. The caller already holds
-	// updateLock (hence the Locked suffix): re-taking it here self-deadlocks
-	// the GC service and wedges every later Update, which was observed live
-	// as a phantom connection whose dispatcherLoop blocked in Update forever.
+	// sender's high-water mark are never dropped.
 	tx, err := fdb.sql.BeginTxx(ctx, nil)
 	if err != nil {
-		return wrap(err)
+		return 0, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 	txp := &txPreparedStmts{Tx: tx}
 	var names []string
-	if err := txp.Select(&names, `
+	if err := txp.SelectContext(ctx, &names, `
 		SELECT DISTINCT n.name FROM files f
 		INNER JOIN file_names n ON n.idx = f.name_idx
-		WHERE f.deleted AND f.modified != ? AND f.modified < ? AND f.local_flags & ? = 0
+		WHERE f.sequence >= ? AND f.sequence < ?
+			AND f.deleted AND f.modified != ? AND f.modified < ? AND f.local_flags & ? = 0
 			AND f.sequence NOT IN (SELECT sequence FROM indexids WHERE device_idx = ?)
-	`, recvEncModified, cutoff, protocol.FlagLocalNeeded, fdb.localDeviceIdx); err != nil {
-		return wrap(err)
+	`, lo, hi, recvEncModified, cutoff, protocol.FlagLocalNeeded, fdb.localDeviceIdx); err != nil {
+		return 0, err
 	}
-	res, err := txp.Exec(`
+	if len(names) == 0 {
+		return 0, nil
+	}
+	res, err := txp.ExecContext(ctx, `
 		DELETE FROM files
-		WHERE deleted AND modified != ? AND modified < ? AND local_flags & ? = 0
+		WHERE sequence >= ? AND sequence < ?
+			AND deleted AND modified != ? AND modified < ? AND local_flags & ? = 0
 			AND sequence NOT IN (SELECT sequence FROM indexids WHERE device_idx = ?)
-	`, recvEncModified, cutoff, protocol.FlagLocalNeeded, fdb.localDeviceIdx)
+	`, lo, hi, recvEncModified, cutoff, protocol.FlagLocalNeeded, fdb.localDeviceIdx)
 	if err != nil {
-		return wrap(err)
+		return 0, err
 	}
 	for _, name := range names {
 		if err := fdb.recalcGlobalForFile(txp, name); err != nil {
-			return wrap(err)
+			return 0, err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return wrap(err)
+	if err := txp.Commit(); err != nil {
+		return 0, err
 	}
-	if aff, err := res.RowsAffected(); err == nil {
-		l.DebugContext(ctx, "Removed old deleted file records", "affected", aff)
-	}
-	return nil
+	return res.RowsAffected()
 }
 
 // garbageCollectBlocklistsAndBlocks removes blocklists and blocks not
