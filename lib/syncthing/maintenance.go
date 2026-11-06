@@ -151,11 +151,23 @@ func (a *App) maintenanceEval(dir string, now time.Time) {
 			due = append(due, db)
 		}
 	}
-	if len(due) == 0 {
+	// Planner statistics: a weekly offline ANALYZE rides the same
+	// restart. It alone justifies a restart once statistics are stale.
+	// When one database is due, all are analyzed together: completion
+	// markers written seconds apart would otherwise come due seconds apart
+	// a week later, each with its own restart.
+	var analyzeDue []string
+	for _, db := range dbs {
+		if sqlite.AnalyzeDue(db, now) {
+			analyzeDue = dbs
+			break
+		}
+	}
+	if len(due) == 0 && len(analyzeDue) == 0 {
 		return
 	}
 
-	var dueBytes int64
+	var dueBytes, analyzeBytes int64
 	for _, db := range due {
 		if fi, err := os.Stat(db); err == nil {
 			dueBytes += fi.Size()
@@ -164,13 +176,21 @@ func (a *App) maintenanceEval(dir string, now time.Time) {
 			}
 		}
 	}
-	if expected := activityhist.Global.ExpectedDurationFor("db-defrag", dueBytes); expected > 0 &&
+	for _, db := range analyzeDue {
+		if fi, err := os.Stat(db); err == nil {
+			analyzeBytes += fi.Size()
+		}
+	}
+	expected := activityhist.Global.ExpectedDurationFor("db-defrag", dueBytes) + activityhist.Global.ExpectedDurationFor("db-analyze", analyzeBytes)
+	if expected > 0 &&
 		time.Duration(runLenMin)*time.Minute < time.Duration(durationSafetyFactor*float64(expected)) {
-		slog.Info("Maintenance skipped: predicted idle run too short for database defrag",
+		slog.Info("Maintenance skipped: predicted idle run too short for database maintenance",
 			slog.Int("idleRunMinutes", runLenMin),
 			slog.Duration("expectedDuration", expected),
 			slog.Int64("dueBytes", dueBytes),
-			slog.Int("databasesDue", len(due)))
+			slog.Int64("analyzeBytes", analyzeBytes),
+			slog.Int("databasesDue", len(due)),
+			slog.Int("databasesAnalyzeDue", len(analyzeDue)))
 		return
 	}
 
@@ -182,10 +202,19 @@ func (a *App) maintenanceEval(dir string, now time.Time) {
 		}
 		fd.Close() //nolint:errcheck
 	}
-	slog.Info("Maintenance window: restarting for scheduled database defrag",
+	for _, db := range analyzeDue {
+		fd, err := os.Create(db + sqlite.AnalyzePendingSuffix)
+		if err != nil {
+			slog.Warn("Maintenance arming failed", slogutil.FilePath(db), slogutil.Error(err))
+			return
+		}
+		fd.Close() //nolint:errcheck
+	}
+	slog.Info("Maintenance window: restarting for scheduled database maintenance",
 		slog.Time("picked", pick),
 		slog.Int("idleRunMinutes", runLenMin),
-		slog.Int("databasesDue", len(due)))
+		slog.Int("databasesDefragDue", len(due)),
+		slog.Int("databasesAnalyzeDue", len(analyzeDue)))
 	_ = activityhist.Global.Save(filepath.Join(dir, activityHistFile))
 	a.Stop(svcutil.ExitRestart)
 }
