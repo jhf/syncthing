@@ -1,0 +1,378 @@
+{
+  "db_data_version.go:*dataVersionObserver.DataVersion": {
+    "sha256": "92322b46d5b866a566c55661a4b2bc7a0e735c7a4453429959b3088eb764010d",
+    "reason": "patch/63 heartbeat: read-only scalar PRAGMA data_version on a dedicated observer connection, autocommit, no write and no transaction held across waits. No updateLock needed."
+  },
+  "basedb.go:*baseDB.Close": {
+    "sha256": "1cf37fe205d9e6f74cb70009f8350d958dd080e261f7884aa6b460853e30be52",
+    "reason": "Acquires baseDB updateLock while closing cached SQL statements and the pool. Folder lifecycle drains mtime and need builders first; no new published writer is permitted during shutdown."
+  },
+  "basedb.go:*baseDB.expandTemplateVars": {
+    "sha256": "6a3ce7b099af5af18cb1abc2d39b775893da5b2c2ac538de6d0b2c8c23287b1c",
+    "reason": "SQL template transport only, no execution. All callers pinned; cannot change resulting SQL without re-reviewing this body."
+  },
+  "basedb.go:*baseDB.getAppliedSchemaVersion": {
+    "sha256": "f19a86f82a4f6a123cbfa05037714a5fdd3a967edeec797d1104952f923a80df",
+    "reason": "Read-only schema lookup in exclusive startup transaction."
+  },
+  "basedb.go:*baseDB.runScripts": {
+    "sha256": "2889a1c8c922d795ac8ac71d8ff5910b0524cac1f03108dc1f98abbe2e62f892",
+    "reason": "Exclusive schema/migration transaction supplied by openBase. Embedded DDL/DML and triggers belong to that transaction."
+  },
+  "basedb.go:*baseDB.setAppliedSchemaVersion": {
+    "sha256": "6d2e298f03bb7a686be9d34354692f4dc8ae8fdad3dedcf3eca2e498af01e21b",
+    "reason": "Exclusive schema initialization transaction supplied by openBase, before publication."
+  },
+  "basedb.go:*baseDB.stmt": {
+    "sha256": "d325f2cd75ac3c092685f449f881f4c0370d57e266d0d65a9b6d901ab7ade373",
+    "reason": "SQL transport/cache boundary. All callers fingerprinted; mutating caller holds its baseDB updateLock or is exclusive startup. Read-only callers need no lock."
+  },
+  "basedb.go:*baseDB.vacuumAndOptimize": {
+    "sha256": "0c03124e62153e91726b4e8abf411fc2669dd9e825f0d660d48430a793b58abc",
+    "reason": "Called only by openBase during exclusive post-migration initialization, before publication."
+  },
+  "basedb.go:.openBase": {
+    "sha256": "5ab8004eea59f6112b2a9152afb160c5cd381014ddabef6f2afc896f70370b88",
+    "reason": "Exclusive initialization/migration before returning or publishing this baseDB. Also owns post-migration vacuumAndOptimize and runScripts calls."
+  },
+  "basedb.go:failedStmt.Exec": {
+    "sha256": "e9b3ea97a02f87c9f593eaa113d9431a0c8cd60b544b9ec5d7beebc02081652e",
+    "reason": "Error-only statement implementation, returns stored error without executing SQL."
+  },
+  "basedb.go:failedStmt.Get": {
+    "sha256": "ae80a346180899c4c0699d98f0bb1d094e16a35b955a9055145fc8a6f4523f71",
+    "reason": "Error-only statement implementation, returns stored error without executing SQL."
+  },
+  "basedb.go:failedStmt.Queryx": {
+    "sha256": "5663ab8bf2ac4ebc12fea0dad067f33fba39e689462a0cffc6d538350d595ded",
+    "reason": "Error-only statement implementation, returns stored error without executing SQL."
+  },
+  "basedb.go:failedStmt.Select": {
+    "sha256": "ac623ccb759555c4cd70fb32f699c532e21bf0e8e194141b09fdd71193619971",
+    "reason": "Error-only statement implementation, returns stored error without executing SQL."
+  },
+  "db_folderdb.go:*DB.getFolderDB": {
+    "sha256": "8d19d1c77500059372b711052feb74c7cfd273edfb4b313e8b7b9430108e9941",
+    "reason": "Folder cache protected by folderDBsMut; main DB updateLock covers folderIdxLocked and registry UPDATE. New folder schema initialized exclusively before publication."
+  },
+  "db_kv.go:*baseDB.DeleteKV": {
+    "sha256": "23283fb013431d849c0af1b3a884ba2a598928ed0fa95ba811ee888d588d559c",
+    "reason": "Acquires receiving baseDB.updateLock before autocommit DELETE and holds it through statement completion."
+  },
+  "db_kv.go:*baseDB.GetKV": {
+    "sha256": "3e130b66cfc47a083aabd72aa05ce7f76ac65c39e25817eaca7ea64b0ad75e39",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "db_kv.go:*baseDB.PrefixKV": {
+    "sha256": "145fe092e08de6945cf8aea524a4765cf39ab04b7311c3c0f9b08351e74a4983",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "db_kv.go:*baseDB.PutKV": {
+    "sha256": "e55a55eb3cb52b1b39b8a7749ea02a3cdc344fc06581d165ecb469e56ebcbeff",
+    "reason": "Acquires receiving baseDB.updateLock before autocommit UPSERT and holds it through statement completion."
+  },
+  "db_open.go:.Open": {
+    "sha256": "2f152289e7f191606fd884d362ec7b6b640d6143ad93acd8b56640f59bea6180",
+    "reason": "Exclusive main DB startup before returning the DB service object. Live folders are cached by getFolderDB."
+  },
+  "db_open.go:.OpenForMigration": {
+    "sha256": "a98ac939e1cd3e51aca6ced70d0c21b112bcd8b58169c1344e58dbbb9b1a936d",
+    "reason": "Offline migration opener, not a published live DB. Exclusive single-connection migration configuration."
+  },
+  "db_open_cgo.go:.init": {
+    "sha256": "33195b32404bceb413fdfcfbca3b8cee05b4fbc3cede79d57968ed1a64897c63",
+    "reason": "Driver connection hook changes only connection-local wal_autocheckpoint. Not a file-writing statement or transaction."
+  },
+  "db_prepared.go:*txPreparedStmts.Commit": {
+    "sha256": "1cb26c3153f85678d7ea0d2091d83c4d5ba2dd71f10bf43a6e2beaaff0b0e53a",
+    "reason": "Transaction-cache cleanup then commit in the caller's guarded transaction. All transaction constructors and caller bodies pinned."
+  },
+  "db_prepared.go:*txPreparedStmts.Preparex": {
+    "sha256": "78ad3b50273d386afaa322b4563533964629e9db294227153600286962e04d91",
+    "reason": "Transaction statement-cache transport. All constructors and write callers pinned, transaction is owned by a guarded writer or exclusive startup."
+  },
+  "db_prepared.go:*txPreparedStmts.Rollback": {
+    "sha256": "35e0f210c8a8327f0ac6a287de9c58306839f7b2c6d67ad036ce0ff0e9f8627a",
+    "reason": "Transaction-cache cleanup then rollback in the caller's guarded transaction. All transaction constructors and caller bodies pinned."
+  },
+  "db_service.go:*Service.periodic": {
+    "sha256": "62c5c6df5235a8dd753a8456c797f0c32c36e0b1c71d0c7a70934b2069c36c33",
+    "reason": "Main/folder tidy self-serializes. Live GC helpers run in a closure holding folder updateLock, blocklist GC owns per-batch locks, metadata PutKV owns main/folder mutex."
+  },
+  "db_service.go:.execRowsAffected": {
+    "sha256": "8dd74f40ac018c70b69440a1c4587df4b04316144856cd93c4962e2b2244d4d0",
+    "reason": "Receives transaction from guarded retired-GC caller. All caller bodies pinned. No independent connection/transaction."
+  },
+  "db_service.go:.garbageCollectBlocklistsAndBlocks": {
+    "sha256": "ef8f5d71259c4cdc30cb5288447089714e62e1746f3d3c0ecd396dc570767000",
+    "reason": "Only unlocked Execs are connection-local foreign_keys settings. Delegates writes to per-batch locked GC and guarded KV methods."
+  },
+  "db_service.go:.garbageCollectNamesAndVersions": {
+    "sha256": "c148b146f98e3f46f12b08ad2d5d8678c332412c8a0f1174fae98dd316547179",
+    "reason": "Caller Service.periodic holds folder updateLock around these autocommit DELETEs. Every caller pinned by helper reference scanning."
+  },
+  "db_service.go:.garbageCollectOldDeletedLocked": {
+    "sha256": "8ceac66184829f6066b00f0800a551ae4046e4e4f35ace4a6ff288510c151425",
+    "reason": "Caller Service.periodic holds folder updateLock through autocommit/transaction paths and global recalculation. Every caller pinned."
+  },
+  "db_service.go:.garbageCollectOrphanBlocklistsFull": {
+    "sha256": "195c94d4b67b89534f9a3ad7392a0e6b104af3f84c38cb3a19927fd2876dd5ae",
+    "reason": "Acquires folder updateLock for each immediate hash-range transaction; all commit/rollback paths precede unlock."
+  },
+  "db_service.go:.garbageCollectRetiredBlocklists": {
+    "sha256": "20a77ccc34ed77eb9138c327d31fc8149c0f4e2990cd3543f55fd1e43a180ce3",
+    "reason": "Acquires folder updateLock for each immediate batch transaction; all commit/rollback paths precede unlock."
+  },
+  "db_service.go:.tidy": {
+    "sha256": "32b31f9d745be0d730d32d8a1396a2aba52a200c8a089723c5e50c58b47c20f6",
+    "reason": "Each main/folder maintenance statement separately acquires that baseDB updateLock, drains/closes rows before unlock. Bounded analysis/vacuum and PASSIVE checkpoint."
+  },
+  "db_stats.go:*baseDB.tableStats": {
+    "sha256": "753ca493881863c484b24c937892f52d38b07e29beae701ad945d4ea40260132",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "db_update.go:*DB.DropFolder": {
+    "sha256": "1ecf63dcb22d3eef4bd5bf6e388d63cc3db192967deb0bc3853e0532e0e95c48",
+    "reason": "Main DB updateLock covers registry DELETE. Closing/removing a cached folder is lifecycle cleanup, not an independent live SQL writer."
+  },
+  "db_update.go:*DB.ListFolders": {
+    "sha256": "85bb1107c1a869a826c97b6f3a3ecf359ddc5d99e8abc57035d5254f4a569807",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "db_update.go:*DB.cleanDroppedFolders": {
+    "sha256": "46eb26bbb766ea46eed7abee4fdfd21e219e76f307b45241e7c1b1a90a865361",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_counts.go:*folderDB.CountGlobal": {
+    "sha256": "fe1bf0427b005acdd918a70a664e379414a021d7d05f26aecee3f92dc445fb09",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_counts.go:*folderDB.CountLocal": {
+    "sha256": "7862ff01846e901db5f61297d33cbc9a8d735d55a97c55acdeb1985a9c549507",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_counts.go:*folderDB.CountReceiveOnlyChanged": {
+    "sha256": "db80486d4e99cb8bc9abe15efced7319f926d5d6839edfc1592f0de8105f8a99",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_counts.go:*folderDB.needSizeLocal": {
+    "sha256": "d5e045592894e849d58c03682757494fb0614e9a50e9fb7e15dd19a91f7689ce",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_counts.go:*folderDB.needSizeRemote": {
+    "sha256": "cf77cd4d81f214fddd50b3347cd7e960b24884fa70df3312f50eb194a1f73dd3",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_global.go:*folderDB.AllGlobalFiles": {
+    "sha256": "8f5b9281ed22dc6045234e5a51ee317c711d854673e4c23b2931ebf1d8a5509f",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_global.go:*folderDB.AllGlobalFilesPrefix": {
+    "sha256": "311ffa3f284188e62859c1eaa508b972045e34a65654bcbeb1429274c5a490d4",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_global.go:*folderDB.GetGlobalAvailability": {
+    "sha256": "26d895853b59cde4913f56b11b7d3546a978136c7ca0cd54be626d8fc18e3104",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_global.go:*folderDB.GetGlobalFile": {
+    "sha256": "c1e5f287e6d6e97c58066db44f3b0392e6e6eee2a9e3e56c1e8531d2aaf0aa10",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_global.go:*folderDB.neededGlobalFilesLocal": {
+    "sha256": "72414874e0afda602a81993237801acedf85e7fcb050cdd7c6c9a45c9add9fd5",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_global.go:*folderDB.neededGlobalFilesRemote": {
+    "sha256": "459cdcea42f5ec15ea92e290a90cd869ec0398674b37894aed405d3780c19cd9",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_indexid.go:*folderDB.DropAllIndexIDs": {
+    "sha256": "e937d7874a8f2c9fd0c2a3fbb2733ae09db6b3e6d644309161650ddbf0f2a175",
+    "reason": "Acquires folder updateLock before index-ID DELETE."
+  },
+  "folderdb_indexid.go:*folderDB.GetDeviceSequence": {
+    "sha256": "8b729135b0e9b557e921a63074914ce905d99cb90a1790565f29687315c3bc98",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_indexid.go:*folderDB.GetIndexID": {
+    "sha256": "3b8c82fb6463beb5df9acf96a3c8b3b344cc40c62ea66d22cc05bad62167f9f4",
+    "reason": "Read-only fast path; acquires folder updateLock before local index-ID INSERT path."
+  },
+  "folderdb_indexid.go:*folderDB.RemoteSequences": {
+    "sha256": "cda5b215b6592b9e3333cc6c164f28b5232e193f446c40d60b3adc4d593476d0",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_indexid.go:*folderDB.SetIndexID": {
+    "sha256": "624bb989cfbe4f9ce4f09561fd738adf658543f25ba2ff344c0ed931b40d07b0",
+    "reason": "Acquires folder updateLock before deviceIdxLocked and index-ID UPSERT."
+  },
+  "folderdb_local.go:*folderDB.AllLocalBlocksWithHash": {
+    "sha256": "ee1725a0e99d75c9c380ad69b8f2d3b1324a6006f0b45f6f4974cdad403002f9",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_local.go:*folderDB.AllLocalFiles": {
+    "sha256": "ad6b5339de5fe892cb6ddecc6e6a2532fd8abcda7237a6833ab05f3704e8b0d0",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_local.go:*folderDB.AllLocalFilesBySequence": {
+    "sha256": "97af70e7a0ed3802dd4d397e5b73adaedb585b942323bf22a192c237518f72c4",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_local.go:*folderDB.AllLocalFilesWithBlocksHash": {
+    "sha256": "3d217b33aa003660f84fb60ddfe77387d3d41e42ebc74f1c0ce3312a31a21884",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_local.go:*folderDB.AllLocalFilesWithPrefix": {
+    "sha256": "c6292ec3c9b9437cd582ca84b028de890a78f1eab1d173402101ee71059818a0",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_local.go:*folderDB.DebugCounts": {
+    "sha256": "a5cbe88479489eac197682f4db1d797102a11291765eb61284e6b856db10a61a",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_local.go:*folderDB.DebugFilePattern": {
+    "sha256": "034ddfeef28855592bfff667db4bee2502d0fadd0860ceb81a054116c46bb794",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_local.go:*folderDB.GetDeviceFile": {
+    "sha256": "037b6c3ef893ce6a9cd4e0f2576f41b4caaa8ae3725c7f74d79373be7538fbc3",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_local.go:*folderDB.ListDevicesForFolder": {
+    "sha256": "3fbd5977a1acf7a53f8319114a5dd43dd90aa7b708282eccfd82684076d5ea44",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_mtimes.go:*folderDB.GetMtime": {
+    "sha256": "630076d3b4cbf016488629e2b3186ffc8feaf0411ea41fec4256a90172b24e5b",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_mtimes.go:*mtimeBatcher.flushLocked": {
+    "sha256": "12a53dafd5959e4492cde7048bf685349534c48d6e04218ae788318b9d484e2a",
+    "reason": "Mtime buffer mutex belongs to caller, but this function additionally acquires folder updateLock before immediate transaction and keeps it through commit/rollback."
+  },
+  "folderdb_need.go:*folderDB.backfillNeedForDevice": {
+    "sha256": "1436cfece85308a29ad0a8f543ea3bb2e93d7dad8d7830489d921c017e83cb73",
+    "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  },
+  "folderdb_need.go:*folderDB.buildNeedTracking": {
+    "sha256": "0ea015a015d2d2ee80b679dd557085b39e9f56d1f5856a8f125987c96b733b0a",
+    "reason": "Acquires folder updateLock per bounded range through commit/rollback, and separately for final aggregate/journal/flag transaction. Generation rechecked under mutex."
+  },
+  "folderdb_need.go:*folderDB.bumpNeedTotals": {
+    "sha256": "9becfc2b2753fdee2dca4a53e18279ef8d0b7c37aa42b9619c981768e215cb38",
+    "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  },
+  "folderdb_need.go:*folderDB.clearNeedForName": {
+    "sha256": "fef1df0559e2977b9e397f7b75e323799df2c23848dfa5d7aa1c21008818b4de",
+    "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  },
+  "folderdb_need.go:*folderDB.delNeedDetail": {
+    "sha256": "d742af427a4090a6dfb2fa04cb9a4ec8907d16bb9650d77665149a5647b53e8d",
+    "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  },
+  "folderdb_need.go:*folderDB.journalNeedBuildName": {
+    "sha256": "945c0ad7f3f2731057503c59797d9d8df900ae55d6185985d58412523588d7d0",
+    "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  },
+  "folderdb_need.go:*folderDB.needDeviceKnown": {
+    "sha256": "19f3455dc3ec947a85f8c1e8af37546dc84b49b9b599a33fd821cb49097904b3",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_need.go:*folderDB.needTotalsFromDetail": {
+    "sha256": "02110f8752c23eb9adfb82658840b0de2e8c03714906a7d87e42ad18e06d6f87",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_need.go:*folderDB.neededGlobalFilesFromDetail": {
+    "sha256": "e63e05d97590dee68f5d3b57ae79cbb1e699df4029fa8e5fbaadb9cda0f5f0c6",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_need.go:*folderDB.putNeedDetail": {
+    "sha256": "4dcc803d47ec9e608c18c0aec069216bd01092f8b8e99bcaecdbb39ab69eb23c",
+    "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  },
+  "folderdb_need.go:*folderDB.recalcNeedForFile": {
+    "sha256": "780cdde338575dfe6cb1528c1ff04d92951a3e3c4362f4182c64fbd92a241aa6",
+    "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  },
+  "folderdb_need.go:*folderDB.resetNeedTracking": {
+    "sha256": "eaeb34629f47f55576e7376b3a230098f764df2cbfcb294d6d44a0636c882101",
+    "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  },
+  "folderdb_open.go:*folderDB.deviceIdxLocked": {
+    "sha256": "17665daa458003c21c31ebefc9baf07186597e1c86f8e5efe14401ee5fe4558f",
+    "reason": "Caller Update/SetIndexID holds folder updateLock, or exclusive openFolderDB initializes local device before publication. Every caller pinned."
+  },
+  "folderdb_open.go:.openFolderDB": {
+    "sha256": "8c0d384b76c74793488cd7c4545c3b45a9e6b7f1b0e17c9910999e9d049c9951",
+    "reason": "Exclusive folder initialization before publication in DB.folderDBs; initial deviceIdxLocked UPSERT has no concurrent users."
+  },
+  "folderdb_open.go:.openFolderDBForMigration": {
+    "sha256": "1cfe9e303bca216c75092d9750442bf26833221bb24631445faa7ff713ca2ae7",
+    "reason": "Offline exclusive folder migration before publication, never concurrent with a live service."
+  },
+  "folderdb_update.go:*DB.folderIdxLocked": {
+    "sha256": "9f69af6fbc0f8bf39ff30a82891702eb4cd2935b6402c7fb0ba8839cab5554f7",
+    "reason": "Caller getFolderDB holds main DB updateLock around registry UPSERT. Every caller pinned."
+  },
+  "folderdb_update.go:*folderDB.DropAllFiles": {
+    "sha256": "d9b770b332b79937a94fcd3306d5f041026015c37fd32206ce51f34734ae31be",
+    "reason": "Acquires folder updateLock before immediate transaction, retirement, need reset and global recalculation through commit."
+  },
+  "folderdb_update.go:*folderDB.DropBlockIndex": {
+    "sha256": "4affe14e28e4898721d610f86619a088723f05d780ed00eaff7d80d9aabcf853",
+    "reason": "Acquires folder updateLock before immediate transaction and block-index writes through commit."
+  },
+  "folderdb_update.go:*folderDB.DropDevice": {
+    "sha256": "13e44a42ae70a12b5641e1af2510244afbf36d5b5740a41bd16de0e9720dbcc6",
+    "reason": "Acquires folder updateLock before immediate transaction, retirement, need reset and global recalculation through commit."
+  },
+  "folderdb_update.go:*folderDB.DropFilesNamed": {
+    "sha256": "6f5b0b18abb6e4c336adb1f422c1f6f319c54a6140b40dd137996e71f8cb10e8",
+    "reason": "Acquires folder updateLock before immediate transaction, retirement and per-name recalculation through commit."
+  },
+  "folderdb_update.go:*folderDB.PopulateBlockIndex": {
+    "sha256": "566362a74e02b501256c241acf59c3758b90bc0b351e1cbdfdcd96e11ea4c567",
+    "reason": "Acquires folder updateLock before immediate transaction and all block-index population writes through commit."
+  },
+  "folderdb_update.go:*folderDB.Update": {
+    "sha256": "dbc39591790a822bb5e3d9a95deb0c793b0b27bd7f0ae8d28c252100dd2def94",
+    "reason": "Acquires folder updateLock before device UPSERT and immediate transaction, through commit and periodicCheckpointLocked. All called SQL helpers inherit this guard."
+  },
+  "folderdb_update.go:*folderDB.blockIndexEmpty": {
+    "sha256": "efb09f4e7a7577f0b543a4456b79467e3b2ad9748d6f46b8a0369a7174f73646",
+    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+  },
+  "folderdb_update.go:*folderDB.insertBlocksLocked": {
+    "sha256": "5d03b87f7cf17ca1b269acdd926cfac56d5e401219c58363e856ecbd09c1ee65",
+    "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  },
+  "folderdb_update.go:*folderDB.periodicCheckpointLocked": {
+    "sha256": "33039f39261aabfaa0bffb86611f8834f002bf9a0c18d2b67c4799bb5ba22b13",
+    "reason": "Caller Update holds folder updateLock through connection-local journal limit and PASSIVE checkpoint. Every caller pinned."
+  },
+  "folderdb_update.go:*folderDB.recalcGlobalForFile": {
+    "sha256": "a6b483294a20ce147bf0303cdbc6b791a1fc93eebea5107ef7086c76452dbd9b",
+    "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  },
+  "folderdb_update.go:*folderDB.recalcGlobalForFolder": {
+    "sha256": "c8080666db21c58a015a5fc988283bff151ca6e3a3d8475e2d81f4d0e01c3aae",
+    "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  },
+  "folderdb_update.go:.enqueueRetiredBlocklist": {
+    "sha256": "2be9ca3640e126a0b6a34a955dbb415711e9c4f13dc29f745c606f7c45704714",
+    "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  },
+  "folderdb_update.go:.retireBlocklistsForDevice": {
+    "sha256": "da0f512cc7a52a24eb82b6e8991e62a1474815eed1dd020e516feb702e98da9c",
+    "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  },
+  "folderdb_update.go:.retireBlocklistsForNamedFiles": {
+    "sha256": "56e0acead56b17ff53f6da5b74f0c83e7edca5a5d0dbc79419ab2ebf99fc0b2e",
+    "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  },
+  "folderdb_update.go:.retireReplacedBlocklist": {
+    "sha256": "dc7204ef71d936dd9670caadd47a520590e4e6f481a362c5aab896b35f86239f",
+    "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  }
+}

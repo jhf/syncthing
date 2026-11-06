@@ -30,6 +30,7 @@ type writerProbe struct {
 	db         *baseDB
 	mu         sync.Mutex
 	violations []string
+	busyErrors []string
 	before     func(string)
 	after      func(string, time.Duration)
 }
@@ -47,6 +48,15 @@ func (p *writerProbe) observe(q string) {
 		p.violations = append(p.violations, q)
 		p.mu.Unlock()
 	}
+}
+
+func (p *writerProbe) record(q string, err error) {
+	if !db.IsLockContention(err) {
+		return
+	}
+	p.mu.Lock()
+	p.busyErrors = append(p.busyErrors, strings.Join(strings.Fields(q), " ")+": "+err.Error())
+	p.mu.Unlock()
 }
 
 func writingSQL(q string) bool {
@@ -67,6 +77,7 @@ func writingSQL(q string) bool {
 
 func (p *writerProbe) Open(dsn string) (driver.Conn, error) {
 	c, err := p.Driver.Open(dsn)
+	p.record("OPEN", err)
 	if err != nil {
 		return nil, err
 	}
@@ -88,6 +99,7 @@ func (c *probeConn) observe(q string) {
 
 func (c *probeConn) Prepare(q string) (driver.Stmt, error) {
 	s, err := c.Conn.Prepare(q)
+	c.p.record("PREPARE "+q, err)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +120,7 @@ func (c *probeConn) BeginTx(ctx context.Context, o driver.TxOptions) (driver.Tx,
 	return c.wrapTx(tx, err)
 }
 func (c *probeConn) wrapTx(tx driver.Tx, err error) (driver.Tx, error) {
+	c.p.record("BEGIN IMMEDIATE", err)
 	if err != nil {
 		return nil, err
 	}
@@ -124,6 +137,7 @@ type probeTx struct {
 
 func (tx *probeTx) Commit() error {
 	err := tx.Tx.Commit()
+	tx.p.record("COMMIT", err)
 	if tx.p.after != nil {
 		kind := "COMMIT"
 		if tx.rangeChunk {
@@ -131,6 +145,12 @@ func (tx *probeTx) Commit() error {
 		}
 		tx.p.after(kind, time.Since(tx.start))
 	}
+	return err
+}
+
+func (tx *probeTx) Rollback() error {
+	err := tx.Tx.Rollback()
+	tx.p.record("ROLLBACK", err)
 	return err
 }
 
@@ -142,6 +162,7 @@ func (c *probeConn) ExecContext(ctx context.Context, q string, args []driver.Nam
 	c.observe(q)
 	start := time.Now()
 	res, err := e.ExecContext(ctx, q, args)
+	c.p.record(q, err)
 	if c.p.after != nil {
 		c.p.after(q, time.Since(start))
 	}
@@ -155,6 +176,7 @@ func (c *probeConn) QueryContext(ctx context.Context, q string, args []driver.Na
 	c.observe(q)
 	start := time.Now()
 	rows, err := e.QueryContext(ctx, q, args)
+	c.p.record(q, err)
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +194,7 @@ func (s *probeStmt) Exec(args []driver.Value) (driver.Result, error) {
 	s.c.observe(s.q)
 	start := time.Now()
 	r, e := s.Stmt.Exec(args)
+	s.p.record(s.q, e)
 	if s.p.after != nil {
 		s.p.after(s.q, time.Since(start))
 	}
@@ -181,6 +204,7 @@ func (s *probeStmt) Query(args []driver.Value) (driver.Rows, error) {
 	s.c.observe(s.q)
 	start := time.Now()
 	r, e := s.Stmt.Query(args)
+	s.p.record(s.q, e)
 	if e != nil {
 		return nil, e
 	}
@@ -195,8 +219,15 @@ type probeRows struct {
 	once  sync.Once
 }
 
+func (r *probeRows) Next(dest []driver.Value) error {
+	err := r.Rows.Next(dest)
+	r.p.record(r.q, err)
+	return err
+}
+
 func (r *probeRows) Close() error {
 	err := r.Rows.Close()
+	r.p.record(r.q, err)
 	r.once.Do(func() {
 		if r.p.after != nil {
 			r.p.after(r.q, time.Since(r.start))

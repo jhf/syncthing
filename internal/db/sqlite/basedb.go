@@ -40,6 +40,10 @@ type baseDB struct {
 	baseName string
 	sql      *sqlx.DB
 
+	// Every writing statement/transaction on a published baseDB holds this
+	// mutex through statement completion or transaction commit/rollback.
+	// Long maintenance yields it between bounded steps. Only exclusive
+	// initialization before publication is exempt. See PATCH66.md.
 	updateLock       sync.Mutex
 	updatePoints     int
 	checkpointsCount int

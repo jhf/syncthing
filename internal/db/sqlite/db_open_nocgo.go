@@ -17,9 +17,9 @@ import (
 
 const (
 	dbDriver = "sqlite"
-	// busy_timeout: see db_open_cgo.go. Two writers on one file are
-	// legitimate; instant SQLITE_BUSY is connection-fatal at the protocol
-	// layer.
+	// busy_timeout: see db_open_cgo.go. Live same-baseDB writers wait on
+	// updateLock. This SQLite timeout remains for foreign/separate handles
+	// and exclusive startup/migration, not ordinary writer scheduling.
 	commonOptions = "_pragma=journal_mode(wal)&_pragma=foreign_keys(1)&_pragma=recursive_triggers(1)&_pragma=synchronous(1)&_txlock=immediate&_pragma=busy_timeout(30000)"
 )
 
