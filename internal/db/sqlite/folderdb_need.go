@@ -33,6 +33,7 @@ import (
 	"iter"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/internal/itererr"
@@ -41,10 +42,10 @@ import (
 
 const needTrackingBuiltKey = "needTrackingBuilt"
 
-// needBuildChunkNames bounds how much of the global name_idx space one build
-// transaction covers, so the background build never holds the write lock or a
-// long transaction against live updates.
-const needBuildChunkNames = 100_000
+// needBuildChunkNames caps the name-device work budget of a build chunk.
+// Divide it by the snapshotted device count to bound the cross product.
+// This limits work, not storage latency or the final atomic journal drain.
+const needBuildChunkNames = 256
 
 type needBuildState struct {
 	mu      sync.Mutex
@@ -361,14 +362,29 @@ func (s *folderDB) buildNeedTracking(gen uint64) {
 		log.Warn("Need tracking build failed at range scan", "error", err)
 		return
 	}
-	if err := s.stmt(`SELECT COALESCE(MAX(idx), 0) FROM devices`).Get(&maxDeviceIdx); err != nil {
+	var devices struct {
+		Max   int64 `db:"max_idx"`
+		Count int64 `db:"count"`
+	}
+	if err := s.stmt(`SELECT COALESCE(MAX(idx), 0) AS max_idx, COUNT(*) AS count FROM devices`).Get(&devices); err != nil {
 		log.Warn("Need tracking build failed at device scan", "error", err)
 		return
 	}
+	maxDeviceIdx = devices.Max
 
-	for lo := int64(0); lo < maxNameIdx && !aborted(); lo += needBuildChunkNames {
-		hi := lo + needBuildChunkNames
+	chunkNames := max(int64(1), needBuildChunkNames/max(int64(1), devices.Count))
+	for lo := int64(0); lo < maxNameIdx && !aborted(); lo += chunkNames {
+		hi := min(lo+chunkNames, maxNameIdx)
+		var held time.Duration
 		if err := func() error {
+			s.updateLock.Lock()
+			defer s.updateLock.Unlock()
+			start := time.Now()
+			defer func() { held = time.Since(start) }()
+			// A reset may have won the mutex after the outer gen check.
+			if aborted() {
+				return nil
+			}
 			tx, err := s.sql.BeginTxx(context.Background(), nil)
 			if err != nil {
 				return wrap(err)
@@ -409,6 +425,7 @@ func (s *folderDB) buildNeedTracking(gen uint64) {
 			log.Warn("Need tracking build failed in chunk", "error", err)
 			return
 		}
+		log.Debug("Need tracking build chunk", "lo", lo, "hi", hi, "duration", held, "deviceHighWater", maxDeviceIdx, "devices", devices.Count)
 	}
 
 	// Final pass: rebuild the aggregates and re-derive every name that
