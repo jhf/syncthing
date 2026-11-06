@@ -75,7 +75,15 @@ func (p *writerProbe) Open(dsn string) (driver.Conn, error) {
 
 type probeConn struct {
 	driver.Conn
-	p *writerProbe
+	p  *writerProbe
+	tx *probeTx
+}
+
+func (c *probeConn) observe(q string) {
+	if c.tx != nil && strings.Contains(q, "CROSS JOIN devices d") {
+		c.tx.rangeChunk = true
+	}
+	c.p.observe(q)
 }
 
 func (c *probeConn) Prepare(q string) (driver.Stmt, error) {
@@ -83,25 +91,55 @@ func (c *probeConn) Prepare(q string) (driver.Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &probeStmt{Stmt: s, p: c.p, q: q}, nil
+	return &probeStmt{Stmt: s, p: c.p, c: c, q: q}, nil
 }
 func (c *probeConn) Begin() (driver.Tx, error) {
 	c.p.observe("BEGIN IMMEDIATE")
-	return c.Conn.Begin()
+	tx, err := c.Conn.Begin()
+	return c.wrapTx(tx, err)
 }
 func (c *probeConn) BeginTx(ctx context.Context, o driver.TxOptions) (driver.Tx, error) {
 	c.p.observe("BEGIN IMMEDIATE")
 	if b, ok := c.Conn.(driver.ConnBeginTx); ok {
-		return b.BeginTx(ctx, o)
+		tx, err := b.BeginTx(ctx, o)
+		return c.wrapTx(tx, err)
 	}
-	return c.Conn.Begin()
+	tx, err := c.Conn.Begin()
+	return c.wrapTx(tx, err)
 }
+func (c *probeConn) wrapTx(tx driver.Tx, err error) (driver.Tx, error) {
+	if err != nil {
+		return nil, err
+	}
+	c.tx = &probeTx{Tx: tx, p: c.p, start: time.Now()}
+	return c.tx, nil
+}
+
+type probeTx struct {
+	driver.Tx
+	p          *writerProbe
+	start      time.Time
+	rangeChunk bool
+}
+
+func (tx *probeTx) Commit() error {
+	err := tx.Tx.Commit()
+	if tx.p.after != nil {
+		kind := "COMMIT"
+		if tx.rangeChunk {
+			kind = "COMMIT RANGE"
+		}
+		tx.p.after(kind, time.Since(tx.start))
+	}
+	return err
+}
+
 func (c *probeConn) ExecContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Result, error) {
 	e, ok := c.Conn.(driver.ExecerContext)
 	if !ok {
 		return nil, driver.ErrSkip
 	}
-	c.p.observe(q)
+	c.observe(q)
 	start := time.Now()
 	res, err := e.ExecContext(ctx, q, args)
 	if c.p.after != nil {
@@ -114,7 +152,7 @@ func (c *probeConn) QueryContext(ctx context.Context, q string, args []driver.Na
 	if !ok {
 		return nil, driver.ErrSkip
 	}
-	c.p.observe(q)
+	c.observe(q)
 	start := time.Now()
 	rows, err := e.QueryContext(ctx, q, args)
 	if err != nil {
@@ -126,11 +164,12 @@ func (c *probeConn) QueryContext(ctx context.Context, q string, args []driver.Na
 type probeStmt struct {
 	driver.Stmt
 	p *writerProbe
+	c *probeConn
 	q string
 }
 
 func (s *probeStmt) Exec(args []driver.Value) (driver.Result, error) {
-	s.p.observe(s.q)
+	s.c.observe(s.q)
 	start := time.Now()
 	r, e := s.Stmt.Exec(args)
 	if s.p.after != nil {
@@ -139,7 +178,7 @@ func (s *probeStmt) Exec(args []driver.Value) (driver.Result, error) {
 	return r, e
 }
 func (s *probeStmt) Query(args []driver.Value) (driver.Rows, error) {
-	s.p.observe(s.q)
+	s.c.observe(s.q)
 	start := time.Now()
 	r, e := s.Stmt.Query(args)
 	if e != nil {
