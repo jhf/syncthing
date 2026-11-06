@@ -43,7 +43,17 @@ func (c *countingSyncFile) Sync() error {
 // updater with syncfs mode forced on and installSyncfsFn replaced by fn.
 func runSyncfsInstallGroup(t *testing.T, n int, fn func(string) error) (*sendReceiveFolder, *countingSyncFS, []byte) {
 	t.Helper()
+	return runSyncfsInstallGroupPrimed(t, n, nil, fn)
+}
+
+// runSyncfsInstallGroupPrimed is runSyncfsInstallGroup with a hook that runs
+// on the folder before the pipeline starts (patch/71 primes cost estimates).
+func runSyncfsInstallGroupPrimed(t *testing.T, n int, prime func(*sendReceiveFolder), fn func(string) error) (*sendReceiveFolder, *countingSyncFS, []byte) {
+	t.Helper()
 	f, fi, data, _ := intentFixture(t, "syncfs-fixture")
+	if prime != nil {
+		prime(f)
+	}
 	installSyncfsForTest = true
 	t.Cleanup(func() { installSyncfsForTest = false })
 	if !f.installSyncfs() {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/syncthing/syncthing/internal/db"
@@ -106,15 +107,19 @@ func (f *sendReceiveFolder) precommitInstallFence(temps []string, installDirs, l
 		return nil
 	}
 	if f.installSyncfs() {
-		if len(temps) >= installSyncfsMinGroup {
+		items := len(temps) + len(installDirs) + len(legacyDirs)
+		if len(temps) > 0 && f.installCost.pre.useSyncfs(items) {
+			t0 := time.Now()
 			err := installSyncfsFn(f.Filesystem().URI())
 			if err == nil {
+				f.installCost.pre.observeSyncfs(time.Since(t0))
 				return nil
 			}
 			f.sl.Warn("syncfs failed, falling back to per-file fsyncs for install group", slogutil.Error(err))
 		}
 		// Small group (or failed syncfs): per-file fsyncs are cheaper than one
 		// syncfs, which flushes every dirty page of the whole filesystem.
+		t0 := time.Now()
 		for _, temp := range temps {
 			if err := f.fsyncInstallFile(temp); err != nil {
 				return err
@@ -123,7 +128,11 @@ func (f *sendReceiveFolder) precommitInstallFence(temps []string, installDirs, l
 		if len(legacyDirs) > 0 {
 			f.fsyncDirs(legacyDirs)
 		}
-		return f.syncInstallDirs(installDirs)
+		if err := f.syncInstallDirs(installDirs); err != nil {
+			return err
+		}
+		f.installCost.pre.observeItems(time.Since(t0), items)
+		return nil
 	}
 	if len(legacyDirs) > 0 {
 		f.flushPullDurability(legacyDirs)
@@ -138,23 +147,125 @@ func (f *sendReceiveFolder) postrenameInstallFence(installDirs map[string]struct
 	if f.DisableFsync || len(installDirs) == 0 {
 		return nil
 	}
-	if f.installSyncfs() && len(installDirs) >= installSyncfsMinGroup {
+	if f.installSyncfs() && f.installCost.post.useSyncfs(len(installDirs)) {
+		t0 := time.Now()
 		err := installSyncfsFn(f.Filesystem().URI())
 		if err == nil {
+			f.installCost.post.observeSyncfs(time.Since(t0))
 			return nil
 		}
 		f.sl.Warn("syncfs failed, falling back to per-directory fsyncs for install group", slogutil.Error(err))
 	}
-	return f.syncInstallDirs(installDirs)
+	t0 := time.Now()
+	if err := f.syncInstallDirs(installDirs); err != nil {
+		return err
+	}
+	if f.installSyncfs() {
+		f.installCost.post.observeItems(time.Since(t0), len(installDirs))
+	}
+	return nil
 }
 
-// installSyncfsMinGroup is the group size from which one syncfs(2) beats
-// individual fsyncs. syncfs flushes every dirty page of the folder's whole
-// filesystem, including other writers' data: measured ~0.5 s on yarlung
-// (btrfs, live Syncthing) against ~33 ms per small-file fsync. Below this
-// size the precommit fence fsyncs each temp and the postrename fence each
-// directory instead.
+// installSyncfsMinGroup is the group size from which one syncfs(2) is used
+// while there is no measurement to decide by (patch/67's fixed rule). It is
+// only the starting point: installSyncCost replaces it with measured costs.
 const installSyncfsMinGroup = 8
+
+// installCostWindow is how long a cost measurement stays valid. A syncfs
+// costs whatever the whole filesystem has dirty at that moment, so an old
+// reading says little; an expired estimate falls back to the fixed rule,
+// which also re-measures the method that had stopped being chosen.
+const installCostWindow = 10 * time.Minute
+
+// installSyncCost chooses, per fence, between one syncfs(2) and one fsync
+// per item (temp file or directory) by what each has actually cost here
+// lately: syncfs when n * perItem > syncfs. Both are exponentially weighted
+// moving averages (alpha 1/4) of measured durations. patch/67 used a fixed n
+// >= 8 from an inferred cost ratio. Measured on yarlung (btrfs, 2x HDD, live
+// Syncthing, 2026-11-06 20:47 UTC, 15 samples): small-file fsync median
+// 30.5 ms, syncfs median 226 ms (176..749 ms), break-even 7.4 files. The
+// syncfs cost is whatever the whole filesystem has dirty at that moment, so
+// it moves: on a quiet disk syncfs pays from n=2, while it is busy per-item
+// fsyncs win for much larger groups. A group of one always fsyncs.
+type installSyncCost struct {
+	mu                  sync.Mutex
+	now                 func() time.Time
+	syncfs, perItem     time.Duration
+	syncfsAt, perItemAt time.Time
+	lastLogged          int // break-even group size last logged, 0 = none
+	logf                func(breakEven int, syncfs, perItem time.Duration)
+}
+
+type installSyncCosts struct{ pre, post installSyncCost }
+
+func (c *installSyncCost) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+// useSyncfs reports whether a fence over n items should use one syncfs.
+func (c *installSyncCost) useSyncfs(n int) bool {
+	if n < 2 {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.clock()
+	syncfsOK := !c.syncfsAt.IsZero() && now.Sub(c.syncfsAt) < installCostWindow
+	perItemOK := !c.perItemAt.IsZero() && now.Sub(c.perItemAt) < installCostWindow
+	if !syncfsOK || !perItemOK {
+		return n >= installSyncfsMinGroup
+	}
+	return time.Duration(n)*c.perItem > c.syncfs
+}
+
+func ewma(old, sample time.Duration, fresh bool) time.Duration {
+	if !fresh {
+		return sample
+	}
+	return old + (sample-old)/4
+}
+
+func (c *installSyncCost) observeSyncfs(d time.Duration) {
+	c.mu.Lock()
+	now := c.clock()
+	c.syncfs = ewma(c.syncfs, d, !c.syncfsAt.IsZero() && now.Sub(c.syncfsAt) < installCostWindow)
+	c.syncfsAt = now
+	c.noteLocked()
+	c.mu.Unlock()
+}
+
+func (c *installSyncCost) observeItems(d time.Duration, n int) {
+	if n <= 0 {
+		return
+	}
+	c.mu.Lock()
+	now := c.clock()
+	c.perItem = ewma(c.perItem, d/time.Duration(n), !c.perItemAt.IsZero() && now.Sub(c.perItemAt) < installCostWindow)
+	c.perItemAt = now
+	c.noteLocked()
+	c.mu.Unlock()
+}
+
+// noteLocked reports the break-even group size when it has moved by a
+// factor of two or more since last reported, so the log shows what the
+// decision rests on without a line per group.
+func (c *installSyncCost) noteLocked() {
+	if c.logf == nil || c.syncfsAt.IsZero() || c.perItemAt.IsZero() || c.perItem <= 0 {
+		return
+	}
+	be := int(c.syncfs/c.perItem) + 1
+	if be < 2 {
+		be = 2
+	}
+	if c.lastLogged != 0 && be < 2*c.lastLogged && 2*be > c.lastLogged {
+		return
+	}
+	c.lastLogged = be
+	c.logf(be, c.syncfs, c.perItem)
+}
 
 // installSyncfsFn is the install path's syncfs hook. It is distinct from
 // syncfsFn so tests can count install-group barriers independently.

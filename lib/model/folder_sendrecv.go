@@ -138,6 +138,7 @@ type sendReceiveFolder struct {
 
 	tempPullErrors    map[string]churnPullError // pull errors that might be just transient
 	leftovers         ignoredLeftovers          // patch/69: dirs kept by locally ignored content
+	installCost       installSyncCosts          // patch/71: measured syncfs vs fsync costs
 	retry             *pullRetryTracker
 	pullDBRetryPolicy *pullDBRetryPolicy // nil selects production clock/backoff
 }
@@ -150,6 +151,13 @@ func newSendReceiveFolder(model *model, ignores *ignore.Matcher, cfg config.Fold
 		writeLimiter:       semaphore.New(cfg.MaxConcurrentWrites),
 	}
 	f.puller = f
+	logCost := func(fence string) func(int, time.Duration, time.Duration) {
+		return func(breakEven int, syncfs, perItem time.Duration) {
+			f.sl.Info("Install durability cost measured", slog.String("fence", fence), slog.Int("syncfsFromGroup", breakEven), slog.Duration("syncfs", syncfs), slog.Duration("fsyncPerItem", perItem))
+		}
+	}
+	f.installCost.pre.logf = logCost("precommit")
+	f.installCost.post.logf = logCost("postrename")
 	if (cfg.Type == config.FolderTypeSendReceive || cfg.Type == config.FolderTypeReceiveOnly) && os.Getenv("STPULLRETRYCOOLDOWN") != "0" {
 		f.retry = newPullRetryTracker(f.pullBasePause, f.churn)
 		// User decision 2026-10-27 overrides the design's default-off B.
