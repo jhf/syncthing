@@ -61,6 +61,7 @@ var churnKeys = [...]string{
 	"backlog.zero", "backlog.nonzero", "backlog.db_error",
 	"db_update.lock_retry_exhausted",
 	"db_update.lock_wait_warning",
+	"delete_dir.waiting_for_contents",
 	"trigger.index", "trigger.scan", "trigger.retry", "trigger.initial", "trigger.other", "trigger.mixed", "trigger.unknown",
 }
 

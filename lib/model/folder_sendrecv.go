@@ -75,6 +75,7 @@ var (
 	errDirHasToBeScanned      = errors.New(errDirPrefix + "contains changed files, scheduling scan")
 	errDirHasIgnored          = errors.New(errDirPrefix + "contains ignored files (see ignore documentation for (?d) prefix)")
 	errDirNotEmpty            = errors.New(errDirPrefix + "is not empty; the contents are probably ignored on that remote device, but not locally")
+	errDirWaitingForContents  = errors.New(errDirPrefix + "its contents' deletions are still pending") // not a failure; see deleteDir
 	errNotAvailable           = errors.New("no connected device has the required version of this file")
 	errModified               = errors.New("file modified but not rescanned; will try again later")
 	errUnexpectedDirOnFileDel = errors.New("encountered directory when trying to remove file/symlink")
@@ -348,9 +349,10 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 	// file via the block map may lose that source and falls back to the
 	// network, exactly as when a file vanishes locally.
 	var delWg sync.WaitGroup
+	var waitingDirs []protocol.FileInfo
 	if err == nil {
 		delWg.Go(func() {
-			f.processDeletions(ctx, fileDeletions, dirDeletions, deferredDeletions, dbUpdateChan, scanChan)
+			waitingDirs = f.processDeletions(ctx, fileDeletions, dirDeletions, deferredDeletions, dbUpdateChan, scanChan)
 		})
 		if qerr := f.processQueue(ctx, buckets, deferredDeletions, copyChan, dbUpdateChan, scanChan); qerr != nil {
 			err = qerr
@@ -376,6 +378,18 @@ func (f *sendReceiveFolder) pullerIteration(ctx context.Context, scanChan chan<-
 	// pulls go last, once the pipeline has drained.
 	if err == nil && len(deferredDeletions) > 0 {
 		f.processDeletions(ctx, deferredDeletions, nil, nil, dbUpdateChan, scanChan)
+	}
+
+	// Directories that waited for their contents get one more attempt now
+	// that the deferred deletions are on disk too (deepest first, so a
+	// parent sees its children gone). Whatever still waits is held by
+	// tombstones that have not arrived yet; their index update schedules the
+	// next pull, so no failure and no retry timer are involved.
+	for _, dir := range waitingDirs {
+		if ctx.Err() != nil {
+			break
+		}
+		f.deleteDir(dir, dbUpdateChan, scanChan)
 	}
 
 	// Wait for db updates and scan scheduling to complete
@@ -691,35 +705,45 @@ func popCandidate(buckets map[string][]protocol.FileInfo, key string) (protocol.
 	return cands[0], true
 }
 
-func (f *sendReceiveFolder) processDeletions(ctx context.Context, fileDeletions map[string]protocol.FileInfo, dirDeletions []protocol.FileInfo, deferred map[string]protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) {
+// processDeletions applies the file deletions, then the directory deletions
+// deepest first. It returns the directories that are still waiting for
+// contents whose deletion is pending (see errDirWaitingForContents); the
+// caller retries them after the round's deferred file deletions.
+func (f *sendReceiveFolder) processDeletions(ctx context.Context, fileDeletions map[string]protocol.FileInfo, dirDeletions []protocol.FileInfo, deferred map[string]protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) (waiting []protocol.FileInfo) {
 	f.sl.Debug("Processing deletions", slog.Int("files", len(fileDeletions)), slog.Int("dirs", len(dirDeletions)))
 	collapsedDirs := f.collapseDeletions(ctx, fileDeletions, dirDeletions, deferred, dbUpdateChan)
 
 	for _, file := range fileDeletions {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		default:
 		}
 
 		f.deleteFile(file, dbUpdateChan, scanChan)
 	}
 
-	// Process in reverse order to delete depth first
-	for i := range dirDeletions {
+	// Delete depth first: a directory after everything below it. The need
+	// walk's order is the folder's pull order (random by default), so the
+	// list's own order says nothing about depth; sort by name descending,
+	// which puts every descendant ("a/b" > "a") before its ancestor.
+	slices.SortFunc(dirDeletions, func(a, b protocol.FileInfo) int { return strings.Compare(b.Name, a.Name) })
+	for _, dir := range dirDeletions {
 		select {
 		case <-ctx.Done():
-			return
+			return waiting
 		default:
 		}
 
-		dir := dirDeletions[len(dirDeletions)-i-1]
 		if _, ok := collapsedDirs[dir.Name]; ok {
 			continue
 		}
 		f.sl.DebugContext(ctx, "Deleting directory", slogutil.FilePath(dir.Name))
-		f.deleteDir(dir, dbUpdateChan, scanChan)
+		if errors.Is(f.deleteDir(dir, dbUpdateChan, scanChan), errDirWaitingForContents) {
+			waiting = append(waiting, dir)
+		}
 	}
+	return waiting // deepest first, the order the caller retries in
 }
 
 // collapseDeletionsMinSet is the smallest deletion set under one directory root for which the
@@ -1262,8 +1286,11 @@ func (f *sendReceiveFolder) handleSymlinkCheckExisting(file protocol.FileInfo, s
 	}
 }
 
-// deleteDir attempts to remove a directory that was deleted on a remote
-func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) {
+// deleteDir attempts to remove a directory that was deleted on a remote. It
+// returns errDirWaitingForContents, without recording a pull error, when the
+// directory is only non-empty because deletions of its contents are still on
+// their way (see deletionPending); any other failure is recorded as usual.
+func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) error {
 	// Used in the defer closure below, updated by the function body. Take
 	// care not declare another err.
 	var err error
@@ -1276,10 +1303,17 @@ func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, dbUpdateChan chan<
 	})
 
 	defer func() {
-		if err != nil {
+		switch {
+		case errors.Is(err, errDirWaitingForContents):
+			// Not a failure: the directory stays needed and goes when its
+			// contents' deletions have been applied, later this round or in
+			// the pull their index update schedules.
+			f.churn.count(file.Name, "delete_dir.waiting_for_contents", 1)
+			f.sl.Debug("Directory delete waits for its contents", slogutil.FilePath(file.Name))
+		case err != nil:
 			f.newPullError(file.Name, fmt.Errorf("delete dir: %w", err))
 			slog.Info("Failed to delete directory", f.LogAttr(), file.LogAttr(), slogutil.Error(err))
-		} else {
+		default:
 			slog.Info("Deleted directory", f.LogAttr(), file.LogAttr())
 		}
 		f.evLogger.Log(events.ItemFinished, map[string]any{
@@ -1293,7 +1327,7 @@ func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, dbUpdateChan chan<
 
 	cur, hasCur, err := f.model.sdb.GetDeviceFile(f.folderID, protocol.LocalDeviceID, file.Name)
 	if err != nil {
-		return
+		return err
 	}
 
 	if err = f.checkToBeDeleted(file, cur, hasCur, scanChan); err != nil {
@@ -1301,14 +1335,61 @@ func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, dbUpdateChan chan<
 			err = nil
 			dbUpdateChan <- dbUpdateJob{file: file, jobType: dbUpdateDeleteDir}
 		}
-		return
+		return err
 	}
 
-	if err = f.deleteDirOnDisk(file.Name, scanChan); err != nil {
-		return
+	if err = f.deleteDirOnDiskPending(file.Name, scanChan, f.deletionPendingFn(file)); err != nil {
+		return err
 	}
 
 	dbUpdateChan <- dbUpdateJob{file: file, jobType: dbUpdateDeleteDir}
+	return nil
+}
+
+// deletionPendingFn returns the predicate deleteDirOnDiskPending uses to tell
+// a directory that is merely early from one that is really not empty. A
+// device scans a removed tree in one pass but announces it in sequence order,
+// the directory's tombstone first: an index that arrives in several messages,
+// or a pull that starts while it is still arriving, sees the directory deleted
+// while some contents are still alive. Deleting the directory then fails with
+// "not empty" and the folder retries on its failure timer, once per directory
+// of the tree, until the rest of the index lands (228 such failures over 62
+// directories in one wave on yarlung, 2026-11-06).
+//
+// A local entry inside the directory is pending when its deletion is already
+// known (the global version is deleted: it goes this round, possibly in the
+// deferred pass, or with its own error), or when a device that announced the
+// directory's deletion still lists the entry as valid and present. That device
+// cannot have the entry on disk without the directory, so its own tombstone
+// for it is still on the way and its index update schedules the next pull.
+// Anything else (the deleting device never had the entry, or ignores it) is
+// genuine and keeps the "not empty" error. Database errors count as not
+// pending, which also keeps the error.
+func (f *sendReceiveFolder) deletionPendingFn(dir protocol.FileInfo) func(name string) bool {
+	var deleters []protocol.DeviceID
+	loaded := false
+	return func(name string) bool {
+		if g, ok, err := f.model.sdb.GetGlobalFile(f.folderID, name); err == nil && ok && g.IsDeleted() {
+			return true
+		}
+		if !loaded {
+			loaded = true
+			if g, ok, err := f.model.sdb.GetGlobalFile(f.folderID, dir.Name); err != nil || !ok || !g.IsDeleted() || !g.Version.Equal(dir.Version) {
+				return false // the deletion we are applying is no longer the global state
+			}
+			devs, err := f.model.sdb.GetGlobalAvailability(f.folderID, dir.Name)
+			if err != nil {
+				return false
+			}
+			deleters = devs
+		}
+		for _, dev := range deleters {
+			if df, ok, err := f.model.sdb.GetDeviceFile(f.folderID, dev, name); err == nil && ok && !df.IsDeleted() && !df.IsInvalid() {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 // deleteFile attempts to delete the given file
@@ -2461,11 +2542,19 @@ func (f *sendReceiveFolder) deleteItemOnDisk(item protocol.FileInfo, scanChan ch
 // deleteDirOnDisk attempts to delete a directory. It checks for files/dirs inside
 // the directory and removes them if possible or returns an error if it fails
 func (f *sendReceiveFolder) deleteDirOnDisk(dir string, scanChan chan<- string) error {
+	return f.deleteDirOnDiskPending(dir, scanChan, nil)
+}
+
+// deleteDirOnDiskPending is deleteDirOnDisk with a predicate naming the
+// entries whose deletion is pending (see deletionPendingFn). When every entry
+// that keeps the directory is pending, it returns errDirWaitingForContents
+// instead of errDirNotEmpty. A nil predicate pends nothing.
+func (f *sendReceiveFolder) deleteDirOnDiskPending(dir string, scanChan chan<- string, pending func(string) bool) error {
 	if err := osutil.TraversesSymlink(f.mtimefs, filepath.Dir(dir)); err != nil {
 		return err
 	}
 
-	if err := f.deleteDirOnDiskHandleChildren(dir, scanChan); err != nil {
+	if err := f.deleteDirOnDiskHandleChildren(dir, scanChan, pending); err != nil {
 		return err
 	}
 
@@ -2485,9 +2574,9 @@ func (f *sendReceiveFolder) deleteDirOnDisk(dir string, scanChan chan<- string) 
 	return err
 }
 
-func (f *sendReceiveFolder) deleteDirOnDiskHandleChildren(dir string, scanChan chan<- string) error {
+func (f *sendReceiveFolder) deleteDirOnDiskHandleChildren(dir string, scanChan chan<- string, pending func(string) bool) error {
 	var dirsToDelete []string
-	var hasIgnored, hasKnown, hasToBeScanned, hasReceiveOnlyChanged bool
+	var hasIgnored, hasKnown, hasPending, hasToBeScanned, hasReceiveOnlyChanged bool
 	var delErr error
 	err := f.mtimefs.Walk(dir, func(path string, info fs.FileInfo, err error) error {
 		if path == dir {
@@ -2550,7 +2639,12 @@ func (f *sendReceiveFolder) deleteDirOnDiskHandleChildren(dir string, scanChan c
 			return nil
 		}
 		// Dir contains file that is valid according to db and
-		// not ignored -> something weird is going on
+		// not ignored: either its own deletion is still on the way
+		// (the directory is merely early), or something weird is going on.
+		if pending != nil && pending(path) {
+			hasPending = true
+			return nil
+		}
 		hasKnown = true
 		return nil
 	})
@@ -2582,6 +2676,9 @@ func (f *sendReceiveFolder) deleteDirOnDiskHandleChildren(dir string, scanChan c
 	}
 	if hasKnown {
 		return errDirNotEmpty
+	}
+	if hasPending {
+		return errDirWaitingForContents
 	}
 	// All good, except maybe failing to remove a (?d) ignored item
 	return delErr
