@@ -8,6 +8,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
@@ -132,8 +133,7 @@ func (s *Service) periodic(ctx context.Context) error {
 	t1 := time.Now()
 	defer func() { slog.DebugContext(ctx, "Periodic done in", "t1", time.Since(t1), "t0t1", t1.Sub(t0)) }()
 
-	// tidy needs no lock; see the folder-GC tidy call below.
-	if err := tidy(ctx, s.sdb.sql); err != nil {
+	if err := tidy(ctx, s.sdb.baseDB); err != nil {
 		return err
 	}
 
@@ -179,11 +179,8 @@ func (s *Service) periodic(ctx context.Context) error {
 			return wrap(err)
 		}
 
-		// tidy runs unlocked: ANALYZE on a multi-million-row folder takes
-		// many minutes, and holding updateLock across it wedges every
-		// Update behind it (observed live on yarlung 2026-10-13 as a ~10
-		// minute stall that parked a connection dispatcher).
-		if err := tidy(ctx, fdb.sql); err != nil {
+		// Maintenance yields updateLock between bounded statements.
+		if err := tidy(ctx, fdb.baseDB); err != nil {
 			return wrap(err)
 		}
 
@@ -192,18 +189,109 @@ func (s *Service) periodic(ctx context.Context) error {
 	}))
 }
 
-func tidy(ctx context.Context, db *sqlx.DB) error {
-	conn, err := db.Conn(ctx)
+const tidyVacuumPages = 64
+
+// Work limits bound SQLite work, not elapsed time on stalled storage.
+func tidy(ctx context.Context, db *baseDB) error {
+	conn, err := db.sql.Conn(ctx)
 	if err != nil {
 		return wrap(err)
 	}
 	defer conn.Close()
-	_, _ = conn.ExecContext(ctx, `ANALYZE`)
-	_, _ = conn.ExecContext(ctx, `PRAGMA optimize`)
-	_, _ = conn.ExecContext(ctx, `PRAGMA incremental_vacuum`)
-	_, _ = conn.ExecContext(ctx, `PRAGMA journal_size_limit = 8388608`)
-	_, _ = conn.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
-	return nil
+
+	step := func(stmt string, scan func(*sql.Rows) ([]any, error)) error {
+		db.updateLock.Lock()
+		start := time.Now()
+		rows, err := conn.QueryContext(ctx, stmt)
+		count := 0
+		var values []any
+		if err == nil {
+			for rows.Next() {
+				count++
+				if scan != nil {
+					if values, err = scan(rows); err != nil {
+						break
+					}
+				} else {
+					cols, _ := rows.Columns()
+					values = make([]any, len(cols))
+					ptrs := make([]any, len(cols))
+					for i := range ptrs {
+						ptrs[i] = &values[i]
+					}
+					if err = rows.Scan(ptrs...); err != nil {
+						break
+					}
+				}
+			}
+			if err == nil {
+				err = rows.Err()
+			}
+			if closeErr := rows.Close(); err == nil {
+				err = closeErr
+			}
+		}
+		duration := time.Since(start)
+		db.updateLock.Unlock()
+		slog.InfoContext(ctx, "Database tidy statement", "db", db.path, "statement", stmt, "duration", duration, "rows", count, "result", values, "error", err)
+		return wrap(err)
+	}
+
+	// SQLite recommends hundreds or thousands of sampled rows per index.
+	// Split by table too, so the mutex is yielded between schema objects.
+	if err := step(`PRAGMA analysis_limit = 1000`, nil); err != nil {
+		return err
+	}
+	var tables []string
+	if err := step(`SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`, func(rows *sql.Rows) ([]any, error) {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		tables = append(tables, name)
+		return []any{name}, nil
+	}); err != nil {
+		return err
+	}
+	for _, name := range tables {
+		if err := step(`ANALYZE "`+strings.ReplaceAll(name, `"`, `""`)+`"`, nil); err != nil {
+			return err
+		}
+	}
+	if err := step(`PRAGMA optimize`, nil); err != nil {
+		return err
+	}
+	freePages := 0
+	readFree := func() error {
+		return step(`PRAGMA freelist_count`, func(rows *sql.Rows) ([]any, error) {
+			err := rows.Scan(&freePages)
+			return []any{freePages}, err
+		})
+	}
+	if err := readFree(); err != nil {
+		return err
+	}
+	// Cap this run at its initial freelist, even if concurrent Updates free
+	// more pages. Stop if auto_vacuum is off or a batch makes no progress.
+	for budget := freePages; budget > 0; budget -= tidyVacuumPages {
+		before := freePages
+		if err := step(`PRAGMA incremental_vacuum(64)`, nil); err != nil {
+			return err
+		}
+		if err := readFree(); err != nil {
+			return err
+		}
+		if freePages == 0 || freePages >= before {
+			break
+		}
+	}
+	if err := step(`PRAGMA journal_size_limit = 8388608`, nil); err != nil {
+		return err
+	}
+	// TRUNCATE can wait on a pinned reader whose consumer is waiting for
+	// Update and hence this mutex. PASSIVE never waits for readers/writers.
+	// Its result reports busy, WAL pages and checkpointed pages in the log.
+	return step(`PRAGMA wal_checkpoint(PASSIVE)`, nil)
 }
 
 func garbageCollectNamesAndVersions(ctx context.Context, fdb *folderDB) error {
