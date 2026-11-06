@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/syncthing/syncthing/internal/db"
+	"github.com/syncthing/syncthing/internal/slogutil"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/osutil"
@@ -61,7 +62,7 @@ func (f *sendReceiveFolder) queueInstallState(file, previous protocol.FileInfo, 
 	if err := f.mtimefs.Chtimes(temp, file.ModTime(), file.ModTime()); err != nil {
 		return nil, err
 	}
-	if !f.DisableFsync {
+	if !f.DisableFsync && !f.installSyncfs() {
 		fd, err := f.mtimefs.Open(temp)
 		if err != nil {
 			return nil, err
@@ -93,10 +94,104 @@ func (f *sendReceiveFolder) queueInstallState(file, previous protocol.FileInfo, 
 	return pending, nil
 }
 
+// precommitInstallFence makes a group's prepared temps durable before their
+// index commit. In syncfs mode (Linux default) one syncfs(2) of the folder
+// filesystem covers every temp's contents and directory entry, plus the
+// legacy (non-install) jobs' directories: one barrier per group instead of
+// one fsync per file. queueInstallState skipped the per-temp fsync in that
+// mode, so a failed syncfs must fall back to fsyncing each temp here; it is
+// never allowed to commit over unsynced temp bytes.
+func (f *sendReceiveFolder) precommitInstallFence(temps []string, installDirs, legacyDirs map[string]struct{}) error {
+	if f.DisableFsync || len(temps)+len(installDirs)+len(legacyDirs) == 0 {
+		return nil
+	}
+	if f.installSyncfs() {
+		if len(temps) >= installSyncfsMinGroup {
+			err := installSyncfsFn(f.Filesystem().URI())
+			if err == nil {
+				return nil
+			}
+			f.sl.Warn("syncfs failed, falling back to per-file fsyncs for install group", slogutil.Error(err))
+		}
+		// Small group (or failed syncfs): per-file fsyncs are cheaper than one
+		// syncfs, which flushes every dirty page of the whole filesystem.
+		for _, temp := range temps {
+			if err := f.fsyncInstallFile(temp); err != nil {
+				return err
+			}
+		}
+		if len(legacyDirs) > 0 {
+			f.fsyncDirs(legacyDirs)
+		}
+		return f.syncInstallDirs(installDirs)
+	}
+	if len(legacyDirs) > 0 {
+		f.flushPullDurability(legacyDirs)
+	}
+	return f.syncInstallDirs(installDirs)
+}
+
+// postrenameInstallFence makes the group's renames durable before the
+// pending bits are cleared. One syncfs in syncfs mode, else one fsync per
+// distinct directory.
+func (f *sendReceiveFolder) postrenameInstallFence(installDirs map[string]struct{}) error {
+	if f.DisableFsync || len(installDirs) == 0 {
+		return nil
+	}
+	if f.installSyncfs() && len(installDirs) >= installSyncfsMinGroup {
+		err := installSyncfsFn(f.Filesystem().URI())
+		if err == nil {
+			return nil
+		}
+		f.sl.Warn("syncfs failed, falling back to per-directory fsyncs for install group", slogutil.Error(err))
+	}
+	return f.syncInstallDirs(installDirs)
+}
+
+// installSyncfsMinGroup is the group size from which one syncfs(2) beats
+// individual fsyncs. syncfs flushes every dirty page of the folder's whole
+// filesystem, including other writers' data: measured ~0.5 s on yarlung
+// (btrfs, live Syncthing) against ~33 ms per small-file fsync. Below this
+// size the precommit fence fsyncs each temp and the postrename fence each
+// directory instead.
+const installSyncfsMinGroup = 8
+
+// installSyncfsFn is the install path's syncfs hook. It is distinct from
+// syncfsFn so tests can count install-group barriers independently.
+var installSyncfsFn = func(root string) error { return syncfsFn(root) }
+
+// installSyncfsForTest forces syncfs mode on the install path in tests, whose
+// fake filesystem otherwise disables it.
+var installSyncfsForTest = false
+
+// installSyncfs reports whether install groups use syncfs barriers instead of
+// per-temp and per-directory fsyncs. It must be decided consistently for both
+// the per-temp skip in queueInstallState and the group fences.
+func (f *sendReceiveFolder) installSyncfs() bool {
+	return !f.DisableFsync && (installSyncfsForTest || f.batchSyncfs())
+}
+
+func (f *sendReceiveFolder) fsyncInstallFile(name string) error {
+	fd, err := f.mtimefs.Open(name)
+	if err != nil {
+		return err
+	}
+	err = fd.Sync()
+	closeErr := fd.Close()
+	if err != nil {
+		return fmt.Errorf("syncing temporary file: %w", err)
+	}
+	return closeErr
+}
+
 func (f *sendReceiveFolder) syncInstallDirs(dirs map[string]struct{}) error {
 	if f.DisableFsync || f.Filesystem().Type() == fs.FilesystemTypeFake {
 		return nil
 	}
+	return f.fsyncInstallDirs(dirs)
+}
+
+func (f *sendReceiveFolder) fsyncInstallDirs(dirs map[string]struct{}) error {
 	for dir := range dirs {
 		fd, err := f.mtimefs.Open(dir)
 		if err != nil {
@@ -134,6 +229,7 @@ func (f *sendReceiveFolder) commitInstallGroup(ctx context.Context, group []dbUp
 	files := make([]protocol.FileInfo, len(group))
 	installDirs := make(map[string]struct{})
 	legacyDirs := make(map[string]struct{})
+	var temps []string
 	durable := false
 	for i, job := range group {
 		files[i] = job.file
@@ -141,6 +237,7 @@ func (f *sendReceiveFolder) commitInstallGroup(ctx context.Context, group []dbUp
 		if job.install != nil {
 			durable = true
 			installDirs[filepath.Dir(job.install.temp)] = struct{}{}
+			temps = append(temps, job.install.temp)
 		} else {
 			switch job.jobType {
 			case dbUpdateHandleFile, dbUpdateShortcutFile:
@@ -150,13 +247,10 @@ func (f *sendReceiveFolder) commitInstallGroup(ctx context.Context, group []dbUp
 			}
 		}
 	}
-	if len(legacyDirs) > 0 {
-		f.flushPullDurability(legacyDirs)
-	}
 	// The recovery temp's directory entry must itself survive a power failure.
 	// A temp-file fsync alone does not portably persist its name. Group this
 	// precommit directory fence, and retain the existing postrename fence too.
-	if err := f.syncInstallDirs(installDirs); err != nil {
+	if err := f.precommitInstallFence(temps, installDirs, legacyDirs); err != nil {
 		return err
 	}
 	if err := f.updatePullDBWithRetry(ctx, files, observer, durable); err != nil {
@@ -180,7 +274,7 @@ func (f *sendReceiveFolder) commitInstallGroup(ctx context.Context, group []dbUp
 		}
 		emitted = append(emitted, job.file)
 	}
-	if err := f.syncInstallDirs(installDirs); err != nil {
+	if err := f.postrenameInstallFence(installDirs); err != nil {
 		return err
 	}
 	// Clearing a pending bit needs no additional WAL sync: losing this normal

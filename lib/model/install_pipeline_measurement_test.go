@@ -176,12 +176,12 @@ func TestInstallPipelineMeasurement(t *testing.T) {
 			end := time.Now()
 			measured.mu.Lock()
 			defer measured.mu.Unlock()
-			if len(measured.latency) != n && !(defaultSync && len(measured.latency) == 0) {
+			if len(measured.latency) != n && !defaultSync {
 				t.Fatalf("visible files with observed temp flush=%d want=%d", len(measured.latency), n)
 			}
 			sort.Slice(measured.latency, func(i, j int) bool { return measured.latency[i] < measured.latency[j] })
-			p50, p99 := -time.Millisecond, -time.Millisecond // undefined for baseline postrename syncfs
-			if len(measured.latency) == n {
+			p50, p99 := -time.Millisecond, -time.Millisecond // undefined when syncfs replaced per-temp fsyncs
+			if k := len(measured.latency); k == n {
 				p50 = measured.latency[(n-1)*50/100]
 				p99 = measured.latency[(n-1)*99/100]
 			}

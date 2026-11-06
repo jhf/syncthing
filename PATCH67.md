@@ -120,6 +120,49 @@ The final candidate was compiled from committed source `9fe5ae1d6`, then only do
 
 Raw artifacts and reproduction: `tmp/install-after-commit/baseline.log`, `baseline.trace`, `candidate-committed.log`, `candidate-committed.trace`, `mac-baseline-traced.log`, `mac-baseline-traced-sync.log`, `mac-committed-traced.log`, `mac-committed-traced-sync.log`, `provenance-sha256.txt`, `COMMANDS.md`, `measure_sync.c`, `analyze_measurements.py`, `MEASUREMENTS.md`, `yarlung-cleanup.log`. The opt-in pipeline measurement remains in the regression source and is skipped unless STINSTALLBENCH=1.
 
+## syncfs group barriers (coordinator, 2026-11-06)
+
+**Problem.** v2 grew groups correctly, but on Linux default sync mode (`syncfs`, what production runs) it still fsynced every prepared temp on its own (`queueInstallState`). On yarlung those 2000 temp fsyncs took 348 s of summed syscall time, against 16 s for the WAL (`candidate-burst-v2-syscall-totals.md`). The pre-67 path paid one `syncfs` per batch.
+
+**Change** (`lib/model/install_after_commit.go`):
+- In syncfs mode `queueInstallState` skips the per-temp fsync.
+- `precommitInstallFence` issues one `syncfs(2)` before the durable commit. It covers every temp's bytes, every temp directory entry and the legacy jobs' directories.
+- `postrenameInstallFence` issues one `syncfs` after the renames.
+- If syncfs fails, every temp is fsynced individually before the commit. The commit is never allowed over unsynced temp bytes.
+- `installSyncfsMinGroup = 8`: smaller groups use per-temp/per-dir fsync instead. One syncfs flushes every dirty page of the filesystem, including other writers', so it is dearer than a few fsyncs for a trickle. A first cut without the threshold showed this: yarlung trickle dropped to 0.85-2.0 files/s.
+- `installSyncfs()` is the single switch, used consistently by the per-temp skip and both fences.
+
+**Regressions** (`lib/model/install_syncfs_test.go`):
+- `TestInstallAfterCommitSyncfsGroupBarriers`, 200 files through the real copier/finishers/updater. Before (v2 code with test shims): `files=200 syncfs=0 perFileSyncs=200`, `--- FAIL`. After: `files=200 syncfs=1 perFileSyncs=1`, `--- PASS`.
+- `TestInstallAfterCommitSyncfsFailureFallsBack`: a failing syncfs yields at least one fsync per temp.
+
+**Yarlung** (btrfs, 2x ST33000650NS, live service, `nice -n 15`, /var/tmp, removed afterwards). Baseline = rebased 66 `0b1cc6e8b`, upstream ordering. Three runs, files/s:
+
+| Mode | Case | baseline (66) | 67 + syncfs groups |
+|---|---|---|---|
+| Linux default (syncfs) | burst 2000 | 1081.8, 1012.7, 1042.6 | 529.7, 475.2, 457.9 |
+| Linux default (syncfs) | trickle 50 | 14.6, 16.3, 15.8 | 7.1, 8.2, 8.4 |
+| STSYNCMODE=fsync | burst 2000 | 180.0, 202.6, 201.7 | 144.7, 124.0, 127.8 |
+| STSYNCMODE=fsync | trickle 50 | 11.5, 12.7, 11.6 | 8.3, 8.2, 8.2 |
+
+Default-mode burst: v1 30.5, v2 64.4, now ~480 files/s against a baseline of ~1040. That is a ~2.2x elapsed cost for durable install-before-visible, down from ~16x.
+- Trickle: about 42 ms p50 / 67 ms p99 from temp flush to visible. That is one HDD fsync plus one WAL fsync, against <1 ms in the old order, which made files visible before they were durable.
+- Baseline files appear before their index commit is durable. That is the bug this patch fixes, so the baseline is a lower bound on cost, not a target.
+
+Gates on the final tree (`tmp/syncfs-group/gates-final.log`):
+
+```text
+go build ./... exit=0
+linux/amd64 exit=0
+vet clean
+ok  	github.com/syncthing/syncthing/lib/model	74.655s
+ok  	github.com/syncthing/syncthing/internal/db/sqlite	10.350s
+ok  	github.com/syncthing/syncthing/internal/slogutil	1.484s
+nocgo ok  	github.com/syncthing/syncthing/internal/db/sqlite	11.341s
+race20    1 ok  	github.com/syncthing/syncthing/internal/db/sqlite	29.319s
+race20    1 ok  	github.com/syncthing/syncthing/lib/model	151.818s
+```
+
 ## Open risks
 
 - FULL holds updateLock through slow storage flushes, and the measured throughput/visibility cost is substantial. No fairness bound or bounded shutdown of an in-flight OS/SQLite call is claimed.
