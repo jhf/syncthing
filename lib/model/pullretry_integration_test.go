@@ -77,7 +77,7 @@ func TestPullRetryFailedCommitRetainsStateAndDrains(t *testing.T) {
 			name = "other"
 		}
 		select {
-		case jobs <- dbUpdateJob{protocol.FileInfo{Name: name, Version: protocol.Vector{}.Update(1)}, dbUpdateHandleFile}:
+		case jobs <- dbUpdateJob{file: protocol.FileInfo{Name: name, Version: protocol.Vector{}.Update(1)}, jobType: dbUpdateHandleFile}:
 		case <-t.Context().Done():
 			t.Fatal("failed updater stopped draining")
 		}
@@ -98,7 +98,7 @@ func TestPullRetryFailedCommitRetainsStateAndDrains(t *testing.T) {
 	// failed batch committed any particular file.
 	d.fail = nil
 	jobs = make(chan dbUpdateJob, 1)
-	jobs <- dbUpdateJob{protocol.FileInfo{Name: "stable", Version: protocol.Vector{}.Update(1)}, dbUpdateHandleFile}
+	jobs <- dbUpdateJob{file: protocol.FileInfo{Name: "stable", Version: protocol.Vector{}.Update(1)}, jobType: dbUpdateHandleFile}
 	close(jobs)
 	_, err = f.dbUpdaterRoutine(t.Context(), jobs)
 	must(t, err)
@@ -113,7 +113,7 @@ func TestPullRetryFailedCommitRetainsStateAndDrains(t *testing.T) {
 		t.Fatal("stable file not committed")
 	}
 	jobs = make(chan dbUpdateJob, 1)
-	jobs <- dbUpdateJob{protocol.FileInfo{Name: "held", Version: protocol.Vector{}.Update(1)}, dbUpdateHandleFile}
+	jobs <- dbUpdateJob{file: protocol.FileInfo{Name: "held", Version: protocol.Vector{}.Update(1)}, jobType: dbUpdateHandleFile}
 	close(jobs)
 	_, err = f.dbUpdaterRoutine(t.Context(), jobs)
 	must(t, err)

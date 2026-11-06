@@ -740,7 +740,7 @@ func TestCopyOwner(t *testing.T) {
 	}()
 
 	f.handleFile(t.Context(), file, copierChan)
-	<-dbUpdateChan
+	commitQueuedFinishForTest(t, f, <-dbUpdateChan)
 
 	info, err = f.mtimefs.Lstat("foo/bar/baz")
 	if err != nil {
@@ -1228,9 +1228,13 @@ func TestPullCaseOnlyRename(t *testing.T) {
 
 	dbUpdateChan := make(chan dbUpdateJob, 2)
 	scanChan := make(chan string, 2)
+	done := make(chan error, 1)
+	go func() { _, err := f.dbUpdaterRoutine(t.Context(), dbUpdateChan); done <- err }()
 	if err := f.renameFile(cur, deleted, confl, dbUpdateChan, scanChan); err != nil {
 		t.Error(err)
 	}
+	close(dbUpdateChan)
+	must(t, <-done)
 }
 
 func TestPullSymlinkOverExistingWindows(t *testing.T) {

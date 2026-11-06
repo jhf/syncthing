@@ -45,7 +45,20 @@ func (s *folderDB) Update(device protocol.DeviceID, fs []protocol.FileInfo, opti
 		return wrap(err)
 	}
 
-	tx, err := s.sql.BeginTxx(context.Background(), nil)
+	var tx *sqlx.Tx
+	if options.Durable {
+		conn, release, err := s.pullCommitConnectionLocked()
+		if err != nil {
+			return wrap(err)
+		}
+		defer release()
+		tx, err = conn.BeginTxx(context.Background(), nil)
+		if err != nil {
+			return wrap(err)
+		}
+	} else {
+		tx, err = s.sql.BeginTxx(context.Background(), nil)
+	}
 	if err != nil {
 		return wrap(err)
 	}

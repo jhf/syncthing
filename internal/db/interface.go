@@ -49,6 +49,13 @@ type UpdateOption func(*UpdateOptions)
 // UpdateOptions holds options for a DB Update call.
 type UpdateOptions struct {
 	SkipBlockIndex bool
+	Durable        bool
+}
+
+// WithDurable makes this transaction durable before Update returns. It is used
+// only by the pull-install committer, never ordinary scan or index writes.
+func WithDurable() UpdateOption {
+	return func(o *UpdateOptions) { o.Durable = true }
 }
 
 // WithSkipBlockIndex skips inserting individual blocks into the block
@@ -67,6 +74,7 @@ type DB interface {
 
 	// Basics
 	Update(folder string, device protocol.DeviceID, fs []protocol.FileInfo, opts ...UpdateOption) error
+	PendingInstalls(folder string) ([]protocol.FileInfo, error)
 	Close() error
 
 	// Single files

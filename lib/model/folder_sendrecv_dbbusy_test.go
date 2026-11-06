@@ -60,7 +60,7 @@ func TestPullDBTerminalFailureDrains(t *testing.T) {
 		defer close(jobs)
 		for range dbUpdateBatchSizeFiles + 10 {
 			select {
-			case jobs <- dbUpdateJob{protocol.FileInfo{Name: "held", Version: protocol.Vector{}.Update(1)}, dbUpdateHandleFile}:
+			case jobs <- dbUpdateJob{file: protocol.FileInfo{Name: "held", Version: protocol.Vector{}.Update(1)}, jobType: dbUpdateHandleFile}:
 			case <-deadline.C:
 				t.Fatal("exhausted updater stopped draining producers")
 			}
@@ -68,7 +68,7 @@ func TestPullDBTerminalFailureDrains(t *testing.T) {
 	}()
 	select {
 	case got := <-done:
-		if got.changed != dbUpdateBatchSizeFiles || !errors.Is(got.err, busy) || boundary.calls != 1 {
+		if got.changed < 1 || got.changed > dbUpdateBatchSizeFiles || !errors.Is(got.err, busy) || boundary.calls != 1 {
 			t.Fatalf("exhaustion: changed=%d calls=%d err=%v", got.changed, boundary.calls, got.err)
 		}
 	case <-deadline.C:
@@ -90,6 +90,15 @@ func TestPullDBTerminalFailureDrains(t *testing.T) {
 }
 
 func (d *patch58BusyDB) Update(folder string, device protocol.DeviceID, files []protocol.FileInfo, opts ...db.UpdateOption) error {
+	// Postpublication pending-bit acknowledgement is a separate NORMAL
+	// transaction, not another attempt of the held install commit.
+	var options db.UpdateOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+	if options.SkipBlockIndex && !options.Durable {
+		return d.DB.Update(folder, device, files, opts...)
+	}
 	d.calls++
 	if d.failures != 0 {
 		d.failures--
@@ -100,9 +109,8 @@ func (d *patch58BusyDB) Update(folder string, device protocol.DeviceID, files []
 
 // TestPullDBBusyRescanCreatesFalseConflict guards the former transient-lock bug:
 // retry must index Syncthing's own S1 before a later scan, with no receiver
-// authorship or false conflict on S3. The non-lock control documents the
-// pre-install-after-commit failure: a rescan adopts the already-published bytes
-// as receiver work. Patch/67 changes that contract by delaying publication.
+// authorship or false conflict on S3. Prolonged-lock and non-lock controls
+// leave the old file indexed and installed until a later pull can commit.
 // The stopped model serializes complete pull batches and later real scans.
 // User-confirmed invariant (2026-11-05 22:25 UTC): NOTHING but Syncthing writes
 // to the synced folder on yarlung. Fixtures name the gateway incident (pulled
@@ -215,14 +223,17 @@ func TestPullDBBusyRescanCreatesFalseConflict(t *testing.T) {
 					after, err := f.GetLastFile()
 					must(t, err)
 					indexed := current(name)
-					if !bytes.Equal(read(name), s1Bytes) {
+					if !mode.terminal && !bytes.Equal(read(name), s1Bytes) {
 						t.Fatal("disk does not contain installed S1")
 					}
 					if mode.terminal {
 						if !indexed.Version.Equal(s0.Version) || indexed.ModifiedBy != sender || !bytes.Equal(indexed.BlocksHash, s0.BlocksHash) || after != before || len(f.retry.entries) != 1 {
 							t.Fatal("terminal failure did not preserve stale index, hold and ReceivedFile state")
 						}
-						t.Log("terminal failure: disk S1, index S0, no ReceivedFile or cooldown clear")
+						if !bytes.Equal(read(name), s0Bytes) || !bytes.Equal(read(fs.TempName(name)), s1Bytes) {
+							t.Fatal("failed commit changed the old file or lost its reusable temp")
+						}
+						t.Log("terminal failure: disk S0, index S0, temp S1, no ReceivedFile or cooldown clear")
 					} else {
 						if !indexed.Version.Equal(s1.Version) || indexed.ModifiedBy != sender || !bytes.Equal(indexed.BlocksHash, s1.BlocksHash) || after.Filename != name || len(f.retry.entries) != 0 {
 							t.Fatal("transient retry did not commit sender S1 and clear its hold")
@@ -230,6 +241,17 @@ func TestPullDBBusyRescanCreatesFalseConflict(t *testing.T) {
 						t.Log("transient lock: same batch retried and sender S1 committed")
 					}
 					boundary.failures = 0 // the later scan is after the failure/retry path
+					if mode.terminal {
+						must(t, f.scanSubdirs(t.Context(), []string{name}))
+						if !current(name).Version.Equal(s0.Version) || current(name).Version.Counter(receiver) != 0 {
+							t.Fatal("failed install minted a receiver counter")
+						}
+						retryJobs := make(chan dbUpdateJob, 1)
+						must(t, f.performFinish(s1, current(name), true, fs.TempName(name), retryJobs, scans))
+						close(retryJobs)
+						_, err = f.dbUpdaterRoutine(t.Context(), retryJobs)
+						must(t, err)
+					}
 
 					// No receiver content or metadata edits and no fabricated scan result.
 					must(t, f.scanSubdirs(t.Context(), []string{name}))
@@ -237,12 +259,8 @@ func TestPullDBBusyRescanCreatesFalseConflict(t *testing.T) {
 					if !bytes.Equal(cur.BlocksHash, s1.BlocksHash) || !bytes.Equal(cur.PreviousBlocksHash, s0.BlocksHash) || !bytes.Equal(read(name), s1Bytes) || !cur.ModTime().Equal(s1.ModTime()) {
 						t.Fatalf("rescan changed S1 content, timestamp or predecessor: %+v", cur)
 					}
-					if mode.terminal {
-						if cur.Version.Counter(receiver) == 0 || cur.Version.Counter(sender) != s0.Version.Counter(sender) || len(cur.Version.Counters) != 2 || cur.ModifiedBy != receiver {
-							t.Fatalf("terminal rescan no longer follows documented failure path: %+v", cur)
-						}
-					} else if !cur.Version.Equal(s1.Version) || cur.Version.Counter(receiver) != 0 || cur.ModifiedBy != sender {
-						t.Fatalf("rescan minted receiver work despite successful retry: %+v", cur)
+					if !cur.Version.Equal(s1.Version) || cur.Version.Counter(receiver) != 0 || cur.ModifiedBy != sender {
+						t.Fatalf("rescan minted receiver work instead of adopting durable intent: %+v", cur)
 					}
 					s2 := makeInfo([]byte("{\"state\":\"S2 never received\"}\n"), 2)
 					s3 := makeInfo(s3Bytes, 3)
@@ -250,8 +268,7 @@ func TestPullDBBusyRescanCreatesFalseConflict(t *testing.T) {
 					if matching {
 						s3.PreviousBlocksHash = s1.BlocksHash
 					}
-					wantConflict := mode.terminal && !matching
-					if s3.InConflictWith(cur) != wantConflict {
+					if s3.InConflictWith(cur) {
 						t.Fatal("unexpected conflict predicate")
 					}
 					changed, err = f.dbUpdaterRoutine(t.Context(), finish(s3, cur, true, s3Bytes))
@@ -260,27 +277,10 @@ func TestPullDBBusyRescanCreatesFalseConflict(t *testing.T) {
 						t.Fatal("S3 did not finish/index unchanged")
 					}
 					conflicts := existingConflicts(name, f.mtimefs)
-					if !wantConflict {
-						if len(conflicts) != 0 || len(scans) != 0 {
-							t.Fatalf("unexpected conflict/rescan: %v", conflicts)
-						}
-						t.Log("S3 installed without conflict or conflict scan")
-						return
+					if len(conflicts) != 0 || len(scans) != 0 {
+						t.Fatalf("unexpected conflict/rescan: %v", conflicts)
 					}
-					if len(conflicts) != 1 || !bytes.Equal(read(conflicts[0]), s1Bytes) {
-						t.Fatalf("terminal control must retain documented S1 false conflict: %v", conflicts)
-					}
-					if len(scans) != 1 || <-scans != conflicts[0] {
-						t.Fatal("conflict not scheduled for real scan")
-					}
-					must(t, f.scanSubdirs(t.Context(), conflicts))
-					copyInfo := current(conflicts[0])
-					if copyInfo.Name == name || copyInfo.IsDeleted() || copyInfo.IsInvalid() || copyInfo.ModifiedBy != receiver || copyInfo.Version.Counter(receiver) == 0 || copyInfo.Version.Counter(sender) != 0 || len(copyInfo.Version.Counters) != 1 || len(copyInfo.PreviousBlocksHash) != 0 || !bytes.Equal(copyInfo.BlocksHash, s1.BlocksHash) || copyInfo.Size != s1.Size {
-						t.Fatalf("conflict not indexed as independent receiver file: %+v", copyInfo)
-					}
-					if !current(name).Version.Equal(s3.Version) {
-						t.Fatal("conflict scan altered original index")
-					}
+					t.Log("S3 installed without conflict or conflict scan")
 				})
 			}
 		}

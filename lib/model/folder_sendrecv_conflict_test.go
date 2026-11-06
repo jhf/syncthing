@@ -142,17 +142,17 @@ func TestPullConflictFromReceiverLocalVersionDivergence(t *testing.T) {
 			}
 
 			must(t, f.performFinish(incoming, cur, true, temp, dbChan, scanChan))
-			if !bytes.Equal(read(name), newContent) {
-				t.Fatal("finish did not install sender v4")
-			}
 			select {
 			case job := <-dbChan:
 				if job.jobType != dbUpdateHandleFile || job.file.Name != name || !job.file.Version.Equal(incoming.Version) {
 					t.Fatalf("unexpected completion job: %+v", job)
 				}
-				must(t, f.updateLocalsFromPulling([]protocol.FileInfo{job.file}))
+				commitQueuedFinishForTest(t, f, job)
 			default:
 				t.Fatal("finish did not queue index update")
+			}
+			if !bytes.Equal(read(name), newContent) {
+				t.Fatal("durable finish did not install sender v4")
 			}
 			if !current().Version.Equal(incoming.Version) {
 				t.Fatal("pull completion changed incoming vector")

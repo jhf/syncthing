@@ -125,6 +125,7 @@ const (
 type dbUpdateJob struct {
 	file    protocol.FileInfo
 	jobType dbUpdateType
+	install *pendingInstall
 }
 
 type sendReceiveFolder struct {
@@ -185,6 +186,9 @@ func newSendReceiveFolder(model *model, ignores *ignore.Matcher, cfg config.Fold
 // pull returns true if it manages to get all needed items from peers, i.e. get
 // the device in sync with the global state.
 func (f *sendReceiveFolder) pull(ctx context.Context) (bool, error) {
+	if err := f.RecoverPendingInstalls(ctx); err != nil {
+		return false, err
+	}
 	f.retry.begin()
 	f.sl.DebugContext(ctx, "Pulling")
 
@@ -421,7 +425,7 @@ loop:
 		case f.ignores.Match(file.Name).IsIgnored():
 			file.SetIgnored()
 			f.sl.DebugContext(ctx, "Handling ignored file", file.LogAttr())
-			dbUpdateChan <- dbUpdateJob{file, dbUpdateInvalidate}
+			dbUpdateChan <- dbUpdateJob{file: file, jobType: dbUpdateInvalidate}
 
 		case build.IsWindows && fs.WindowsInvalidFilename(file.Name) != nil:
 			if file.IsDeleted() {
@@ -429,7 +433,7 @@ loop:
 				// about a deleted file that we can't have anyway.
 				// Reason we need it in the first place is, that it was
 				// ignored at some point.
-				dbUpdateChan <- dbUpdateJob{file, dbUpdateDeleteFile}
+				dbUpdateChan <- dbUpdateJob{file: file, jobType: dbUpdateDeleteFile}
 			} else {
 				// We can't pull an invalid file. Grab the error again since
 				// we couldn't assign it directly in the case clause.
@@ -501,7 +505,7 @@ loop:
 			}
 			file.SetUnsupported()
 			f.sl.DebugContext(ctx, "Invalidating unsupported symlink", slogutil.FilePath(file.Name))
-			dbUpdateChan <- dbUpdateJob{file, dbUpdateInvalidate}
+			dbUpdateChan <- dbUpdateJob{file: file, jobType: dbUpdateInvalidate}
 
 		case file.IsDirectory() && !file.IsSymlink():
 			f.sl.DebugContext(ctx, "Handling directory", slogutil.FilePath(file.Name))
@@ -839,15 +843,15 @@ func (f *sendReceiveFolder) collapseDeletions(ctx context.Context, fileDeletions
 			default:
 			}
 			if d, ok := dirSet[name]; ok {
-				dbUpdateChan <- dbUpdateJob{d, dbUpdateDeleteDir}
+				dbUpdateChan <- dbUpdateJob{file: d, jobType: dbUpdateDeleteDir}
 				collapsed[name] = struct{}{}
 			} else if fi, ok := fileDeletions[name]; ok {
-				dbUpdateChan <- dbUpdateJob{fi, dbUpdateDeleteFile}
+				dbUpdateChan <- dbUpdateJob{file: fi, jobType: dbUpdateDeleteFile}
 				delete(fileDeletions, name)
 			}
 			count++
 		}
-		dbUpdateChan <- dbUpdateJob{dirSet[root], dbUpdateDeleteDir}
+		dbUpdateChan <- dbUpdateJob{file: dirSet[root], jobType: dbUpdateDeleteDir}
 		collapsed[root] = struct{}{}
 		count++
 		slog.Info("Deleted directory tree in one collapsed delete", f.LogAttr(), slogutil.FilePath(root), slog.Int("items", count))
@@ -1068,7 +1072,7 @@ func (f *sendReceiveFolder) handleDir(file protocol.FileInfo, dbUpdateChan chan<
 		}
 
 		if err = f.inWritableDir(mkdir, file.Name); err == nil {
-			dbUpdateChan <- dbUpdateJob{file, dbUpdateHandleDir}
+			dbUpdateChan <- dbUpdateJob{file: file, jobType: dbUpdateHandleDir}
 		} else {
 			f.newPullError(file.Name, fmt.Errorf("creating directory: %w", err))
 		}
@@ -1093,7 +1097,7 @@ func (f *sendReceiveFolder) handleDir(file protocol.FileInfo, dbUpdateChan chan<
 		f.newPullError(file.Name, fmt.Errorf("handling dir (setting metadata): %w", err))
 		return
 	}
-	dbUpdateChan <- dbUpdateJob{file, dbUpdateHandleDir}
+	dbUpdateChan <- dbUpdateJob{file: file, jobType: dbUpdateHandleDir}
 }
 
 // checkParent verifies that the thing we are handling lives inside a directory,
@@ -1219,7 +1223,7 @@ func (f *sendReceiveFolder) handleSymlink(file protocol.FileInfo, dbUpdateChan c
 	}
 
 	if err = f.inWritableDir(createLink, file.Name); err == nil {
-		dbUpdateChan <- dbUpdateJob{file, dbUpdateHandleSymlink}
+		dbUpdateChan <- dbUpdateJob{file: file, jobType: dbUpdateHandleSymlink}
 	} else {
 		f.newPullError(file.Name, fmt.Errorf("symlink create: %w", err))
 	}
@@ -1295,7 +1299,7 @@ func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, dbUpdateChan chan<
 	if err = f.checkToBeDeleted(file, cur, hasCur, scanChan); err != nil {
 		if fs.IsNotExist(err) || fs.IsErrCaseConflict(err) {
 			err = nil
-			dbUpdateChan <- dbUpdateJob{file, dbUpdateDeleteDir}
+			dbUpdateChan <- dbUpdateJob{file: file, jobType: dbUpdateDeleteDir}
 		}
 		return
 	}
@@ -1304,7 +1308,7 @@ func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, dbUpdateChan chan<
 		return
 	}
 
-	dbUpdateChan <- dbUpdateJob{file, dbUpdateDeleteDir}
+	dbUpdateChan <- dbUpdateJob{file: file, jobType: dbUpdateDeleteDir}
 }
 
 // deleteFile attempts to delete the given file
@@ -1354,7 +1358,7 @@ func (f *sendReceiveFolder) deleteFileWithCurrent(file, cur protocol.FileInfo, h
 	if err = f.checkToBeDeleted(file, cur, hasCur, scanChan); err != nil {
 		if fs.IsNotExist(err) || fs.IsErrCaseConflict(err) {
 			err = nil
-			dbUpdateChan <- dbUpdateJob{file, dbUpdateDeleteFile}
+			dbUpdateChan <- dbUpdateJob{file: file, jobType: dbUpdateDeleteFile}
 		}
 		return
 	}
@@ -1386,7 +1390,7 @@ func (f *sendReceiveFolder) deleteFileWithCurrent(file, cur protocol.FileInfo, h
 	if err == nil || fs.IsNotExist(err) {
 		// It was removed or it doesn't exist to start with
 		err = nil
-		dbUpdateChan <- dbUpdateJob{file, dbUpdateDeleteFile}
+		dbUpdateChan <- dbUpdateJob{file: file, jobType: dbUpdateDeleteFile}
 		return
 	}
 
@@ -1396,7 +1400,7 @@ func (f *sendReceiveFolder) deleteFileWithCurrent(file, cur protocol.FileInfo, h
 		// does not exist" (possibly expressed as some parent being a file and
 		// not a directory etc) and that the delete is handled.
 		err = nil
-		dbUpdateChan <- dbUpdateJob{file, dbUpdateDeleteFile}
+		dbUpdateChan <- dbUpdateJob{file: file, jobType: dbUpdateDeleteFile}
 	}
 }
 
@@ -1453,6 +1457,7 @@ func (f *sendReceiveFolder) renameFile(cur, source, target protocol.FileInfo, db
 	if err != nil {
 		return err
 	}
+	caseOnly := false
 	switch stat, serr := f.mtimefs.Lstat(target.Name); {
 	case serr != nil:
 		var caseErr *fs.CaseConflictError
@@ -1462,8 +1467,14 @@ func (f *sendReceiveFolder) renameFile(cur, source, target protocol.FileInfo, db
 				err = serr
 				break
 			}
+			caseOnly = true
+			curTarget = cur
+			ok = true
 			fallthrough // This is a case only rename
 		case fs.IsNotExist(serr):
+			if caseOnly {
+				break
+			}
 			if !ok || curTarget.IsDeleted() {
 				break
 			}
@@ -1500,17 +1511,11 @@ func (f *sendReceiveFolder) renameFile(cur, source, target protocol.FileInfo, db
 	}
 
 	tempName := fs.TempName(target.Name)
-
-	if f.versioner != nil {
-		err = f.CheckAvailableSpace(uint64(source.Size)) //nolint:gosec
-		if err == nil {
-			err = osutil.Copy(f.CopyRangeMethod.ToFS(), f.mtimefs, f.mtimefs, source.Name, tempName)
-			if err == nil {
-				err = f.inWritableDir(f.versioner.Archive, source.Name)
-			}
-		}
-	} else {
-		err = osutil.RenameOrCopy(f.CopyRangeMethod.ToFS(), f.mtimefs, f.mtimefs, source.Name, tempName)
+	// A rename into the temp would remove indexed source bytes before the
+	// target commit. Copy/reflink instead, retaining the source until success.
+	err = f.CheckAvailableSpace(uint64(source.Size)) //nolint:gosec
+	if err == nil {
+		err = osutil.Copy(f.CopyRangeMethod.ToFS(), f.mtimefs, f.mtimefs, source.Name, tempName)
 	}
 	if err != nil {
 		return err
@@ -1522,15 +1527,29 @@ func (f *sendReceiveFolder) renameFile(cur, source, target protocol.FileInfo, db
 	blockStats["renamed"] += len(target.Blocks) * minBlocksPerBlock
 	blockStatsMut.Unlock()
 
-	// The file was renamed, so we have handled both the necessary delete
-	// of the source and the creation of the target temp file. Fix-up the metadata,
-	// update the local index of the target file and rename from temp to real name.
-
-	if err = f.performFinish(target, curTarget, true, tempName, dbUpdateChan, scanChan); err != nil {
+	var pending *pendingInstall
+	pending, err = f.queueInstall(target, curTarget, ok, tempName, dbUpdateChan, scanChan)
+	if err != nil {
 		return err
 	}
+	if err = <-pending.done; err != nil {
+		return err
+	}
+	if !caseOnly {
+		if err = f.checkToBeDeleted(source, cur, true, scanChan); err != nil {
+			return err
+		}
+		if f.versioner != nil {
+			err = f.inWritableDir(f.versioner.Archive, source.Name)
+		} else {
+			err = f.inWritableDir(f.mtimefs.Remove, source.Name)
+		}
+		if err != nil && !fs.IsNotExist(err) {
+			return err
+		}
+	}
 
-	dbUpdateChan <- dbUpdateJob{source, dbUpdateDeleteFile}
+	dbUpdateChan <- dbUpdateJob{file: source, jobType: dbUpdateDeleteFile}
 
 	return nil
 }
@@ -1609,7 +1628,7 @@ func (f *sendReceiveFolder) handleFile(ctx context.Context, file protocol.FileIn
 		"action": "update",
 	})
 
-	s := newSharedPullerState(file, f.mtimefs, f.folderID, tempName, blocks, reused, f.IgnorePerms || file.NoPermissions, hasCurFile, curFile, !f.DisableSparseFiles, !f.DisableFsync && !f.batchSyncfs())
+	s := newSharedPullerState(file, f.mtimefs, f.folderID, tempName, blocks, reused, f.IgnorePerms || file.NoPermissions, hasCurFile, curFile, !f.DisableSparseFiles, false)
 	if len(attempt) > 0 {
 		s.attemptID = attempt[0]
 	}
@@ -1786,7 +1805,7 @@ func (f *sendReceiveFolder) shortcutFile(file, curFile protocol.FileInfo, dbUpda
 
 	f.mtimefs.Chtimes(file.Name, file.ModTime(), file.ModTime()) // never fails
 
-	dbUpdateChan <- dbUpdateJob{file, dbUpdateShortcutFile}
+	dbUpdateChan <- dbUpdateJob{file: file, jobType: dbUpdateShortcutFile}
 	f.churn.complete(file.Name)
 }
 
@@ -2131,57 +2150,8 @@ loop:
 }
 
 func (f *sendReceiveFolder) performFinish(file, curFile protocol.FileInfo, hasCurFile bool, tempName string, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) error {
-	// Set the correct permission bits on the new file
-	if !f.IgnorePerms && !file.NoPermissions {
-		if err := f.mtimefs.Chmod(tempName, fs.FileMode(file.Permissions&0o777)); err != nil {
-			return fmt.Errorf("setting permissions: %w", err)
-		}
-	}
-
-	// Set file xattrs and ownership.
-	if err := f.setPlatformData(&file, tempName); err != nil {
-		return fmt.Errorf("setting metadata: %w", err)
-	}
-
-	if stat, err := f.mtimefs.Lstat(file.Name); err == nil {
-		// There is an old file or directory already in place. We need to
-		// handle that.
-
-		if err := f.scanIfItemChanged(file.Name, stat, curFile, hasCurFile, false, scanChan); err != nil {
-			return fmt.Errorf("checking existing file: %w", err)
-		}
-
-		if !curFile.IsDirectory() && !curFile.IsSymlink() && file.InConflictWith(curFile) {
-			// The new file has been changed in conflict with the existing one. We
-			// should file it away as a conflict instead of just removing or
-			// archiving.
-			// Directories and symlinks aren't checked for conflicts.
-
-			err = f.inWritableDir(func(name string) error {
-				return f.moveForConflict(name, file.ModifiedBy.String(), scanChan)
-			}, curFile.Name)
-		} else {
-			err = f.deleteItemOnDisk(curFile, scanChan)
-		}
-		if err != nil {
-			return fmt.Errorf("moving for conflict: %w", err)
-		}
-	} else if !fs.IsNotExist(err) {
-		return fmt.Errorf("checking existing file: %w", err)
-	}
-
-	// Replace the original content with the new one. If it didn't work,
-	// leave the temp file in place for reuse.
-	if err := osutil.RenameOrCopy(f.CopyRangeMethod.ToFS(), f.mtimefs, f.mtimefs, tempName, file.Name); err != nil {
-		return fmt.Errorf("replacing file: %w", err)
-	}
-
-	// Set the correct timestamp on the new file
-	f.mtimefs.Chtimes(file.Name, file.ModTime(), file.ModTime()) // never fails
-
-	// Record the updated file in the index
-	dbUpdateChan <- dbUpdateJob{file, dbUpdateHandleFile}
-	return nil
+	_, err := f.queueInstall(file, curFile, hasCurFile, tempName, dbUpdateChan, scanChan)
+	return err
 }
 
 func (f *sendReceiveFolder) finisherRoutine(ctx context.Context, in <-chan *sharedPullerState, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) {
@@ -2189,43 +2159,58 @@ func (f *sendReceiveFolder) finisherRoutine(ctx context.Context, in <-chan *shar
 		if closed, err := state.finalClose(); closed {
 			f.sl.DebugContext(ctx, "Closing temp file", slogutil.FilePath(state.file.Name))
 
-			f.queue.Done(state.file.Name)
-
 			if err == nil {
-				err = f.performFinish(state.file, state.curFile, state.hasCurFile, state.tempName, dbUpdateChan, scanChan)
+				_, err = f.queueInstallState(state.file, state.curFile, state.hasCurFile, state.tempName, dbUpdateChan, scanChan, state)
+				if err == nil {
+					// The committer now owns state, including queue/progress/error
+					// accounting. Do not cap pending installs at the finisher count.
+					continue
+				}
 			}
-
-			if err != nil {
-				f.newPullError(state.file.Name, retryAttemptError(fmt.Errorf("finishing: %w", err), state.attemptID), state.file)
-			} else {
-				f.churn.complete(state.file.Name)
-				slog.InfoContext(ctx, "Synced file", f.LogAttr(), state.file.LogAttr(), slog.Group("blocks", slog.Int("local", state.reused+state.copyTotal), slog.Int("download", state.pullTotal)))
-
-				minBlocksPerBlock := state.file.BlockSize() / protocol.MinBlockSize
-				blockStatsMut.Lock()
-				blockStats["total"] += (state.reused + state.copyTotal + state.pullTotal) * minBlocksPerBlock
-				blockStats["reused"] += state.reused * minBlocksPerBlock
-				blockStats["pulled"] += state.pullTotal * minBlocksPerBlock
-				// copyOriginShifted is counted towards copyOrigin due to progress bar reasons
-				// for reporting reasons we want to separate these.
-				blockStats["copyOrigin"] += state.copyOrigin * minBlocksPerBlock
-				blockStats["copyElsewhere"] += (state.copyTotal - state.copyOrigin) * minBlocksPerBlock
-				blockStatsMut.Unlock()
-			}
-
-			if f.Type != config.FolderTypeReceiveEncrypted {
-				f.model.progressEmitter.Deregister(state)
-			}
-
-			f.evLogger.Log(events.ItemFinished, map[string]any{
-				"folder": f.folderID,
-				"item":   state.file.Name,
-				"error":  events.Error(err),
-				"type":   "file",
-				"action": "update",
-			})
+			f.completePullInstall(ctx, state, err)
 		}
 	}
+}
+
+func (f *sendReceiveFolder) completeInstall(ctx context.Context, pending *pendingInstall, err error) {
+	if pending.state != nil {
+		f.completePullInstall(ctx, pending.state, err)
+	}
+	pending.done <- err
+}
+
+func (f *sendReceiveFolder) completePullInstall(ctx context.Context, state *sharedPullerState, err error) {
+	f.queue.Done(state.file.Name)
+
+	if err != nil {
+		f.newPullError(state.file.Name, retryAttemptError(fmt.Errorf("finishing: %w", err), state.attemptID), state.file)
+	} else {
+		f.churn.complete(state.file.Name)
+		slog.InfoContext(ctx, "Synced file", f.LogAttr(), state.file.LogAttr(), slog.Group("blocks", slog.Int("local", state.reused+state.copyTotal), slog.Int("download", state.pullTotal)))
+
+		minBlocksPerBlock := state.file.BlockSize() / protocol.MinBlockSize
+		blockStatsMut.Lock()
+		blockStats["total"] += (state.reused + state.copyTotal + state.pullTotal) * minBlocksPerBlock
+		blockStats["reused"] += state.reused * minBlocksPerBlock
+		blockStats["pulled"] += state.pullTotal * minBlocksPerBlock
+		// copyOriginShifted is counted towards copyOrigin due to progress bar reasons
+		// for reporting reasons we want to separate these.
+		blockStats["copyOrigin"] += state.copyOrigin * minBlocksPerBlock
+		blockStats["copyElsewhere"] += (state.copyTotal - state.copyOrigin) * minBlocksPerBlock
+		blockStatsMut.Unlock()
+	}
+
+	if f.Type != config.FolderTypeReceiveEncrypted {
+		f.model.progressEmitter.Deregister(state)
+	}
+
+	f.evLogger.Log(events.ItemFinished, map[string]any{
+		"folder": f.folderID,
+		"item":   state.file.Name,
+		"error":  events.Error(err),
+		"type":   "file",
+		"action": "update",
+	})
 }
 
 // Moves the given filename to the front of the job queue
@@ -2237,102 +2222,74 @@ func (f *sendReceiveFolder) Jobs(page, perpage int) ([]string, []string, int) {
 	return f.queue.Jobs(page, perpage)
 }
 
-// dbUpdaterRoutine aggregates db updates and commits them in batches no
-// larger than dbUpdateBatchSizeFiles/Blocks items, and no more delayed than
-// 5 seconds. The sizing is an HDD-receiver tradeoff (see the constants'
-// comment in fileinfobatch.go): commit cadence dominates WAL growth on
-// small-file pulls, and the timer bounds how long a pulled file sits
-// uncommitted (crash rework) and how late completion events fire.
+// dbUpdaterRoutine owns one in-flight committer and one bounded next group.
+// Collection continues during storage waits. A full next group applies channel
+// backpressure, never starts a second flush. No ticker or time cap is involved.
 func (f *sendReceiveFolder) dbUpdaterRoutine(ctx context.Context, dbUpdateChan <-chan dbUpdateJob) (int, error) {
-	const maxBatchTime = 5 * time.Second
-
 	changed := 0
-	changedDirs := make(map[string]struct{})
-	found := false
-	var lastFile protocol.FileInfo
 	var updateErr error
-	tick := time.NewTicker(maxBatchTime)
-	defer tick.Stop()
 	var observer pullDBObserver
 	defer observer.close()
-	batch := NewFileInfoBatchSized(dbUpdateBatchSizeFiles, dbUpdateBatchSizeBlocks, func(files []protocol.FileInfo) error {
-		f.flushPullDurability(changedDirs)
-		clear(changedDirs)
-
-		// All updates to file/folder objects that originated remotely
-		// (across the network) use this call to updateLocals
-		// Disk already contains these versions. Keep the same batch alive
-		// through transient lock contention, rather than letting a later scan
-		// mistake our own installed bytes for a new local edit. Retry inside
-		// the callback: FileInfoBatch treats any returned error as terminal.
-		err := f.updatePullDBWithRetry(ctx, files, &observer)
-		if err != nil {
-			return err
-		}
-		for _, file := range files {
-			f.retry.clear(file.Name, !file.IsDeleted() && !file.IsInvalid() && file.Type == protocol.FileInfoTypeFile)
-		}
-
-		if found {
-			f.ReceivedFile(lastFile.Name, lastFile.IsDeleted())
-			found = false
-		}
-
-		return nil
-	})
-
-	cancelled := ctx.Done()
-loop:
-	for {
-		select {
-		case <-cancelled:
-			// Stop DB work immediately but drain the bounded producer pipeline:
-			// several upstream sends intentionally are not cancellation-selects.
-			// Each installed regular file already has a durable intent.
-			updateErr = ctx.Err()
-			cancelled = nil
-		case job, ok := <-dbUpdateChan:
-			if !ok {
-				break loop
+	input := dbUpdateChan
+	var group []dbUpdateJob
+	blocks := 0
+	var committing <-chan error
+	for input != nil || len(group) > 0 || committing != nil {
+		if committing == nil && len(group) > 0 {
+			if updateErr == nil {
+				updateErr = ctx.Err()
 			}
 			if updateErr != nil {
-				// Continue draining producers. A failed batch has unknown
-				// per-file outcomes and FileInfoBatch cannot accept more jobs.
+				for _, job := range group {
+					if job.install != nil {
+						f.retainInstallTemp(job.install)
+						f.completeInstall(ctx, job.install, updateErr)
+					}
+				}
+				group, blocks = nil, 0
 				continue
 			}
-
-			switch job.jobType {
-			case dbUpdateHandleFile, dbUpdateShortcutFile:
-				changedDirs[filepath.Dir(job.file.Name)] = struct{}{}
-			case dbUpdateHandleDir:
-				changedDirs[job.file.Name] = struct{}{}
-			case dbUpdateHandleSymlink, dbUpdateInvalidate:
-				// fsyncing symlinks is only supported by MacOS
-				// and invalidated files are db only changes -> no sync
+			// When idle, include everything already queued without a delay.
+		drain:
+			for input != nil && len(group) < dbUpdateBatchSizeFiles && blocks < dbUpdateBatchSizeBlocks {
+				select {
+				case job, ok := <-input:
+					if !ok {
+						input = nil
+						break drain
+					}
+					group = append(group, job)
+					blocks += len(job.file.Blocks)
+				default:
+					break drain
+				}
 			}
-
-			// For some reason we seem to care about file deletions and
-			// content modification, but not about metadata and dirs/symlinks.
-			if !job.file.IsInvalid() && job.jobType&(dbUpdateHandleFile|dbUpdateDeleteFile) != 0 {
-				found = true
-				lastFile = job.file
-			}
-
-			job.file.Sequence = 0
-
-			batch.Append(job.file)
-			updateErr = batch.FlushIfFull()
-			changed++
-
-		case <-tick.C:
-			if updateErr == nil {
-				updateErr = batch.Flush()
-			}
+			changed += len(group)
+			done := make(chan error, 1)
+			go func(batch []dbUpdateJob) {
+				done <- f.commitInstallGroup(ctx, batch, &observer)
+			}(group)
+			committing = done
+			group, blocks = nil, 0
 		}
-	}
-
-	if updateErr == nil {
-		updateErr = batch.Flush()
+		// Nil disables intake when the next group hits a cap. The sole
+		// committer must return before that group can be submitted.
+		intake := input
+		if len(group) >= dbUpdateBatchSizeFiles || blocks >= dbUpdateBatchSizeBlocks {
+			intake = nil
+		}
+		select {
+		case job, ok := <-intake:
+			if !ok {
+				input = nil
+			} else {
+				group = append(group, job)
+				blocks += len(job.file.Blocks)
+			}
+		case err := <-committing:
+			updateErr = err
+			committing = nil
+		}
 	}
 	return changed, updateErr
 }

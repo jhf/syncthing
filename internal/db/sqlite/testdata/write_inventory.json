@@ -1,4 +1,12 @@
 {
+  "db_pull_commit.go:*folderDB.pullCommitConnectionLocked": {
+    "sha256": "f27d1d3c2c43f85af4b3b5a41714aa1cc40c91afab60ab4b1c3bb0197032ebb5",
+    "reason": "patch/67: caller folderDB.Update holds this baseDB updateLock through physical connection acquisition, connection-local settings, immediate transaction commit/rollback including FULL WAL fsync, settings restoration and release/discard. No pool-wide setting change."
+  },
+  "db_pull_commit.go:*DB.PendingInstalls": {
+    "sha256": "b51817b2119c9ddd05bc3135b95585af007802c0a09689c34716737fc16ca290",
+    "reason": "patch/67: holds folder updateLock for the read-only counts precheck and complete SELECT of local pending FileInfos/blocklists. Releases the guard and consumes all rows before filesystem work or acknowledgement writes. Folder lookup uses existing exclusive startup guards."
+  },
   "db_data_version.go:*dataVersionObserver.DataVersion": {
     "sha256": "92322b46d5b866a566c55661a4b2bc7a0e735c7a4453429959b3088eb764010d",
     "reason": "patch/63 heartbeat: read-only scalar PRAGMA data_version on a dedicated observer connection, autocommit, no write and no transaction held across waits. No updateLock needed."
@@ -336,8 +344,8 @@
     "reason": "Acquires folder updateLock before immediate transaction and all block-index population writes through commit."
   },
   "folderdb_update.go:*folderDB.Update": {
-    "sha256": "dbc39591790a822bb5e3d9a95deb0c793b0b27bd7f0ae8d28c252100dd2def94",
-    "reason": "Acquires folder updateLock before device UPSERT and immediate transaction, through commit and periodicCheckpointLocked. All called SQL helpers inherit this guard."
+    "sha256": "08607a4f5deb0481618bff964308202990a40957562af950828a3607795df081",
+    "reason": "Acquires folder updateLock before device UPSERT. Ordinary transactions remain NORMAL. Durable pull transactions reserve a physical connection through pullCommitConnectionLocked and hold the same lock through FULL commit, deferred rollback, settings restoration/discard and periodicCheckpointLocked. All SQL helpers inherit this guard."
   },
   "folderdb_update.go:*folderDB.blockIndexEmpty": {
     "sha256": "efb09f4e7a7577f0b543a4456b79467e3b2ad9748d6f46b8a0369a7174f73646",

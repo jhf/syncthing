@@ -2,7 +2,9 @@
 
 ## Behavior
 
-The pull updater receives the folder context and retries the same FileInfoBatch callback indefinitely while internal/db.IsLockContention classifies the returned error as lock contention. Backoff begins at 250 ms, doubles to a 30 s cap, and saturates there. There is no retry count limit and no growing schedule or attempt history. One reusable timer handles real waits. No updateLock or SQLite transaction is held across the wait. Non-lock errors remain terminal and keep the old producer-draining behavior, with patch/62's regular-file install evidence retained on disk.
+The pull updater receives the folder context and retries the same completed file slice indefinitely while internal/db.IsLockContention classifies the returned error as lock contention. Backoff begins at 250 ms, doubles to a 30 s cap, and saturates there. There is no retry count limit and no growing schedule or attempt history. One reusable timer handles real waits. No updateLock or SQLite transaction is held across the wait. Non-lock errors remain terminal and keep producer-draining behavior. Under patch/67, temps have not been renamed when a precommit error occurs, so the old target still matches its old index entry. No patch/62 journal exists.
+
+No timer or ticker controls patch/67's install grouping. The reusable timer below is solely the existing lock-contention retry backoff.
 
 Every five minutes of elapsed waiting, the updater logs `Pull database update still waiting` at Warn with `files`, `elapsed`, `attempts` and `data_version_moved` (`true`, `false`, or `unknown`). The warning increments bounded churn key `db_update.lock_wait_warning`. The old exhaustion key is retained at zero for schema compatibility, not used as a loss mechanism. The next sleep is clipped to the next warning deadline. An in-flight SQLite call can still delay a warning until it returns.
 
@@ -14,19 +16,21 @@ The initial sample supplies the baseline, then only warnings sample again. Value
 
 ## Shutdown
 
-Context cancellation stops retrying immediately at the next cancellation boundary. The callback returns context.Canceled, then the updater drains producers until the channel closes without accepting further batch work. This is necessary because several existing producer sends intentionally are not cancellation-selects. Simply returning the updater on cancellation would strand those senders and hang pull shutdown. Already installed regular files have their patch/62 pre-publication journal records, including files still in the transport channels or finishers. The existing underlying DB.Update API is not context-aware: this patch interrupts waits, not an already executing SQLite operation or blocked filesystem sync.
+Context cancellation stops retrying immediately at the next cancellation boundary. The callback returns context.Canceled, then the updater drains producers until the channel closes without accepting further batch work. This is necessary because several existing producer sends intentionally are not cancellation-selects. Simply returning the updater on cancellation would strand those senders and hang pull shutdown. Before a successful durable commit, the old file remains in place. The updater refreshes the reusable temp's download mtime when abandoning a queued install, so the temporary-file scanner does not expire an ancient sender timestamp. Finishers receive an explicit cancellation/error acknowledgement while the updater drains. A commit that already succeeded carries an existing-DB local pending flag and is recovered before scanning by patch/67, not by a journal. The existing underlying DB.Update API is not context-aware: this patch interrupts waits, not an already executing SQLite operation or blocked filesystem sync.
 
 ## Regression evidence and tests
 
 The new TestPullDBNeverDropsHeldBatch first ran against committed patch/62's finite schedule. It injected six busy boundaries with the existing three-entry shortened schedule and failed after four attempts. After replacement, that same held batch commits on attempt seven, is scanned without a receiver counter and is not reinstalled. The prolonged patch/58 controls now exceed the former retry limit for both named fixtures and both predecessor cases. Structural errors still make exactly one attempt and drain a full batch plus ten producer jobs.
 
-TestPullDBCancelWaitRestart cancels mid-wait, verifies that no local index commit occurred and the journal remains, then uses independent SQLite handles and a fresh folder object to adopt the exact intended sender vector. TestPullDBCancelDrainsProducers fills the real 4000-file batch, cancels a busy wait and requires all ten extra producer sends and updater shutdown to finish without a commit or erased intent.
+TestPullDBCancelWait cancels mid-wait and verifies no local index commit. TestInstallAfterCommitCancelRetainsTemp additionally verifies old bytes/vector survive a real scan, the temp remains reusable, and a subsequent pull publishes successfully. TestPullDBCancelDrainsProducers fills the transport queue, cancels a busy wait and requires all extra producer sends and updater shutdown to finish without another commit.
 
 TestPullDBWaitWarnings runs 12.5 minutes on an injected clock with the same held slice address throughout 26 attempts. It requires warnings at five and ten minutes, one observer acquisition, three scalar reads, one close and exactly two churn counts. It covers moving, unchanged, failed-read and failed-acquisition outcomes. Real SQLite tests verify that the dedicated observer sees another connection's commit, stable samples stay unchanged, canceled reads surface errors without leaking a transaction, exhausted-pool acquisition honors its deadline, a busy folder-registry mutex fails immediately rather than queuing behind an opener, and Close releases the slot.
 
 TestPullDBRetryStateConstant runs the pure retry-state operations for 10 and 1,000,000 iterations with testing.AllocsPerRun and requires zero allocations at both sizes. It also verifies capped delay and saturating attempt count. This is a deterministic retry-state test, not a noisy whole-process runtime.MemStats/heap-size assertion. The held batch, existing need snapshot, scan dedup and queue retain their patch/61 baseline bounds and limitations. A global process heap cap is not claimed.
 
 ## Validation
+
+This section preserves the original pre-rebase regression evidence. It is historical, not the final validation of the rewritten install path. PATCH67.md and tmp/install-after-commit/REPORT.md contain the replacement's current gates and before/after runs.
 
 Verbatim before-run (`tmp/patch63/before.log`):
 
@@ -63,4 +67,4 @@ Implementation references: `lib/model/folder_sendrecv.go:2256` threads ctx into 
 
 ## Open risks
 
-This does not identify a foreign lock holder or guarantee eventual fairness. Cancellation cannot interrupt the existing context-free Update call or an OS sync already executing. One observer consumes a pool slot/cache until updater exit. Failed observer acquisition stays unknown for that updater lifetime. The regular-file journal's limits and conservative mismatch rejection from PATCH62.md remain in effect. No push, deployment, running-daemon changes, production performance measurement or in-process physical 30-second SQLite busy-timeout timing claim.
+This does not identify a foreign lock holder or guarantee eventual fairness. Cancellation cannot interrupt the existing context-free Update call or an OS sync already executing. One observer consumes a pool slot/cache until updater exit. Failed observer acquisition stays unknown for that updater lifetime. Patch/67 replaces all regular-file journal behavior with commit-before-publication and an existing-DB local pending flag. Its conservative recovery and measured lock/flush costs are documented in PATCH67.md. No push, deployment, running-daemon changes, production performance measurement or in-process physical 30-second SQLite busy-timeout timing claim.

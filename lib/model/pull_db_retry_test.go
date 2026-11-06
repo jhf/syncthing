@@ -54,6 +54,13 @@ func (d *observedRetryDB) OpenDataVersionObserver(ctx context.Context, _ string)
 }
 
 func (d *observedRetryDB) Update(folder string, device protocol.DeviceID, files []protocol.FileInfo, opts ...db.UpdateOption) error {
+	var options db.UpdateOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+	if options.SkipBlockIndex && !options.Durable {
+		return d.DB.Update(folder, device, files, opts...)
+	}
 	d.calls++
 	if d.first == nil {
 		d.first = &files[0]
@@ -172,7 +179,7 @@ func TestPullDBCancelDrainsProducers(t *testing.T) {
 		defer close(produced)
 		defer close(jobs)
 		for range dbUpdateBatchSizeFiles + 10 {
-			jobs <- dbUpdateJob{fi, dbUpdateHandleFile}
+			jobs <- dbUpdateJob{file: fi, jobType: dbUpdateHandleFile}
 		}
 	}()
 	select {
@@ -188,7 +195,7 @@ func TestPullDBCancelDrainsProducers(t *testing.T) {
 	}
 	select {
 	case got := <-done:
-		if !errors.Is(got.err, context.Canceled) || got.changed != dbUpdateBatchSizeFiles {
+		if !errors.Is(got.err, context.Canceled) || got.changed < 1 || got.changed > dbUpdateBatchSizeFiles {
 			t.Fatalf("cancelled drain: %+v", got)
 		}
 	case <-time.After(5 * time.Second):
