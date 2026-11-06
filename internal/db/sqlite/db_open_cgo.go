@@ -17,16 +17,10 @@ import (
 
 const (
 	dbDriver = "syncthing_sqlite3"
-	// busy_timeout, pinned explicitly rather than relying on the driver
-	// default: two writers on the same database file are legitimate (e.g. an
-	// index update racing the background need-tracking build or a chunked
-	// GC pass). Without a timeout the second writer fails instantly with
-	// SQLITE_BUSY, which the protocol layer treats as connection-fatal.
-	// Thirty seconds because a scan's chunk commits on slow storage (HDD
-	// RAID) hold the write lock well past five seconds — observed live on
-	// yarlung 2026-10-14, a ~20 s connection-flap loop while a fallback
-	// full scan ran. The index handler additionally retries contention,
-	// so this value bounds one attempt's wait, not the total patience.
+	// Live same-baseDB writers serialize on updateLock, not SQLite's busy
+	// handler. Retain this timeout for a foreign process/separately opened
+	// handle and exclusive startup/migration. It bounds one SQLite wait,
+	// not time waiting for the Go mutex or the pull batch's retry patience.
 	commonOptions = "_journal_mode=WAL&_fk=true&_rt=true&_sync=1&_txlock=immediate&_busy_timeout=30000"
 )
 
