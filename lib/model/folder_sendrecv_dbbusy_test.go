@@ -31,7 +31,7 @@ type patch58BusyDB struct {
 	calls    int
 }
 
-func TestPullDBBusyExhaustionDrains(t *testing.T) {
+func TestPullDBTerminalFailureDrains(t *testing.T) {
 	shrinkLockBackoff(t)
 	_, f := setupSendReceiveFolder(t)
 	f.churn = churnTestTracker()
@@ -39,7 +39,7 @@ func TestPullDBBusyExhaustionDrains(t *testing.T) {
 	f.retry.failure("held", "remote_no_such_file", "block_request", "fixture hold")
 	before, err := f.GetLastFile()
 	must(t, err)
-	busy := errors.New("update: database table is locked")
+	busy := errors.New("update: injected structural database failure")
 	original := f.db
 	boundary := &patch58BusyDB{DB: original, fail: busy, failures: -1}
 	f.db = boundary
@@ -51,7 +51,7 @@ func TestPullDBBusyExhaustionDrains(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		n, err := f.dbUpdaterRoutine(jobs)
+		n, err := f.dbUpdaterRoutine(t.Context(), jobs)
 		done <- result{n, err}
 	}()
 	deadline := time.NewTimer(10 * time.Second)
@@ -68,14 +68,14 @@ func TestPullDBBusyExhaustionDrains(t *testing.T) {
 	}()
 	select {
 	case got := <-done:
-		if got.changed != dbUpdateBatchSizeFiles || !errors.Is(got.err, busy) || boundary.calls != 1+len(indexLockBackoff) {
+		if got.changed != dbUpdateBatchSizeFiles || !errors.Is(got.err, busy) || boundary.calls != 1 {
 			t.Fatalf("exhaustion: changed=%d calls=%d err=%v", got.changed, boundary.calls, got.err)
 		}
 	case <-deadline.C:
 		t.Fatal("exhausted updater did not return after draining")
 	}
-	if got := f.churn.total.values[churnIndex("db_update.lock_retry_exhausted")]; got != 1 {
-		t.Fatalf("exhausted counter=%d, want one batch", got)
+	if got := f.churn.total.values[churnIndex("db_update.lock_wait_warning")]; got != 0 {
+		t.Fatalf("lock warning counter=%d on structural failure", got)
 	}
 	after, err := f.GetLastFile()
 	must(t, err)
@@ -100,8 +100,9 @@ func (d *patch58BusyDB) Update(folder string, device protocol.DeviceID, files []
 
 // TestPullDBBusyRescanCreatesFalseConflict guards the former transient-lock bug:
 // retry must index Syncthing's own S1 before a later scan, with no receiver
-// authorship or false conflict on S3. Explicit exhausted-lock and non-lock
-// controls retain today's terminal failure path rather than pretending it heals.
+// authorship or false conflict on S3. The non-lock control documents the
+// pre-install-after-commit failure: a rescan adopts the already-published bytes
+// as receiver work. Patch/67 changes that contract by delaying publication.
 // The stopped model serializes complete pull batches and later real scans.
 // User-confirmed invariant (2026-11-05 22:25 UTC): NOTHING but Syncthing writes
 // to the synced folder on yarlung. Fixtures name the gateway incident (pulled
@@ -119,7 +120,7 @@ func TestPullDBBusyRescanCreatesFalseConflict(t *testing.T) {
 		terminal bool
 	}{
 		{"transient", busy, 1, false},
-		{"exhausted", busy, -1, true},
+		{"prolonged", busy, len(indexLockBackoff) + 3, false},
 		{"non_lock", structural, -1, true},
 	} {
 		for _, name := range []string{".hermes/gateway_state.json", "ssb/jsonb_stats/src/lib.rs"} {
@@ -133,6 +134,7 @@ func TestPullDBBusyRescanCreatesFalseConflict(t *testing.T) {
 					<-m.stopped
 					runner, _ := m.folderRunners.Get(cfg.ID)
 					f := runner.(*sendReceiveFolder)
+					f.pullDBRetryPolicy = &pullDBRetryPolicy{initial: time.Millisecond, maximum: time.Millisecond}
 					f.MaxConflicts = -1
 					f.churn = churnTestTracker()
 					must(t, f.mtimefs.MkdirAll(path.Dir(name), 0o755))
@@ -181,7 +183,7 @@ func TestPullDBBusyRescanCreatesFalseConflict(t *testing.T) {
 						return jobs
 					}
 					s0 := makeInfo(s0Bytes, 0)
-					changed, err := f.dbUpdaterRoutine(finish(s0, protocol.FileInfo{}, false, s0Bytes))
+					changed, err := f.dbUpdaterRoutine(t.Context(), finish(s0, protocol.FileInfo{}, false, s0Bytes))
 					must(t, err)
 					if changed != 1 || !current(name).Version.Equal(s0.Version) {
 						t.Fatal("S0 setup failed")
@@ -198,20 +200,15 @@ func TestPullDBBusyRescanCreatesFalseConflict(t *testing.T) {
 					defer func() { f.db = original }()
 					s1 := makeInfo(s1Bytes, 1)
 					s1.PreviousBlocksHash = s0.BlocksHash
-					changed, err = f.dbUpdaterRoutine(finish(s1, current(name), true, s1Bytes))
-					wantCalls := 2
-					if mode.name == "exhausted" {
-						wantCalls = 1 + len(indexLockBackoff)
-					} else if mode.name == "non_lock" {
+					changed, err = f.dbUpdaterRoutine(t.Context(), finish(s1, current(name), true, s1Bytes))
+					wantCalls := mode.failures + 1
+					if mode.name == "non_lock" {
 						wantCalls = 1
 					}
 					if changed != 1 || boundary.calls != wantCalls || (mode.terminal && !errors.Is(err, mode.err)) || (!mode.terminal && err != nil) {
 						t.Fatalf("updater: changed=%d calls=%d want=%d err=%v", changed, boundary.calls, wantCalls, err)
 					}
 					wantExhausted := uint64(0)
-					if mode.name == "exhausted" {
-						wantExhausted = 1
-					}
 					if got := f.churn.total.values[churnIndex("db_update.lock_retry_exhausted")]; got != wantExhausted {
 						t.Fatalf("exhausted batch counter=%d, want %d", got, wantExhausted)
 					}
@@ -257,7 +254,7 @@ func TestPullDBBusyRescanCreatesFalseConflict(t *testing.T) {
 					if s3.InConflictWith(cur) != wantConflict {
 						t.Fatal("unexpected conflict predicate")
 					}
-					changed, err = f.dbUpdaterRoutine(finish(s3, cur, true, s3Bytes))
+					changed, err = f.dbUpdaterRoutine(t.Context(), finish(s3, cur, true, s3Bytes))
 					must(t, err)
 					if changed != 1 || !bytes.Equal(read(name), s3Bytes) || !current(name).Version.Equal(s3.Version) {
 						t.Fatal("S3 did not finish/index unchanged")
