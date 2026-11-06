@@ -40,7 +40,11 @@ type baseDB struct {
 	baseName string
 	sql      *sqlx.DB
 
-	updateLock       sync.Mutex
+	// Every writing statement/transaction on a published baseDB holds this
+	// mutex through statement completion or transaction commit/rollback.
+	// Long maintenance yields it between bounded steps. Only exclusive
+	// initialization before publication is exempt.
+	updateLock       writeLock // db_writelock.go: reports holds that kept writers waiting
 	updatePoints     int
 	checkpointsCount int
 
@@ -103,6 +107,7 @@ func openBase(path string, maxOpenConns, maxIdleConns int, pragmas, schemaScript
 	db := &baseDB{
 		path:       path,
 		baseName:   filepath.Base(path),
+		updateLock: writeLock{db: filepath.Base(path)},
 		sql:        sqlDB,
 		statements: make(map[string]*sqlx.Stmt),
 		tplInput: map[string]any{
@@ -214,6 +219,13 @@ func openBase(path string, maxOpenConns, maxIdleConns int, pragmas, schemaScript
 		if err := db.vacuumAndOptimize(); err != nil {
 			return nil, wrap(err)
 		}
+	}
+
+	// Full planner statistics refresh, only at a scheduled maintenance
+	// restart or for a database that has none, before any writer can wait
+	// on it (db_analyze.go).
+	if err := db.analyzeOffline(); err != nil {
+		return nil, wrap(err)
 	}
 
 	return db, nil
