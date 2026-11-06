@@ -445,7 +445,17 @@ func (f *sendReceiveFolder) publishInstall(p *pendingInstall) error {
 		return f.resolveEditedInstall(p)
 	}
 	if err := osutil.RenameOrCopy(f.CopyRangeMethod.ToFS(), f.mtimefs, f.mtimefs, p.temp, p.file.Name); err != nil {
-		return err
+		// RenameOrCopy makes a read-only parent writable, but a concurrent
+		// inWritableDir in the same directory (a copier creating its temp
+		// file) can restore the read-only mode in between: it is not
+		// serialized with the rename lock. Retry once with the directory
+		// held writable around the rename itself.
+		if !fs.IsPermission(err) {
+			return err
+		}
+		if err := f.inWritableDir(func(name string) error { return f.mtimefs.Rename(p.temp, name) }, p.file.Name); err != nil {
+			return err
+		}
 	}
 	// The bytes already carry this timestamp durably. Reapply it at the new
 	// name so mtimeFS transfers its advisory virtual-time mapping as well.
@@ -469,7 +479,7 @@ func (f *sendReceiveFolder) preserveIncomingConflict(p *pendingInstall) error {
 		}
 		return err
 	}
-	if err := f.mtimefs.Rename(p.temp, name); err != nil {
+	if err := f.inWritableDir(func(string) error { return f.mtimefs.Rename(p.temp, name) }, name); err != nil {
 		return err
 	}
 	p.scans <- name

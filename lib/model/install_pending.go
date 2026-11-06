@@ -139,14 +139,18 @@ func (f *sendReceiveFolder) RecoverPendingInstalls(ctx context.Context) error {
 				if _, err := f.mtimefs.Lstat(conflict); !fs.IsNotExist(err) {
 					return fmt.Errorf("pending install conflict destination is occupied: %s", conflict)
 				}
-				if err := f.mtimefs.Rename(file.Name, conflict); err != nil {
+				if err := f.inWritableDir(func(name string) error { return f.mtimefs.Rename(name, conflict) }, file.Name); err != nil {
 					return err
 				}
 				f.ScheduleScan()
 			} else if !fs.IsNotExist(err) {
 				return err
 			}
-			if err := f.mtimefs.Rename(temp, file.Name); err != nil {
+			// Read-only parents are common (Go's module cache is 0555): make
+			// the directory writable for the rename, as every other install
+			// and delete path does. Without it a single such file kept the
+			// whole folder in error, since recovery precedes every pull.
+			if err := f.inWritableDir(func(name string) error { return f.mtimefs.Rename(temp, name) }, file.Name); err != nil {
 				return err
 			}
 			if err := f.mtimefs.Chtimes(file.Name, file.ModTime(), file.ModTime()); err != nil {

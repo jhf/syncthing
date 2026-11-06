@@ -461,3 +461,54 @@ func TestInstallAfterCommitSlowFlush(t *testing.T) {
 	}
 	t.Logf("slowFlush=500ms flushes=%d maxInFlight=%d groups=%v elapsed=%v", d.calls.Load(), d.maximum.Load(), d.sizes, elapsed)
 }
+
+// A pending install in a read-only directory (Go's module cache is 0555)
+// must still recover. patch/67's recovery renamed without making the parent
+// writable, failed with EACCES, and since recovery precedes every scan and
+// pull the whole folder stayed in error (yarlung, 2026-11-06 19:28 UTC,
+// go/pkg/mod/github.com/dlclark/regexp2@v1.11.5/syntax/workdir/corpus).
+func TestInstallAfterCommitRecoveryReadOnlyDir(t *testing.T) {
+	for _, kind := range []string{"absent", "file"} {
+		t.Run(kind, func(t *testing.T) {
+			f, fi, data, temp := physicalInstallFixture(t, "ro/pending")
+			dir := t.TempDir()
+			original, err := sqlite.Open(dir)
+			must(t, err)
+			f.db = original
+			var old protocol.FileInfo
+			if kind != "absent" {
+				old = existingInstallTarget(t, f, fi.Name, kind)
+			}
+			jobs := make(chan dbUpdateJob, 1)
+			must(t, f.performFinish(fi, old, kind != "absent", temp, jobs, make(chan string, 8)))
+			close(jobs)
+			crash := errors.New("simulated death after real FULL commit, before rename")
+			f.db = &installBarrierDB{DB: original, after: func() error { return crash }}
+			_, err = f.dbUpdaterRoutine(t.Context(), jobs)
+			if !errors.Is(err, crash) {
+				t.Fatal(err)
+			}
+			must(t, original.Close())
+			must(t, f.mtimefs.Chmod("ro", 0o555))
+			t.Cleanup(func() { _ = f.mtimefs.Chmod("ro", 0o755) })
+
+			reopened, err := sqlite.Open(dir)
+			must(t, err)
+			defer reopened.Close()
+			restarted := newSendReceiveFolder(f.model, f.ignores, f.FolderConfiguration, nil, f.evLogger, f.ioLimiter).(*sendReceiveFolder)
+			restarted.db = reopened
+			restarted.mtimefs = f.mtimefs
+			if err := restarted.RecoverPendingInstalls(t.Context()); err != nil {
+				t.Fatalf("recovery in a read-only directory failed: %v", err)
+			}
+			got, ok, err := reopened.GetDeviceFile(f.ID, protocol.LocalDeviceID, fi.Name)
+			must(t, err)
+			if !ok || got.LocalFlags&protocol.FlagLocalInstallPending != 0 || !bytes.Equal(readInstallBytes(t, restarted, fi.Name), data) {
+				t.Fatalf("not recovered: ok=%v flags=%v", ok, got.LocalFlags)
+			}
+			if info, err := f.mtimefs.Stat("ro"); err != nil || info.Mode()&0o777 != 0o555 {
+				t.Fatalf("directory mode must be restored to 0555, got %v (%v)", info.Mode(), err)
+			}
+		})
+	}
+}
