@@ -12,9 +12,9 @@ import (
 	"time"
 )
 
-// garbageCollectOldDeletedLocked is called by the periodic GC service with
-// updateLock already held (hence the Locked suffix). When the need tables
-// are built it must not re-acquire that mutex: sync.Mutex is not reentrant,
+// garbageCollectOldDeletedSpan is called by gcLiveChunks with updateLock
+// already held. When the need tables are built it must not re-acquire that
+// mutex: sync.Mutex is not reentrant,
 // so re-locking self-deadlocks the GC service while it keeps holding the
 // lock, and every later folderDB.Update (folder scans, incoming index
 // updates) wedges behind it. Observed live on yarlung 2026-10-12: a
@@ -50,7 +50,8 @@ func TestGCDeletedWithNeedTrackingDoesNotSelfDeadlock(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- garbageCollectOldDeletedLocked(context.Background(), fdb)
+		_, err := garbageCollectOldDeletedSpan(context.Background(), fdb, 0, time.Now().UnixNano(), 0, 1<<62)
+		done <- err
 	}()
 
 	select {
@@ -59,6 +60,6 @@ func TestGCDeletedWithNeedTrackingDoesNotSelfDeadlock(t *testing.T) {
 			t.Fatal(err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("garbageCollectOldDeletedLocked deadlocked: it must not re-acquire updateLock")
+		t.Fatal("garbageCollectOldDeletedSpan deadlocked: it must not re-acquire updateLock")
 	}
 }
