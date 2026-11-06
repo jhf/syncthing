@@ -220,6 +220,13 @@ func openBase(path string, maxOpenConns, maxIdleConns int, pragmas, schemaScript
 		}
 	}
 
+	// Full planner statistics refresh, only at a scheduled maintenance
+	// restart or for a database that has none, before any writer can wait
+	// on it (patch/70, db_analyze.go).
+	if err := db.analyzeOffline(); err != nil {
+		return nil, wrap(err)
+	}
+
 	return db, nil
 }
 

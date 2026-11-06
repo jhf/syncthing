@@ -237,28 +237,18 @@ func tidy(ctx context.Context, db *baseDB) error {
 		return wrap(err)
 	}
 
-	// SQLite recommends hundreds or thousands of sampled rows per index.
-	// Split by table too, so the mutex is yielded between schema objects.
+	// Statistics are refreshed only by PRAGMA optimize, under a hard time
+	// budget. Full per-table ANALYZE moved to the offline maintenance
+	// restart (analyzeOffline, db_analyze.go): on yarlung's 10 GB HDD folder
+	// DB, ANALYZE "blocks" (4M rows, WITHOUT ROWID) walked the whole table
+	// despite analysis_limit and held updateLock for 7m48s (2026-11-06 15:00
+	// UTC), stalling Update and index handling into connection resets.
+	// optimize re-analyzes only tables whose row count drifted materially;
+	// statistics are rarely stale here. analysis_limit is per connection.
 	if err := step(`PRAGMA analysis_limit = 1000`, nil); err != nil {
 		return err
 	}
-	var tables []string
-	if err := step(`SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`, func(rows *sql.Rows) ([]any, error) {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		tables = append(tables, name)
-		return []any{name}, nil
-	}); err != nil {
-		return err
-	}
-	for _, name := range tables {
-		if err := step(`ANALYZE "`+strings.ReplaceAll(name, `"`, `""`)+`"`, nil); err != nil {
-			return err
-		}
-	}
-	if err := step(`PRAGMA optimize`, nil); err != nil {
+	if err := tidyBudgetedStep(ctx, db, conn, `PRAGMA optimize`, tidyOptimizeBudget); err != nil {
 		return err
 	}
 	freePages := 0

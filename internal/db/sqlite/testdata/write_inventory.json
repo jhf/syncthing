@@ -1,4 +1,16 @@
 {
+  "db_analyze.go:*baseDB.analyzeOffline": {
+    "sha256": "83abf005a2d1b483a974b16e7c3249b98c67223472ec5460c88b84a6a1b8f7a3",
+    "reason": "patch/70: full ANALYZE called only by openBase during exclusive initialization, before publication (scheduled restart, missing statistics, or STDBANALYZE=1). No concurrent writer can exist."
+  },
+  "db_analyze.go:.hasStatistics": {
+    "sha256": "649067c01b213d1c2bdc9ce3124165abbabc0df34b7569434e8efca73021592b",
+    "reason": "Read-only sqlite_schema/sqlite_stat1 counts on the initialization connection, before publication."
+  },
+  "db_analyze.go:.tidyBudgetedStep": {
+    "sha256": "6e142c751422ca7e31a39f3374b35a5bf32f39c8ebde768d3149f4e504ef7391",
+    "reason": "patch/70: holds baseDB updateLock across one statement (PRAGMA optimize) with a context deadline; cancellation interrupts the statement, which rolls back, before unlock."
+  },
   "db_pull_commit.go:*folderDB.pullCommitConnectionLocked": {
     "sha256": "f27d1d3c2c43f85af4b3b5a41714aa1cc40c91afab60ab4b1c3bb0197032ebb5",
     "reason": "patch/67: caller folderDB.Update holds this baseDB updateLock through physical connection acquisition, connection-local settings, immediate transaction commit/rollback including FULL WAL fsync, settings restoration and release/discard. No pool-wide setting change."
@@ -40,8 +52,8 @@
     "reason": "Called only by openBase during exclusive post-migration initialization, before publication."
   },
   "basedb.go:.openBase": {
-    "sha256": "5ab8004eea59f6112b2a9152afb160c5cd381014ddabef6f2afc896f70370b88",
-    "reason": "Exclusive initialization/migration before returning or publishing this baseDB. Also owns post-migration vacuumAndOptimize and runScripts calls."
+    "sha256": "f73127cc22d72ca353c654ab90e5676206eb1f0fb73a7653f4b5226ca124818f",
+    "reason": "Exclusive initialization/migration before returning or publishing this baseDB. Also owns post-migration vacuumAndOptimize, runScripts and the patch/70 offline analyzeOffline call, all before publication."
   },
   "basedb.go:failedStmt.Exec": {
     "sha256": "e9b3ea97a02f87c9f593eaa113d9431a0c8cd60b544b9ec5d7beebc02081652e",
@@ -132,8 +144,8 @@
     "reason": "Acquires folder updateLock for each immediate batch transaction; all commit/rollback paths precede unlock."
   },
   "db_service.go:.tidy": {
-    "sha256": "32b31f9d745be0d730d32d8a1396a2aba52a200c8a089723c5e50c58b47c20f6",
-    "reason": "Each main/folder maintenance statement separately acquires that baseDB updateLock, drains/closes rows before unlock. Bounded analysis/vacuum and PASSIVE checkpoint."
+    "sha256": "0b8546d976f5d2b2286323391a6a8dbd85debf54793c87b0b507a3eb139e4a4d",
+    "reason": "Each main/folder maintenance statement separately acquires that baseDB updateLock, drains/closes rows before unlock. No ANALYZE (patch/70: moved offline); PRAGMA optimize via tidyBudgetedStep under updateLock with a hard budget; chunked vacuum and PASSIVE checkpoint."
   },
   "db_stats.go:*baseDB.tableStats": {
     "sha256": "753ca493881863c484b24c937892f52d38b07e29beae701ad945d4ea40260132",
