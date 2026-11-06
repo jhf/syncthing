@@ -1603,3 +1603,26 @@ func TestIgnoreThroughSymlink(t *testing.T) {
 		t.Error("afile should not be ignored")
 	}
 }
+
+// MatchPattern names the ignore-file line as written, not the expanded
+// internal form (patch/69 diagnostics).
+func TestMatchPatternReportsSourceLine(t *testing.T) {
+	pats := New(fs.NewFilesystem(fs.FilesystemTypeBasic, "."))
+	if err := pats.Parse(bytes.NewBufferString("!keep.local\n*.local\n(?d)build/\n"), ".stignore"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ file, want string }{
+		{"notes.local", "*.local"},
+		{"sub/notes.local", "*.local"},
+		{"keep.local", "!keep.local"},
+		{"build/x/y", "(?d)build/"},
+		{"other", ""},
+	} {
+		if _, got := pats.MatchPattern(tc.file); got != tc.want {
+			t.Errorf("MatchPattern(%q) = %q, want %q", tc.file, got, tc.want)
+		}
+		if res, _ := pats.MatchPattern(tc.file); res != pats.Match(tc.file) {
+			t.Errorf("MatchPattern(%q) result differs from Match", tc.file)
+		}
+	}
+}

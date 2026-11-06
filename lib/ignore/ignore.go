@@ -72,6 +72,9 @@ type Pattern struct {
 	pattern string
 	match   glob.Glob
 	result  ignoreresult.R
+	// source is the ignore-file line this pattern was derived from, as the
+	// user wrote it (diagnostics only; not part of String or the hash).
+	source string
 }
 
 func (p Pattern) String() string {
@@ -216,22 +219,42 @@ func (m *Matcher) parseLocked(r io.Reader, file string) error {
 // we ensure native unicode normalisation on all entry points (scanning and from
 // protocol) - so no need to normalize when calling this, except e.g. in tests.
 func (m *Matcher) Match(file string) ignoreresult.R {
+	res, _ := m.match(file)
+	return res
+}
+
+// MatchPattern is Match that also returns the ignore-file line that decided
+// the result, as the user wrote it, "" when no pattern decided: temporary
+// and internal files, "." and no match. Diagnostics use it to name the rule
+// that keeps a path; Match stays allocation-free.
+func (m *Matcher) MatchPattern(file string) (ignoreresult.R, string) {
+	res, p := m.match(file)
+	if p == nil {
+		return res, ""
+	}
+	if p.source != "" {
+		return res, p.source
+	}
+	return res, p.String()
+}
+
+func (m *Matcher) match(file string) (ignoreresult.R, *Pattern) {
 	switch {
 	case fs.IsTemporary(file):
-		return ignoreresult.IgnoreAndSkip
+		return ignoreresult.IgnoreAndSkip, nil
 
 	case fs.IsInternal(file):
-		return ignoreresult.IgnoreAndSkip
+		return ignoreresult.IgnoreAndSkip, nil
 
 	case file == ".":
-		return ignoreresult.NotIgnored
+		return ignoreresult.NotIgnored, nil
 	}
 
 	m.mut.Lock()
 	defer m.mut.Unlock()
 
 	if len(m.patterns) == 0 {
-		return ignoreresult.NotIgnored
+		return ignoreresult.NotIgnored, nil
 	}
 
 	// Change backslashes to slashes (on Windows only)
@@ -243,7 +266,7 @@ func (m *Matcher) Match(file string) ignoreresult.R {
 	// anymore.
 	var lowercaseFile string
 	canSkipDir := true
-	for _, pattern := range m.patterns {
+	for i, pattern := range m.patterns {
 		if canSkipDir && !pattern.allowsSkippingIgnoredDirs() {
 			canSkipDir = false
 		}
@@ -257,15 +280,15 @@ func (m *Matcher) Match(file string) ignoreresult.R {
 				lowercaseFile = strings.ToLower(file)
 			}
 			if pattern.match.Match(lowercaseFile) {
-				return res
+				return res, &m.patterns[i]
 			}
 		} else if pattern.match.Match(file) {
-			return res
+			return res, &m.patterns[i]
 		}
 	}
 
 	// Default to not matching.
-	return ignoreresult.NotIgnored
+	return ignoreresult.NotIgnored, nil
 }
 
 // Lines return a list of the unprocessed lines in .stignore at last load
@@ -451,11 +474,15 @@ func nativeUnicodeNorm(s string) string {
 
 func parseIgnoreFile(fs fs.Filesystem, fd io.Reader, currentFile string, cd ChangeDetector, linesSeen map[string]struct{}) ([]string, []Pattern, error) {
 	var patterns []Pattern
+	var source string // the user's line being expanded, for diagnostics
 
 	addPattern := func(line string) error {
 		newPatterns, err := parseLine(line)
 		if err != nil {
 			return fmt.Errorf("invalid pattern %q in ignore file: %w", line, err)
+		}
+		for i := range newPatterns {
+			newPatterns[i].source = source
 		}
 		patterns = append(patterns, newPatterns...)
 		return nil
@@ -505,6 +532,7 @@ func parseIgnoreFile(fs fs.Filesystem, fd io.Reader, currentFile string, cd Chan
 			continue
 		}
 		linesSeen[line] = struct{}{}
+		source = line
 		switch {
 		case line == "":
 			continue

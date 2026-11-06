@@ -137,6 +137,7 @@ type sendReceiveFolder struct {
 	writeLimiter       *semaphore.Semaphore
 
 	tempPullErrors    map[string]churnPullError // pull errors that might be just transient
+	leftovers         ignoredLeftovers          // patch/69: dirs kept by locally ignored content
 	retry             *pullRetryTracker
 	pullDBRetryPolicy *pullDBRetryPolicy // nil selects production clock/backoff
 }
@@ -264,6 +265,11 @@ func (f *sendReceiveFolder) pull(ctx context.Context) (bool, error) {
 	}
 	f.errorsMut.Unlock()
 	for path, err := range warnings {
+		if err.class == "ignored_leftover" {
+			// Warned once when first found (recordIgnoredLeftover); the
+			// Failed Items entry carries it from then on.
+			continue
+		}
 		if f.churn.example(path, err.class, "warn") {
 			f.sl.WarnContext(ctx, "Failed to sync", slogutil.FilePath(path), slogutil.Error(err.text))
 		}
@@ -1312,7 +1318,10 @@ func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, dbUpdateChan chan<
 			f.sl.Debug("Directory delete waits for its contents", slogutil.FilePath(file.Name))
 		case err != nil:
 			f.newPullError(file.Name, fmt.Errorf("delete dir: %w", err))
-			slog.Info("Failed to delete directory", f.LogAttr(), file.LogAttr(), slogutil.Error(err))
+			if !errors.Is(err, errDirHasIgnored) {
+				// Ignored leftovers warn once, in recordIgnoredLeftover.
+				slog.Info("Failed to delete directory", f.LogAttr(), file.LogAttr(), slogutil.Error(err))
+			}
 		default:
 			slog.Info("Deleted directory", f.LogAttr(), file.LogAttr())
 		}
@@ -1330,6 +1339,14 @@ func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, dbUpdateChan chan<
 		return err
 	}
 
+	// A directory already reported as kept by locally ignored content is not
+	// walked again while nothing relevant changed (patch/69): its Failed
+	// Items entry is re-published, without another walk or warning.
+	if l := f.ignoredLeftoverFor(file); l != nil {
+		err = l.err()
+		return err
+	}
+
 	if err = f.checkToBeDeleted(file, cur, hasCur, scanChan); err != nil {
 		if fs.IsNotExist(err) || fs.IsErrCaseConflict(err) {
 			err = nil
@@ -1339,8 +1356,12 @@ func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, dbUpdateChan chan<
 	}
 
 	if err = f.deleteDirOnDiskPending(file.Name, scanChan, f.deletionPendingFn(file)); err != nil {
+		if errors.Is(err, errDirHasIgnored) {
+			err = f.recordIgnoredLeftover(file)
+		}
 		return err
 	}
+	f.leftovers.forget(file.Name)
 
 	dbUpdateChan <- dbUpdateJob{file: file, jobType: dbUpdateDeleteDir}
 	return nil

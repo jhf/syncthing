@@ -46,7 +46,7 @@ const (
 // All dimensions are finite constants, never paths, peers or error strings.
 var churnKeys = [...]string{
 	"attempts", "completed", "cancelled", "failures", "other_item_failures", "block_requests", "block_failures", "warn_emitted", "warn_suppressed", "metadata_emitted", "metadata_suppressed",
-	"class.remote_no_such_file", "class.local_modified", "class.no_source", "class.local_io", "class.other",
+	"class.remote_no_such_file", "class.local_modified", "class.no_source", "class.local_io", "class.other", "class.ignored_leftover",
 	"stage.shortcut_check", "stage.local_copy", "stage.block_request", "stage.finalize",
 	"need.queue_pop.still_needed", "need.queue_pop.superseded", "need.queue_pop.tombstoned", "need.queue_pop.global_missing", "need.queue_pop.already_satisfied", "need.queue_pop.invalid_or_type_changed", "need.queue_pop.db_error", "need.queue_pop.not_checked",
 	"need.failure_sample.still_needed", "need.failure_sample.superseded", "need.failure_sample.tombstoned", "need.failure_sample.global_missing", "need.failure_sample.already_satisfied", "need.failure_sample.invalid_or_type_changed", "need.failure_sample.db_error", "need.failure_sample.not_checked",
@@ -612,6 +612,8 @@ func churnClass(err error) string {
 		return "remote_no_such_file"
 	case errors.Is(err, errModified):
 		return "local_modified"
+	case errors.Is(err, errDirHasIgnored):
+		return "ignored_leftover"
 	case errors.Is(err, errNoDevice), errors.Is(err, errNotAvailable):
 		return "no_source"
 	}
