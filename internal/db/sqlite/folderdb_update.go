@@ -802,12 +802,15 @@ func (s *folderDB) periodicCheckpointLocked(fs []protocol.FileInfo) {
 
 		// PASSIVE never blocks, so a busy result is not expected; moved <
 		// modified simply means readers pinned part of the WAL, which is fine
-		// - the next checkpoint continues where this one stopped. Count
-		// consecutive incomplete checkpoints purely for the debug log above.
+		// - the next checkpoint continues where this one stopped. If a reader
+		// never lets go, though, the WAL never resets and grows without
+		// bound: past walBackstopBytes the backstop goroutine takes over
+		// (patch/73). It never blocks this writer.
 		if res == 0 && moved == modified {
 			s.checkpointsCount = 0
 		} else {
 			s.checkpointsCount++
+			s.maybeStartWALBackstop()
 		}
 		s.updatePoints = 0
 	}

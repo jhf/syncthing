@@ -244,8 +244,8 @@
     "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
   },
   "folderdb_local.go:*folderDB.AllLocalFilesWithPrefix": {
-    "sha256": "c6292ec3c9b9437cd582ca84b028de890a78f1eab1d173402101ee71059818a0",
-    "reason": "Read-only SQL/metadata access. Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
+    "sha256": "207eebf51ea4f51e4fc2bebe59fcc205c22ecf7cec4675af3965b1894a20bf40",
+    "reason": "Read-only SQL/metadata access (patch/73: statement moved to localPrefixQuery, driven from the file_names range). Complete SQL/call body pinned so a future writing statement, RETURNING or helper bypass requires new review."
   },
   "folderdb_local.go:*folderDB.DebugCounts": {
     "sha256": "a5cbe88479489eac197682f4db1d797102a11291765eb61284e6b856db10a61a",
@@ -368,8 +368,8 @@
     "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
   },
   "folderdb_update.go:*folderDB.periodicCheckpointLocked": {
-    "sha256": "33039f39261aabfaa0bffb86611f8834f002bf9a0c18d2b67c4799bb5ba22b13",
-    "reason": "Caller Update holds folder updateLock through connection-local journal limit and PASSIVE checkpoint. Every caller pinned."
+    "sha256": "a9e4aea40ab2fe4c5b1f49ad51193685d61fd438b3ee816c14dcbb70db886f76",
+    "reason": "Caller Update holds folder updateLock through connection-local journal limit and PASSIVE checkpoint. Every caller pinned. patch/73: an incomplete checkpoint may call maybeStartWALBackstop, which only stats the WAL file and starts a goroutine; it takes no lock and runs no SQL in this goroutine."
   },
   "folderdb_update.go:*folderDB.recalcGlobalForFile": {
     "sha256": "a6b483294a20ce147bf0303cdbc6b791a1fc93eebea5107ef7086c76452dbd9b",
@@ -394,5 +394,13 @@
   "folderdb_update.go:.retireReplacedBlocklist": {
     "sha256": "dc7204ef71d936dd9670caadd47a520590e4e6f481a362c5aab896b35f86239f",
     "reason": "Transaction helper inherits folder updateLock from Update/drop/population/GC or the final/range need build. It opens no independent transaction. All helper callers fingerprinted."
+  },
+  "folderdb_local.go:declaration:localPrefixQuery": {
+    "sha256": "6e0e0dae7293147fb2e0a65fc6be687ae291a0662cb833c3f1461c1693f8429d",
+    "reason": "patch/73: read-only SELECT text for AllLocalFilesWithPrefix (file_names range, CROSS JOIN files on name_idx and device_idx, fileinfos, blocklists). No write, no RETURNING."
+  },
+  "db_walbackstop.go:*baseDB.tryTruncateCheckpoint": {
+    "sha256": "4e3f659df0c69a029cd361815e3e648c21be0190c31f3edd3c46d631d861628a",
+    "reason": "patch/73 backstop, own goroutine and connection. Step 1: PASSIVE checkpoint without updateLock, the same unlocked-maintenance class as the periodic PASSIVE in tidy (copies frames, never waits). Step 2 only if step 1 reached the WAL end: takes baseDB updateLock, sets busy_timeout 200 ms on its own connection, runs wal_checkpoint(TRUNCATE) (at most the frames written since step 1), restores busy_timeout, releases. A reader in the way yields SQLITE_BUSY after 200 ms, reported as busy and retried later; no in-process writer can be blocked longer than that."
   }
 }
