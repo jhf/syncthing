@@ -47,6 +47,7 @@ type baseDB struct {
 	updateLock       sync.Mutex
 	updatePoints     int
 	checkpointsCount int
+	walBackstop      walBackstop // db_walbackstop.go
 
 	statementsMut sync.RWMutex
 	statements    map[string]*sqlx.Stmt
