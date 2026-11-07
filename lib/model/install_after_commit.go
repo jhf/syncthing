@@ -7,7 +7,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math"
+	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -63,7 +67,7 @@ func (f *sendReceiveFolder) queueInstallState(file, previous protocol.FileInfo, 
 	if err := f.mtimefs.Chtimes(temp, file.ModTime(), file.ModTime()); err != nil {
 		return nil, err
 	}
-	if !f.DisableFsync && !f.installSyncfs() {
+	if !f.DisableFsync && !f.installBarrier() {
 		fd, err := f.mtimefs.Open(temp)
 		if err != nil {
 			return nil, err
@@ -96,29 +100,44 @@ func (f *sendReceiveFolder) queueInstallState(file, previous protocol.FileInfo, 
 }
 
 // precommitInstallFence makes a group's prepared temps durable before their
-// index commit. In syncfs mode (Linux default) one syncfs(2) of the folder
-// filesystem covers every temp's contents and directory entry, plus the
-// legacy (non-install) jobs' directories: one barrier per group instead of
-// one fsync per file. queueInstallState skipped the per-temp fsync in that
-// mode, so a failed syncfs must fall back to fsyncing each temp here; it is
-// never allowed to commit over unsynced temp bytes.
+// index commit. In barrier mode (Linux and macOS, real local filesystem) the
+// cost model picks per fence between one full sync per temp and directory,
+// and the platform's group barrier (installBarrierFn) over all of them, plus
+// the legacy (non-install) jobs' directories. queueInstallState skipped the
+// per-temp sync in that mode, so a failed barrier falls back to syncing each
+// temp here: it never commits over unsynced temp bytes.
 func (f *sendReceiveFolder) precommitInstallFence(temps []string, installDirs, legacyDirs map[string]struct{}) error {
 	if f.DisableFsync || len(temps)+len(installDirs)+len(legacyDirs) == 0 {
 		return nil
 	}
-	if f.installSyncfs() {
+	if f.installBarrier() {
 		items := len(temps) + len(installDirs) + len(legacyDirs)
-		if len(temps) > 0 && f.installCost.pre.useSyncfs(items) {
+		method := fencePerItem
+		if len(temps) > 0 {
+			method = f.installCost.pre.choose(items)
+		}
+		if method == fenceSampleBarrier {
+			// Refresh the per-item estimate on a few temps; the barrier
+			// below covers them and everything else.
 			t0 := time.Now()
-			err := installSyncfsFn(f.Filesystem().URI())
+			for _, temp := range temps[:min(installCostSampleItems, len(temps))] {
+				if err := f.fsyncInstallFile(temp); err != nil {
+					return err
+				}
+			}
+			f.installCost.pre.observeItems(time.Since(t0), min(installCostSampleItems, len(temps)))
+		}
+		if method != fencePerItem {
+			t0 := time.Now()
+			err := f.runInstallBarrier(installBarrierPaths(temps, installDirs, legacyDirs))
 			if err == nil {
-				f.installCost.pre.observeSyncfs(time.Since(t0))
+				f.installCost.pre.observeBarrier(time.Since(t0))
 				return nil
 			}
-			f.sl.Warn("syncfs failed, falling back to per-file fsyncs for install group", slogutil.Error(err))
+			f.sl.Warn("Install group barrier failed, falling back to per-file syncs", slog.String("barrier", installBarrierName), slogutil.Error(err))
 		}
-		// Small group (or failed syncfs): per-file fsyncs are cheaper than one
-		// syncfs, which flushes every dirty page of the whole filesystem.
+		// Per-item fence (chosen, or a failed barrier): a full sync of each
+		// temp and directory. Never commit over unsynced temp bytes.
 		t0 := time.Now()
 		for _, temp := range temps {
 			if err := f.fsyncInstallFile(temp); err != nil {
@@ -131,7 +150,9 @@ func (f *sendReceiveFolder) precommitInstallFence(temps []string, installDirs, l
 		if err := f.syncInstallDirs(installDirs); err != nil {
 			return err
 		}
-		f.installCost.pre.observeItems(time.Since(t0), items)
+		if method == fencePerItem {
+			f.installCost.pre.observeItems(time.Since(t0), items)
+		}
 		return nil
 	}
 	if len(legacyDirs) > 0 {
@@ -141,98 +162,204 @@ func (f *sendReceiveFolder) precommitInstallFence(temps []string, installDirs, l
 }
 
 // postrenameInstallFence makes the group's renames durable before the
-// pending bits are cleared. One syncfs in syncfs mode, else one fsync per
-// distinct directory.
+// pending bits are cleared: the cost model's choice between one full sync
+// per distinct directory and the platform's group barrier over them.
 func (f *sendReceiveFolder) postrenameInstallFence(installDirs map[string]struct{}) error {
 	if f.DisableFsync || len(installDirs) == 0 {
 		return nil
 	}
-	if f.installSyncfs() && f.installCost.post.useSyncfs(len(installDirs)) {
+	method := fencePerItem
+	if f.installBarrier() {
+		method = f.installCost.post.choose(len(installDirs))
+	}
+	if method == fenceSampleBarrier {
+		dirs := make(map[string]struct{}, installCostSampleItems)
+		for d := range installDirs {
+			if len(dirs) == installCostSampleItems {
+				break
+			}
+			dirs[d] = struct{}{}
+		}
 		t0 := time.Now()
-		err := installSyncfsFn(f.Filesystem().URI())
+		if err := f.syncInstallDirs(dirs); err != nil {
+			return err
+		}
+		f.installCost.post.observeItems(time.Since(t0), len(dirs))
+	}
+	if method != fencePerItem {
+		t0 := time.Now()
+		err := f.runInstallBarrier(installBarrierPaths(nil, installDirs, nil))
 		if err == nil {
-			f.installCost.post.observeSyncfs(time.Since(t0))
+			f.installCost.post.observeBarrier(time.Since(t0))
 			return nil
 		}
-		f.sl.Warn("syncfs failed, falling back to per-directory fsyncs for install group", slogutil.Error(err))
+		f.sl.Warn("Install group barrier failed, falling back to per-directory syncs", slog.String("barrier", installBarrierName), slogutil.Error(err))
 	}
 	t0 := time.Now()
 	if err := f.syncInstallDirs(installDirs); err != nil {
 		return err
 	}
-	if f.installSyncfs() {
+	if f.installBarrier() && method == fencePerItem {
 		f.installCost.post.observeItems(time.Since(t0), len(installDirs))
 	}
 	return nil
 }
 
-// installSyncfsMinGroup is the group size from which one syncfs(2) is used
-// while there is no measurement to decide by (patch/67's fixed rule). It is
-// only the starting point: installSyncCost replaces it with measured costs.
-const installSyncfsMinGroup = 8
+// installBarrierPaths lists what a group barrier must make durable: the
+// temps, then every directory (sorted, so the order is deterministic).
+// syncfs ignores the list; macOS fsyncs each entry before its one flush.
+func installBarrierPaths(temps []string, dirSets ...map[string]struct{}) []string {
+	paths := append([]string(nil), temps...)
+	start := len(paths)
+	for _, dirs := range dirSets {
+		for d := range dirs {
+			paths = append(paths, d)
+		}
+	}
+	slices.Sort(paths[start:])
+	return paths
+}
 
-// installCostWindow is how long a cost measurement stays valid. A syncfs
-// costs whatever the whole filesystem has dirty at that moment, so an old
-// reading says little; an expired estimate falls back to the fixed rule,
-// which also re-measures the method that had stopped being chosen.
-const installCostWindow = 10 * time.Minute
+// installSyncCost chooses, per fence, between the platform's group barrier
+// (one syncfs(2) of the folder's filesystem on Linux; plain fsyncs plus one
+// F_FULLFSYNC on macOS) and one full sync per item (temp file or directory)
+// by what each has recently cost on this machine (patch/74):
+//
+//   - It keeps the last installCostSamples durations of each: barrier time,
+//     and per-item time (a per-item fence's total divided by its items).
+//   - Until each ring holds installCostWarmup (3) samples it explores,
+//     alternating 50/50 by the golden ratio: fence k uses the barrier iff
+//     frac(k*phi) < 1/2, a well-spread deterministic sequence. A group of
+//     one item always uses per-item.
+//   - Then it uses the barrier iff n * median(perItem) > median(barrier),
+//     over the samples each ring holds: 3 at first, growing to
+//     installCostSamples (5) through the refresh. Simulated with measured
+//     costs over 60 fences, deciding from 3 instead of 5 cut the warm-up's
+//     excess from 18.9 s to 12.2 s in total over five cases; the median of
+//     3 still ignores a single outlier such as the first syncfs after
+//     startup flushing everything already dirty (1.19 s against a 131 ms
+//     median on yarlung). Lopsided 80/20 or 20/80 splits were worse (53.6 s
+//     and 33.2 s): the rarer method takes longer to sample.
+//   - Every installCostRefresh-th fence makes a refresh of the losing
+//     method due, so both rings stay current as the disk's load changes;
+//     no clock, no expiry, no fixed fallback. A per-item refresh runs at
+//     once (a few fsyncs). A barrier refresh waits for a group where the
+//     barrier costs at most twice the per-item fence, so it never adds a
+//     whole syncfs to a single-file group.
+//   - Exploring per-item on a group larger than installCostSampleItems
+//     fsyncs only that many items, then barriers the group: a sample costs
+//     at most a few fsyncs, never n.
+//
+// Measured with the same calls (scratch fsprobe, 2026-11-07): yarlung
+// (btrfs, 2x HDD) fsync median 25.8 ms, syncfs 131.0 ms, so the barrier
+// wins from n > 5.08; the rule predicted the faster method for n = 1, 2,
+// 4, 8, 16 and 32 in all six cases. Under overnight sync load syncfs rose
+// to 2.6 s and the break-even with it, which the refresh follows.
+const (
+	installCostSamples     = 5  // ring size; decisions use the median of what the ring holds
+	installCostWarmup      = 3  // samples of each method before measurements decide
+	installCostRefresh     = 17 // every 17th fence measures the losing method
+	installCostSampleItems = 3  // per-item fsyncs when exploring a large group
+)
 
-// installSyncCost chooses, per fence, between one syncfs(2) and one fsync
-// per item (temp file or directory) by what each has actually cost here
-// lately: syncfs when n * perItem > syncfs. Both are exponentially weighted
-// moving averages (alpha 1/4) of measured durations. patch/67 used a fixed n
-// >= 8 from an inferred cost ratio. Measured on yarlung (btrfs, 2x HDD, live
-// Syncthing, 2026-11-06 20:47 UTC, 15 samples): small-file fsync median
-// 30.5 ms, syncfs median 226 ms (176..749 ms), break-even 7.4 files. The
-// syncfs cost is whatever the whole filesystem has dirty at that moment, so
-// it moves: on a quiet disk syncfs pays from n=2, while it is busy per-item
-// fsyncs win for much larger groups. A group of one always fsyncs.
+// installGoldenRatio is phi; frac(k*phi) is the warm-up alternation.
+const installGoldenRatio = 1.6180339887498949
+
+type costRing struct {
+	v [installCostSamples]time.Duration
+	n int // samples recorded, saturating at installCostSamples
+	i int // next slot
+}
+
+func (r *costRing) add(d time.Duration) {
+	r.v[r.i] = d
+	r.i = (r.i + 1) % installCostSamples
+	if r.n < installCostSamples {
+		r.n++
+	}
+}
+
+func (r *costRing) median() time.Duration {
+	s := r.v // copy
+	slices.Sort(s[:r.n])
+	return s[r.n/2]
+}
+
+// fenceMethod is what one fence does.
+type fenceMethod int
+
+const (
+	fencePerItem       fenceMethod = iota // fsync every item
+	fenceBarrier                          // one syncfs for the group
+	fenceSampleBarrier                    // fsync installCostSampleItems items (timed), then one syncfs
+)
+
 type installSyncCost struct {
-	mu                  sync.Mutex
-	now                 func() time.Time
-	syncfs, perItem     time.Duration
-	syncfsAt, perItemAt time.Time
-	lastLogged          int // break-even group size last logged, 0 = none
-	logf                func(breakEven int, syncfs, perItem time.Duration)
+	mu         sync.Mutex
+	barrier    costRing
+	perItem    costRing
+	fences     uint64
+	refreshDue bool // a refresh of the losing method is waiting for a cheap group
+	lastLogged int  // break-even group size last logged, 0 = none
+	logf       func(breakEven int, barrier, perItem time.Duration)
 }
 
 type installSyncCosts struct{ pre, post installSyncCost }
 
-func (c *installSyncCost) clock() time.Time {
-	if c.now != nil {
-		return c.now()
-	}
-	return time.Now()
-}
-
-// useSyncfs reports whether a fence over n items should use one syncfs.
-func (c *installSyncCost) useSyncfs(n int) bool {
+// choose returns the method for a fence over n items.
+func (c *installSyncCost) choose(n int) fenceMethod {
 	if n < 2 {
-		return false
+		return fencePerItem
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	now := c.clock()
-	syncfsOK := !c.syncfsAt.IsZero() && now.Sub(c.syncfsAt) < installCostWindow
-	perItemOK := !c.perItemAt.IsZero() && now.Sub(c.perItemAt) < installCostWindow
-	if !syncfsOK || !perItemOK {
-		return n >= installSyncfsMinGroup
+	c.fences++
+	k := c.fences
+	explorePerItem := func() fenceMethod {
+		if n > installCostSampleItems {
+			return fenceSampleBarrier
+		}
+		return fencePerItem
 	}
-	return time.Duration(n)*c.perItem > c.syncfs
+	if c.barrier.n < installCostWarmup || c.perItem.n < installCostWarmup {
+		_, frac := math.Modf(float64(k) * installGoldenRatio)
+		if frac < 0.5 {
+			return fenceBarrier
+		}
+		return explorePerItem()
+	}
+	barrierWins := time.Duration(n)*c.perItem.median() > c.barrier.median()
+	// The losing method's ring grows from the warm-up's 3 samples to 5 at
+	// the refresh rate, then stays current at the same rate.
+	if k%installCostRefresh == 0 {
+		c.refreshDue = true
+	}
+	if c.refreshDue {
+		if barrierWins {
+			// Re-measure per-item: a sample of at most
+			// installCostSampleItems fsyncs, cheap on any group.
+			c.refreshDue = false
+			return explorePerItem()
+		}
+		// Re-measure the barrier only on a group where it is at most twice
+		// the per-item cost, so a refresh never costs a full syncfs on top
+		// of a single-file group (patch/74 trickle bench on yarlung: 0.3 s
+		// each). Until such a group comes, stay with per-item, which is
+		// always durable; a busy disk keeps the barrier dear anyway.
+		if 2*time.Duration(n)*c.perItem.median() >= c.barrier.median() {
+			c.refreshDue = false
+			return fenceBarrier
+		}
+	}
+	if barrierWins {
+		return fenceBarrier
+	}
+	return fencePerItem
 }
 
-func ewma(old, sample time.Duration, fresh bool) time.Duration {
-	if !fresh {
-		return sample
-	}
-	return old + (sample-old)/4
-}
-
-func (c *installSyncCost) observeSyncfs(d time.Duration) {
+func (c *installSyncCost) observeBarrier(d time.Duration) {
 	c.mu.Lock()
-	now := c.clock()
-	c.syncfs = ewma(c.syncfs, d, !c.syncfsAt.IsZero() && now.Sub(c.syncfsAt) < installCostWindow)
-	c.syncfsAt = now
+	c.barrier.add(d)
 	c.noteLocked()
 	c.mu.Unlock()
 }
@@ -242,44 +369,55 @@ func (c *installSyncCost) observeItems(d time.Duration, n int) {
 		return
 	}
 	c.mu.Lock()
-	now := c.clock()
-	c.perItem = ewma(c.perItem, d/time.Duration(n), !c.perItemAt.IsZero() && now.Sub(c.perItemAt) < installCostWindow)
-	c.perItemAt = now
+	c.perItem.add(d / time.Duration(n))
 	c.noteLocked()
 	c.mu.Unlock()
 }
 
-// noteLocked reports the break-even group size when it has moved by a
-// factor of two or more since last reported, so the log shows what the
-// decision rests on without a line per group.
+// noteLocked reports the break-even group size once both rings hold enough
+// samples to decide, and whenever it has moved by a factor of two or more
+// since last reported, so the log shows what the decisions rest on without
+// a line per group.
 func (c *installSyncCost) noteLocked() {
-	if c.logf == nil || c.syncfsAt.IsZero() || c.perItemAt.IsZero() || c.perItem <= 0 {
+	if c.logf == nil || c.barrier.n < installCostWarmup || c.perItem.n < installCostWarmup {
 		return
 	}
-	be := int(c.syncfs/c.perItem) + 1
-	if be < 2 {
-		be = 2
+	b, p := c.barrier.median(), c.perItem.median()
+	if p <= 0 {
+		return
 	}
+	be := max(int(b/p)+1, 2)
 	if c.lastLogged != 0 && be < 2*c.lastLogged && 2*be > c.lastLogged {
 		return
 	}
 	c.lastLogged = be
-	c.logf(be, c.syncfs, c.perItem)
+	c.logf(be, b, p)
 }
 
-// installSyncfsFn is the install path's syncfs hook. It is distinct from
-// syncfsFn so tests can count install-group barriers independently.
-var installSyncfsFn = func(root string) error { return syncfsFn(root) }
+// installBarrierForTest forces barrier mode on the install path in tests,
+// whose fake filesystem otherwise disables it.
+var installBarrierForTest = false
 
-// installSyncfsForTest forces syncfs mode on the install path in tests, whose
-// fake filesystem otherwise disables it.
-var installSyncfsForTest = false
+// installBarrier reports whether install groups may use the platform's group
+// barrier (installBarrierFn: syncfs on Linux, plain fsyncs plus one
+// F_FULLFSYNC on macOS) instead of one full sync per temp and directory. It
+// must be decided consistently for the per-temp skip in queueInstallState
+// and the group fences. A real local filesystem is required; STSYNCMODE=fsync
+// turns it off.
+func (f *sendReceiveFolder) installBarrier() bool {
+	if f.DisableFsync {
+		return false
+	}
+	if installBarrierForTest {
+		return true
+	}
+	return installBarrierSupported && f.Filesystem().Type() == fs.FilesystemTypeBasic && os.Getenv("STSYNCMODE") != "fsync"
+}
 
-// installSyncfs reports whether install groups use syncfs barriers instead of
-// per-temp and per-directory fsyncs. It must be decided consistently for both
-// the per-temp skip in queueInstallState and the group fences.
-func (f *sendReceiveFolder) installSyncfs() bool {
-	return !f.DisableFsync && (installSyncfsForTest || f.batchSyncfs())
+// runInstallBarrier makes paths (relative to the folder) durable with the
+// platform's group barrier.
+func (f *sendReceiveFolder) runInstallBarrier(paths []string) error {
+	return installBarrierFn(f.Filesystem().URI(), paths)
 }
 
 func (f *sendReceiveFolder) fsyncInstallFile(name string) error {

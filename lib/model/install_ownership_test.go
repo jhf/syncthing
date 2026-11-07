@@ -101,6 +101,10 @@ func TestInstallAfterCommitFinisherOwnership(t *testing.T) {
 }
 
 func TestInstallAfterCommitDirectoryFencesDeduplicated(t *testing.T) {
+	// Per-item mode: this pins one directory sync per distinct directory per
+	// fence. Barrier mode (patch/74; Linux and now macOS) is covered by the
+	// install_syncfs and install_barrier tests.
+	t.Setenv("STSYNCMODE", "fsync")
 	f, fi, data, _ := physicalInstallFixture(t, "one/fixture")
 	measured := &installBenchFS{Filesystem: f.mtimefs, flushed: make(map[string]time.Time), visible: make(chan string, 6)}
 	f.mtimefs = measured

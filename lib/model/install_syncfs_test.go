@@ -40,7 +40,7 @@ func (c *countingSyncFile) Sync() error {
 }
 
 // runSyncfsInstallGroup pulls n files through the real copier, finishers and
-// updater with syncfs mode forced on and installSyncfsFn replaced by fn.
+// updater with syncfs mode forced on and installBarrierFn replaced by fn.
 func runSyncfsInstallGroup(t *testing.T, n int, fn func(string) error) (*sendReceiveFolder, *countingSyncFS, []byte) {
 	t.Helper()
 	return runSyncfsInstallGroupPrimed(t, n, nil, fn)
@@ -54,16 +54,16 @@ func runSyncfsInstallGroupPrimed(t *testing.T, n int, prime func(*sendReceiveFol
 	if prime != nil {
 		prime(f)
 	}
-	installSyncfsForTest = true
-	t.Cleanup(func() { installSyncfsForTest = false })
-	if !f.installSyncfs() {
+	installBarrierForTest = true
+	t.Cleanup(func() { installBarrierForTest = false })
+	if !f.installBarrier() {
 		t.Fatal("install syncfs mode not active")
 	}
 	counter := &countingSyncFS{Filesystem: f.mtimefs}
 	f.mtimefs = counter
-	old := installSyncfsFn
-	t.Cleanup(func() { installSyncfsFn = old })
-	installSyncfsFn = fn
+	old := installBarrierFn
+	t.Cleanup(func() { installBarrierFn = old })
+	installBarrierFn = func(_ string, _ []string) error { return fn("") }
 	f.Copiers = 8
 	d := &growthInstallDB{DB: f.db}
 	f.db = d
@@ -106,19 +106,20 @@ func runSyncfsInstallGroupPrimed(t *testing.T, n int, prime func(*sendReceiveFol
 	return f, counter, data
 }
 
-// In syncfs mode a large group pays two filesystem barriers (before the
-// durable commit and after the renames), never one fsync per temp file.
-// Groups below installSyncfsMinGroup fsync their temps individually.
+// In syncfs mode with cheap barriers (the stub costs ~0), groups end up on
+// one barrier per fence, not one fsync per temp file: after the golden-ratio
+// warm-up (patch/74) the medians choose the barrier, and per-file fsyncs are
+// limited to warm-up fences and refresh samples.
 func TestInstallAfterCommitSyncfsGroupBarriers(t *testing.T) {
 	const n = 200
 	var calls atomic.Int64
 	_, counter, _ := runSyncfsInstallGroup(t, n, func(string) error { calls.Add(1); return nil })
 	t.Logf("files=%d syncfs=%d perFileSyncs=%d", n, calls.Load(), counter.syncs.Load())
-	if got := counter.syncs.Load(); got > 2*installSyncfsMinGroup {
-		t.Fatalf("syncfs mode performed %d per-file fsyncs for %d files, want only small-group ones (<= %d)", got, n, 2*installSyncfsMinGroup)
+	if got := counter.syncs.Load(); got > int64(n)/2 {
+		t.Fatalf("syncfs mode performed %d per-file fsyncs for %d files, want mostly barriers", got, n)
 	}
-	if c := calls.Load(); c == 0 || c > int64(n)/4 {
-		t.Fatalf("syncfs barriers = %d for %d files, want grouped (1..%d)", c, n, n/4)
+	if c := calls.Load(); c == 0 || c > int64(n)/2 {
+		t.Fatalf("syncfs barriers = %d for %d files, want grouped (1..%d)", c, n, n/2)
 	}
 }
 
