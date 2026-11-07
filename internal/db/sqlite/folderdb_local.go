@@ -82,16 +82,30 @@ func (s *folderDB) AllLocalFilesWithPrefix(device protocol.DeviceID, prefix stri
 	prefix = osutil.NormalizedFilename(prefix)
 	end := prefixEnd(prefix)
 
-	it, errFn := iterStructs[indirectFI](s.sql.Queryx(`
-		SELECT fi.fiprotobuf, bl.blprotobuf FROM fileinfos fi
-		INNER JOIN files f on fi.sequence = f.sequence
-		LEFT JOIN blocklists bl ON bl.blocklist_hash = f.blocklist_hash
-		INNER JOIN devices d ON d.idx = f.device_idx
-		INNER JOIN file_names n ON f.name_idx = n.idx
-		WHERE d.device_id = ? AND n.name >= ? AND n.name < ?
-	`, device.String(), prefix, end))
+	// Drive the query from the name range and look each name up in
+	// files_device_name, never the other way round. Upstream's form joins
+	// devices and lets the planner pick files_device_name(device_idx=?) as
+	// the outer loop: it then walks EVERY file of the device in name_idx
+	// (insertion) order and fetches each name only to discard it. On
+	// yarlung (2.9M local files, HDD) that cost ~2.5 s per call even for a
+	// one-file prefix, and the post-pull rescan sweep makes such calls
+	// back to back: the read never ends, PASSIVE checkpoints stop at it,
+	// and the WAL grew to 824 MiB (2026-11-07). CROSS JOIN pins the order;
+	// the device index is a scalar subquery so the join is a point lookup.
+	it, errFn := iterStructs[indirectFI](s.sql.Queryx(localPrefixQuery, device.String(), prefix, end))
 	return itererr.Map(it, errFn, indirectFI.FileInfo)
 }
+
+// localPrefixQuery: see AllLocalFilesWithPrefix. Args: device ID, prefix,
+// prefixEnd(prefix).
+const localPrefixQuery = `
+		SELECT fi.fiprotobuf, bl.blprotobuf FROM file_names n
+		CROSS JOIN files f ON f.name_idx = n.idx AND f.device_idx = (SELECT idx FROM devices WHERE device_id = ?)
+		INNER JOIN fileinfos fi ON fi.sequence = f.sequence
+		LEFT JOIN blocklists bl ON bl.blocklist_hash = f.blocklist_hash
+		WHERE n.name >= ? AND n.name < ?
+		ORDER BY n.name
+	`
 
 func (s *folderDB) AllLocalFilesWithBlocksHash(h []byte) (iter.Seq[db.FileMetadata], func() error) {
 	return iterStructs[db.FileMetadata](s.stmt(`
