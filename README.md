@@ -1,3 +1,65 @@
+> **This is a maintained soft fork of [syncthing/syncthing](https://github.com/syncthing/syncthing).**
+>
+> **North Star:** Syncthing, fast on one real workload — a Mac whose home
+> tree (measured: 2.38M files, 394k directories, 262 GiB) mirrors to a
+> remote Linux machine on BTRFS over WAN. Boot to ready in seconds instead
+> of a ~40-minute full scan; a change on one side visible on the other in
+> ~22 s; and the watcher must not melt the machine it watches. Everything
+> this fork carries serves that pair of machines; that is the scope we
+> maintain and test against. (Windows, other platforms, and general-purpose
+> hardening are upstream's domain — maybe one day, not now.)
+>
+> It tracks upstream and carries the patches listed in [PATCHES.md](PATCHES.md)
+> (FSEvents journal replay, poll-mode watching, BTRFS snapshot-diff replay,
+> chunked scanning, GC/need-list fixes; background in
+> [syncthing#10921](https://github.com/syncthing/syncthing/issues/10921)).
+> Maintenance model: [FORK.md](FORK.md). For everything else, refer to the
+> upstream project below.
+
+## The approach
+
+We don't hammer on one slow function. For each slowdown we step back and
+ask: *for this workload to be fast, what must never happen at all?* Then we
+find where it happens and remove the pattern, not the symptom:
+
+- **Turn O(tree) into O(changes).** A 2.38M-file tree must never be
+  re-walked to learn what changed. The FSEvents journal and BTRFS snapshots
+  already know; replay them (`fsevents-journal-replay`, `btrfs-scan-replay`,
+  `btrfs-helper-ops`, `fsevents-poll-mode`).
+- **Poll perfect queues instead of holding live streams.** The kernel
+  journals every event for every open stream; on a busy tree that burns a
+  core per subscriber. Poll the journal every 5 s instead, and size the
+  pipeline for storms, not averages (`watch-buffer-batch-throttle`,
+  `fsevents-poll-mode`).
+- **No lock held longer than a chunk.** Scans and GC commit per chunk and
+  service pulls and watch events between chunks, so a 45-minute operation
+  never starves the rest of the system (`gc-chunked-commit`, `chunked-scan`,
+  `gc-lock-scope`).
+- **A transient resource error must never kill a long-lived connection.**
+  SQLITE_BUSY means "wait", not "reconnect" (`gc-lock-scope`,
+  `db-busy-resilience`).
+- **Precompute the questions the UI and the puller ask every few seconds.**
+  Incrementally maintained need tables and indexes instead of
+  per-query full-table scans (`need-list-perf`, `need-tables`,
+  `files-needed-index`).
+- **Measure, then claim.** Every line below is from this repo's logs, not
+  estimates.
+
+## Measured results (Mac Studio ↔ Linux/BTRFS, 2.38M files / 262 GiB)
+
+- Boot after 5.8 h offline: **~40 min full scan → 6 s** journal replay
+  (4.17M events).
+- Watcher cost: fseventsd **104–110 % CPU / 9–19 GB RSS → 0.2–3 % /
+  14–16 MB**; 11,877+ poll cycles, zero drop flags.
+- Change visible on the other side: **10–23 s** end to end, deletes included.
+- A database that previously killed the device connection every ~20 s under
+  scan load (172 SQLITE_BUSY errors, index frozen): **zero** lock errors
+  since the fix.
+
+Full table, per patch: [PATCHES.md](PATCHES.md#measured-results).
+
+---
+
 [![Syncthing][14]][15]
 
 ---
