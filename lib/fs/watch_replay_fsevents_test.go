@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/syncthing/notify"
 )
 
@@ -204,3 +205,42 @@ type fakeNotifyEventInfo struct{ e notify.Event }
 func (f fakeNotifyEventInfo) Event() notify.Event { return f.e }
 func (f fakeNotifyEventInfo) Path() string        { return "" }
 func (f fakeNotifyEventInfo) Sys() interface{}    { return nil }
+
+// TestWatchBackendDroppedCountsEscalation pins that a backend drop flag
+// (here MustScanSubDirs, also the notify fork's synthetic flag for a full
+// consumer channel) is counted and logged as a backend_dropped escalation.
+func TestWatchBackendDroppedCountsEscalation(t *testing.T) {
+	lines := captureWatchEscalationLog(t, 0)
+	fs := newBasicFilesystem(testDirAbs)
+	before := testutil.ToFloat64(metricWatchRootEscalations.WithLabelValues(fs.URI(), WatchEscalationBackendDropped))
+
+	backendChan := make(chan notify.EventInfo, 1)
+	backendChan <- fakeNotifyEventInfo{notify.FSEventsMustScanSubDirs}
+	outChan := make(chan Event)
+	errChan := make(chan error)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		fs.watchLoop(ctx, ".", []string{testDirAbs}, backendChan, outChan, errChan, fakeMatcher{})
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	select {
+	case ev := <-outChan:
+		if ev.Name != "." {
+			t.Fatalf("event after drop flag = %q, want the root", ev.Name)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the drop-flag root event")
+	}
+	if got := testutil.ToFloat64(metricWatchRootEscalations.WithLabelValues(fs.URI(), WatchEscalationBackendDropped)) - before; got != 1 {
+		t.Errorf("backend_dropped escalations = %v, want 1", got)
+	}
+	if len(lines()) != 1 {
+		t.Errorf("logged %q, want one escalation line", lines())
+	}
+}
