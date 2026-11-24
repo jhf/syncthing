@@ -92,6 +92,9 @@ type watchBacklog struct {
 	over       *BoundedPathSet
 	overEvents int
 	overMaxID  uint64
+	// overRootNoted is set when the set's root collapse was already counted
+	// as an escalation where it originated (lost events, a drop flag).
+	overRootNoted bool
 	// overAfter holds the events that arrived during overflow but must
 	// reach the translation loop themselves (barrier canaries, fatal flags,
 	// paths outside the root). They are processed after the set's scan
@@ -146,7 +149,7 @@ func (b *watchBacklog) pushRaw(ev notify.EventInfo) {
 func (b *watchBacklog) enterOverflow() {
 	if b.over == nil {
 		b.over = NewBoundedPathSet(watchBacklogCoarseLimit)
-		b.overEvents, b.overMaxID, b.overAfter = 0, 0, nil
+		b.overEvents, b.overMaxID, b.overRootNoted, b.overAfter = 0, 0, false, nil
 	}
 }
 
@@ -165,6 +168,9 @@ type overflowBatch struct {
 	set    *BoundedPathSet
 	events int
 	maxID  uint64
+	// rootNoted: a root collapse was already counted as an escalation
+	// where it originated (lost events, a root drop flag).
+	rootNoted bool
 	// after: raw events to process once the set's scan events are out.
 	after []notify.EventInfo
 }
@@ -200,7 +206,7 @@ func (b *watchBacklog) pop() (ev notify.EventInfo, over *overflowBatch, ok bool)
 		return ev, nil, true
 	}
 	if b.over != nil {
-		over = &overflowBatch{set: b.over, events: b.overEvents, maxID: b.overMaxID, after: b.overAfter}
+		over = &overflowBatch{set: b.over, events: b.overEvents, maxID: b.overMaxID, rootNoted: b.overRootNoted, after: b.overAfter}
 		b.over, b.overAfter = nil, nil
 		return nil, over, true
 	}
@@ -219,8 +225,9 @@ func (f *BasicFilesystem) watchPump(ctx context.Context, name string, roots []st
 		case ev := <-backendChan:
 			b.mu.Lock()
 			if lost {
-				l.Debugln(f.Type(), f.URI(), "Watch: Event overflow, scanning", name)
+				NoteWatchRootEscalation(f.URI(), WatchEscalationBufferOverflow, "queued", b.queued(), "buffer", backendBuffer)
 				b.absorb(name, 0)
+				b.overRootNoted = true
 			}
 			if b.over == nil && b.queued() < b.limit() {
 				b.pushRaw(ev)
@@ -247,7 +254,10 @@ func (f *BasicFilesystem) absorbEvent(ev notify.EventInfo, name string, roots []
 	case watchEventOverflow:
 		rel := f.dropFlagScope(ev, name, roots)
 		if isRootPath(rel) {
-			l.Debugln(f.Type(), f.URI(), "Watch: Backend dropped events, scanning", name)
+			NoteWatchRootEscalation(f.URI(), WatchEscalationBackendDropped, "path", ev.Path(), "event", ev.Event().String(), "backlog", true)
+			b.absorb(rel, 0)
+			b.overRootNoted = true
+			return
 		}
 		b.absorb(rel, 0)
 		return
@@ -303,7 +313,9 @@ func (f *BasicFilesystem) emitOverflowSet(ctx context.Context, name string, over
 	}
 	metricWatchBacklogCoarsened.WithLabelValues(f.URI()).Inc()
 	if over.set.Root() {
-		watchBacklogLog("Watch backlog over its limit, scanning the whole folder", "root", f.URI(), "events", over.events, "coarseLimit", watchBacklogCoarseLimit)
+		if !over.rootNoted {
+			NoteWatchRootEscalation(f.URI(), WatchEscalationBacklogOverflow, "events", over.events, "coarseLimit", watchBacklogCoarseLimit)
+		}
 		paths = []string{name}
 	} else {
 		watchBacklogLog("Watch backlog over its limit, scanning affected directories instead", "root", f.URI(), "events", over.events, "paths", len(paths), "depthCap", over.set.DepthCap(), "first", paths[0])
