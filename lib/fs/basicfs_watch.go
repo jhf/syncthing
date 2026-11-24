@@ -34,6 +34,7 @@ func (f *BasicFilesystem) Watch(name string, ignore Matcher, ctx context.Context
 	if err != nil {
 		return nil, nil, err
 	}
+	RegisterWatchEscalationMetrics(f.URI())
 
 	outChan := make(chan Event)
 	backendChan := make(chan notify.EventInfo, backendBuffer)
@@ -120,6 +121,7 @@ func (f *BasicFilesystem) watchLoop(ctx context.Context, name string, roots []st
 			scope := f.dropFlagScope(ev, name, roots)
 			if scope == name {
 				l.Debugln(f.Type(), f.URI(), "Watch: Backend dropped events, sending", name)
+				NoteWatchRootEscalation(f.URI(), WatchEscalationBackendDropped, "path", ev.Path(), "event", ev.Event().String())
 			}
 			select {
 			case outChan <- Event{Name: scope, Type: NonRemove}:
