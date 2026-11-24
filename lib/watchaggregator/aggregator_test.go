@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/events"
@@ -593,5 +595,112 @@ func TestAggregateFlush(t *testing.T) {
 	case b := <-watchChan:
 		t.Fatalf("empty flush emitted a batch: %v", b.Paths)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// watchRootEscalations reads the fs escalation counter for one root and
+// reason from the default registry (the counter is unexported in lib/fs).
+func watchRootEscalations(t *testing.T, root, reason string) float64 {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "syncthing_fs_watch_root_escalations_total" {
+			continue
+		}
+	metrics:
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				switch {
+				case lp.GetName() == "root" && lp.GetValue() != root,
+					lp.GetName() == "reason" && lp.GetValue() != reason:
+					continue metrics
+				}
+			}
+			return m.GetCounter().GetValue()
+		}
+	}
+	return 0
+}
+
+// TestAggregateOverflowToRootCountsEscalation pins that the aggregator's
+// own escalation - a window overflow that factoring cannot shrink - is
+// counted, while an explicit root event from the backend is not counted
+// again here (lib/fs counts it where it originates).
+func TestAggregateOverflowToRootCountsEscalation(t *testing.T) {
+	inProgress := make(map[string]struct{})
+	folderCfg := defaultFolderCfg.Copy()
+	folderCfg.ID = "EscalationCount"
+	folderCfg.Path = filepath.Join(folderRoot, t.Name())
+	ctx := t.Context()
+
+	before := watchRootEscalations(t, folderCfg.Path, fs.WatchEscalationAggregatorOverflow)
+
+	// Same shape as TestAggregate's root escalation: maxFiles root-level
+	// paths cannot factor below maxFiles.
+	a := newAggregator(ctx, folderCfg)
+	for i := 0; i < maxFiles; i++ {
+		a.newEvent(fs.Event{Name: strconv.Itoa(i), Type: fs.NonRemove}, inProgress)
+	}
+	a.newEvent(fs.Event{Name: filepath.Join("parent", "sub", "new"), Type: fs.NonRemove}, inProgress)
+	compareBatchToExpectedDirect(t, getEventPaths(a.root, ".", a), []string{"."})
+
+	if got := watchRootEscalations(t, folderCfg.Path, fs.WatchEscalationAggregatorOverflow) - before; got != 1 {
+		t.Errorf("aggregator_overflow escalations = %v, want 1", got)
+	}
+
+	// An explicit root event is not the aggregator's escalation.
+	b := newAggregator(ctx, folderCfg)
+	b.newEvent(fs.Event{Name: ".", Type: fs.NonRemove}, inProgress)
+	if got := watchRootEscalations(t, folderCfg.Path, fs.WatchEscalationAggregatorOverflow) - before; got != 1 {
+		t.Errorf("aggregator_overflow escalations after a backend root event = %v, want still 1", got)
+	}
+}
+
+// metricSeriesPresent reports whether the default registry exposes a series
+// of the named metric carrying all the given label values.
+func metricSeriesPresent(t *testing.T, name string, labels map[string]string) bool {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+	metrics:
+		for _, m := range mf.GetMetric() {
+			have := make(map[string]string)
+			for _, lp := range m.GetLabel() {
+				have[lp.GetName()] = lp.GetValue()
+			}
+			for k, v := range labels {
+				if have[k] != v {
+					continue metrics
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// TestAggregatorRegistersEscalationSeriesAtZero pins that a started
+// aggregator exposes every escalation reason for its root before any
+// escalation happens: an untouched labeled counter is absent from /metrics,
+// so "no escalation yet" read the same as "metric missing" (dev.186).
+func TestAggregatorRegistersEscalationSeriesAtZero(t *testing.T) {
+	folderCfg := defaultFolderCfg.Copy()
+	folderCfg.ID = "EscalationZero"
+	folderCfg.Path = filepath.Join(folderRoot, t.Name())
+	newAggregator(t.Context(), folderCfg)
+
+	for _, reason := range []string{fs.WatchEscalationBufferOverflow, fs.WatchEscalationBackendDropped, fs.WatchEscalationAggregatorOverflow} {
+		if !metricSeriesPresent(t, "syncthing_fs_watch_root_escalations_total", map[string]string{"root": folderCfg.Path, "reason": reason}) {
+			t.Errorf("escalation series for reason %q not registered at start", reason)
+		}
 	}
 }

@@ -250,21 +250,36 @@ func (f *folder) Serve(ctx context.Context) error {
 		return err // will get restarted by suture
 	}
 
-	f.btrfsCleanStart = f.consumeBtrfsBaselineMarker(ctx)
-
 	if f.FSWatcherEnabled && f.getHealthErrorAndLoadIgnores() == nil {
 		f.tryArmWatchReplay(ctx)
 		f.startWatch(ctx)
-		// Btrfs replay arms AFTER the watch: the diff covers everything up
-		// to its snapshot, the watch everything after its start, and only
-		// this order makes the two overlap instead of leaving a gap.
-		f.tryArmBtrfsScanReplay(ctx)
+		// When the FSEvents journal replay armed, this boot is covered and
+		// the btrfs probe below can only produce "not available" noise on
+		// non-btrfs systems (observed on every Mac boot); the diff replay
+		// itself early-returns on the closed initialScanFinished anyway.
+		select {
+		case <-f.initialScanFinished:
+		default:
+			// The marker is consumed only when the replay can actually be
+			// attempted: consuming before the gate would eat the arming marker
+			// on a boot where a transient health error (e.g. ignores mid-sync)
+			// skips this block, silently condemning the next boot to a full
+			// scan. Observed on yarlung 2026-10-15: marker written 19:34,
+			// consumed 21:22:44, diff never attempted.
+			f.btrfsCleanStart = f.consumeBtrfsBaselineMarker(ctx)
+			// Btrfs replay arms AFTER the watch: the diff covers everything up
+			// to its snapshot, the watch everything after its start, and only
+			// this order makes the two overlap instead of leaving a gap.
+			f.tryArmBtrfsScanReplay(ctx)
+		}
 		// Periodic runtime pairing (folder_btrfs.go): the shutdown pairing
 		// is a bonus, not the mechanism. btrfsOK is set by the eligibility
 		// probe above (or stays false off btrfs, e.g. on the Mac).
 		if f.btrfsOK {
 			f.btrfsPairTimer.Reset(btrfsPairInterval)
 		}
+	} else if f.FSWatcherEnabled {
+		f.sl.InfoContext(ctx, "Watch and btrfs replay deferred: folder not healthy at start")
 	}
 
 	// If we're configured to not do version cleanup, or we don't have a
@@ -355,6 +370,9 @@ func (f *folder) Serve(ctx context.Context) error {
 
 		case fsEvents := <-f.watchChan:
 			f.sl.DebugContext(ctx, "Scan due to watcher")
+			if isRootWatchBatch(fsEvents.Paths) {
+				f.noteRootWatchBatch(ctx, "serve")
+			}
 			if f.watchPending != nil {
 				// Deferred batches are older: scan them with this one, so
 				// the watermark never passes an unscanned event.
@@ -459,7 +477,20 @@ func (*folder) Jobs(_, _ int) ([]string, []string, int) {
 func (f *folder) Scan(subdirs []string) error {
 	<-f.initialScanFinished
 	return f.doInSync(func(ctx context.Context) error {
-		return f.scanSubdirs(ctx, subdirs)
+		err := f.scanSubdirs(ctx, subdirs)
+		if subdirs == nil {
+			// Full scan requested via REST: same visibility as the
+			// timer path (an aborted one blocks the shutdown pairing).
+			switch {
+			case err == nil:
+				f.sl.InfoContext(ctx, "Completed requested full scan")
+			case errors.Is(err, context.Canceled):
+				// Suppressed: context was canceled (e.g. by shutdown)
+			default:
+				f.sl.WarnContext(ctx, "Requested full scan did not complete", slogutil.Error(err))
+			}
+		}
+		return err
 	})
 }
 
@@ -681,7 +712,7 @@ func (f *folder) serviceQueuedWatch(ctx context.Context) (bool, error) {
 	}
 	select {
 	case fsEvents := <-f.watchChan:
-		root := len(fsEvents.Paths) == 1 && (fsEvents.Paths[0] == "." || fsEvents.Paths[0] == "")
+		root := isRootWatchBatch(fsEvents.Paths)
 		// A full-folder escalation dequeued while a full-tree scan is
 		// already running would walk the whole tree a second time - the
 		// doubling was measured at 10-15 min per scan during the
@@ -689,7 +720,15 @@ func (f *folder) serviceQueuedWatch(ctx context.Context) (bool, error) {
 		// tree; the skipped batch's watermark stays unpersisted, so a later
 		// restart replays anything the running scan walked past before the
 		// batch's events landed.
-		if root && f.fullScanActive.Load() {
+		skip := root && f.fullScanActive.Load()
+		if root {
+			where := "between-chunks-deferred"
+			if skip {
+				where = "between-chunks-skipped"
+			}
+			f.noteRootWatchBatch(ctx, where)
+		}
+		if skip {
 			f.sl.DebugContext(ctx, "Skipping full-folder watch batch during a running full scan")
 			return true, nil
 		}
@@ -800,8 +839,15 @@ func (f *folder) scanSubdirs(ctx context.Context, subDirs []string) (retErr erro
 	// Schedule a pull after scanning, but only if we actually detected any
 	// changes.
 	changes := 0
+	scanStart := time.Now()
+	pending := f.scanningPending
+	fullTree := subDirs == nil || isRootWatchBatch(subDirs)
+	nSubdirs, firstSubdir := len(subDirs), firstOrEmpty(subDirs)
 	defer func() {
 		f.sl.DebugContext(ctx, "Finished scanning", slog.Int("changes", changes))
+		if d := time.Since(scanStart); d >= slowScanLogThreshold {
+			f.sl.InfoContext(ctx, "Slow scan finished", slog.Duration("duration", d), slog.Bool("fullTree", fullTree), slog.Bool("pending", pending), slog.Int("subdirs", nSubdirs), slog.String("firstSubdir", firstSubdir), slog.Int("changes", changes))
+		}
 		if changes > 0 {
 			f.SchedulePull()
 		}
@@ -1601,6 +1647,18 @@ func (f *folder) scanTimerFired(ctx context.Context) error {
 
 	select {
 	case <-f.initialScanFinished:
+		// Non-initial full scan: surface the outcome. An aborted scan
+		// leaves fullScanOK false, which blocks the btrfs shutdown
+		// pairing; without this line the only symptom is a silently
+		// skipped pairing at the next shutdown (yarlung 2026-10-15).
+		switch {
+		case err == nil:
+			f.sl.InfoContext(ctx, "Completed full scan")
+		case errors.Is(err, context.Canceled):
+			// Suppressed: context was canceled (e.g. by user)
+		default:
+			f.sl.WarnContext(ctx, "Full scan did not complete", slogutil.Error(err))
+		}
 	default:
 		switch {
 		case err == nil:
@@ -1990,7 +2048,7 @@ func (f *folder) shutdownWork() {
 // the folder's shared shutdown budget (shutdownWork).
 func (f *folder) drainWatchQueueOnShutdown(ctx context.Context) {
 	paths, maxEventID := f.takeWatchPending()
-	if len(paths) == 1 && (paths[0] == "." || paths[0] == "") {
+	if isRootWatchBatch(paths) {
 		f.sl.Info("Not draining watch queue on shutdown: root rescan pending, watermark left behind")
 		return
 	}
