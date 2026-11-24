@@ -107,6 +107,7 @@ func receiveN(t *testing.T, outChan chan Event, n int) []string {
 func TestWatchBacklogAbsorbsBurstWhileConsumerBlocked(t *testing.T) {
 	logLines := setWatchBacklogLimits(t, 1<<20, 1<<20, 256)
 	fs := newBasicFilesystem(testDirAbs)
+	before := testutil.ToFloat64(metricWatchRootEscalations.WithLabelValues(fs.URI(), WatchEscalationBufferOverflow))
 
 	backendChan := make(chan notify.EventInfo, backendBuffer)
 	outChan := runWatchLoop(t, fs, backendChan)
@@ -124,6 +125,9 @@ func TestWatchBacklogAbsorbsBurstWhileConsumerBlocked(t *testing.T) {
 	got := receiveN(t, outChan, n)
 	if !slices.Equal(got, names) {
 		t.Fatalf("delivered events differ from the burst (first %q, want %q)", got[:3], names[:3])
+	}
+	if d := testutil.ToFloat64(metricWatchRootEscalations.WithLabelValues(fs.URI(), WatchEscalationBufferOverflow)) - before; d != 0 {
+		t.Errorf("buffer_overflow escalations +%v, want 0", d)
 	}
 	drained := false
 	for _, l := range logLines() {
@@ -146,6 +150,7 @@ func TestWatchBacklogAbsorbsBurstWhileConsumerBlocked(t *testing.T) {
 func TestWatchBacklogOverLimitScansSubtrees(t *testing.T) {
 	setWatchBacklogLimits(t, 4, 4, 4)
 	fs := newBasicFilesystem(testDirAbs)
+	rootBefore := testutil.ToFloat64(metricWatchRootEscalations.WithLabelValues(fs.URI(), WatchEscalationBacklogOverflow))
 	coarseBefore := testutil.ToFloat64(metricWatchBacklogCoarsened.WithLabelValues(fs.URI()))
 
 	backendChan := make(chan notify.EventInfo, backendBuffer)
@@ -194,6 +199,9 @@ func TestWatchBacklogOverLimitScansSubtrees(t *testing.T) {
 		if name == "." {
 			t.Fatalf("escalated to the folder root: %q", got)
 		}
+	}
+	if d := testutil.ToFloat64(metricWatchRootEscalations.WithLabelValues(fs.URI(), WatchEscalationBacklogOverflow)) - rootBefore; d != 0 {
+		t.Errorf("backlog_overflow escalations +%v, want 0", d)
 	}
 	if d := testutil.ToFloat64(metricWatchBacklogCoarsened.WithLabelValues(fs.URI())) - coarseBefore; d < 1 {
 		t.Errorf("coarsened episodes +%v, want at least 1", d)

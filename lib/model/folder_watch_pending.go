@@ -211,6 +211,9 @@ func (f *folder) servicePendingWatch(ctx context.Context) error {
 	}
 	f.watchPending = nil
 	paths := p.set.Paths()
+	if p.set.Root() {
+		f.noteRootWatchBatch(ctx, "pending")
+	}
 	f.sl.DebugContext(ctx, "Scanning deferred watch batches", slog.Int("batches", p.batches), slog.Int("paths", len(paths)))
 	metricFolderWatchPendingScans.WithLabelValues(f.folderID).Inc()
 	f.scanningPending = true
