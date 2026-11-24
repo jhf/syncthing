@@ -162,6 +162,7 @@ func newAggregator(ctx context.Context, folderCfg config.FolderConfiguration) *a
 	}
 
 	a.updateConfig(folderCfg)
+	fs.RegisterWatchEscalationMetrics(folderCfg.Path)
 
 	return a
 }
@@ -252,6 +253,12 @@ func (a *aggregator) aggregateEvent(event fs.Event, evTime time.Time) {
 	}
 	if event.Name == "." || a.counts.total() == maxFiles {
 		l.Debugln(a, "Scan entire folder")
+		if event.Name != "." {
+			// A root event is counted where it originates (lib/fs); this
+			// is the aggregator's own escalation: the window overflowed
+			// and factoring could not shrink it.
+			fs.NoteWatchRootEscalation(a.folderCfg.Path, fs.WatchEscalationAggregatorOverflow, "folder.id", a.folderID, "tracked", a.counts.total(), "maxFiles", maxFiles, "trigger", event.Name)
+		}
 		firstModTime := evTime
 		if a.root.childCount() != 0 {
 			event.Type = event.Type.Merge(a.root.eventType())
