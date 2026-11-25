@@ -50,15 +50,17 @@ type folderDB struct {
 // builder aborts at its next chunk boundary, and wait for it to leave before
 // closing the pool.
 func (s *folderDB) Close() error {
-	s.mtimes.close()
-	s.needBuild.mu.Lock()
-	s.needBuild.gen++
-	for s.needBuild.running {
-		s.needBuild.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
+	closeStep(s.baseName, "mtime-flush", s.mtimes.close)
+	closeStep(s.baseName, "need-build-wait", func() {
 		s.needBuild.mu.Lock()
-	}
-	s.needBuild.mu.Unlock()
+		s.needBuild.gen++
+		for s.needBuild.running {
+			s.needBuild.mu.Unlock()
+			time.Sleep(10 * time.Millisecond)
+			s.needBuild.mu.Lock()
+		}
+		s.needBuild.mu.Unlock()
+	})
 	return s.baseDB.Close()
 }
 
