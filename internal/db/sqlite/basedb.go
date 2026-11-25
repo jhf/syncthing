@@ -242,14 +242,26 @@ func fileToUriPath(path string) string {
 }
 
 func (s *baseDB) Close() error {
-	s.updateLock.Lock()
-	s.statementsMut.Lock()
+	backlog, mx, ok := walBacklog(s.path)
+	slog.Info("Closing database", slog.String("db", s.baseName), slog.Bool("wal", ok), slog.Uint64("walBacklogFrames", uint64(backlog)), slog.Uint64("walFrames", uint64(mx)), slog.Int64("walBytes", walSize(s.path)))
+	// A writer still holding updateLock (e.g. a maintenance step) delays
+	// the close: time the wait as its own step.
+	closeStep(s.baseName, "write-lock", func() {
+		s.updateLock.Lock()
+		s.statementsMut.Lock()
+	})
 	defer s.updateLock.Unlock()
 	defer s.statementsMut.Unlock()
-	for _, stmt := range s.statements {
-		stmt.Close()
-	}
-	return wrap(s.sql.Close())
+	closeStep(s.baseName, "statements", func() {
+		for _, stmt := range s.statements {
+			stmt.Close()
+		}
+	})
+	// The last connection's close checkpoints the WAL backlog into the
+	// database (db_close_obs.go).
+	var err error
+	closeStep(s.baseName, "connections", func() { err = s.sql.Close() })
+	return wrap(err)
 }
 
 var tplFuncs = template.FuncMap{
