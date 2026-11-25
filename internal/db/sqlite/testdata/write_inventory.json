@@ -24,8 +24,8 @@
     "reason": "Pull DB-wait heartbeat: read-only scalar PRAGMA data_version on a dedicated observer connection, autocommit, no write and no transaction held across waits. No updateLock needed."
   },
   "basedb.go:*baseDB.Close": {
-    "sha256": "1cf37fe205d9e6f74cb70009f8350d958dd080e261f7884aa6b460853e30be52",
-    "reason": "Acquires baseDB updateLock while closing cached SQL statements and the pool. Folder lifecycle drains mtime and need builders first; no new published writer is permitted during shutdown."
+    "sha256": "965f2e7b890e4773fc0bcb53100673fbc2cfb041759f1b8c26d70af78916b560",
+    "reason": "Acquires baseDB updateLock while closing cached SQL statements and the pool. Folder lifecycle drains mtime and need builders first; no new published writer is permitted during shutdown. Close observability (db_close_obs.go) reads the -shm header before the lock (no SQL) and times each step; lock order and scope unchanged."
   },
   "basedb.go:*baseDB.expandTemplateVars": {
     "sha256": "6a3ce7b099af5af18cb1abc2d39b775893da5b2c2ac538de6d0b2c8c23287b1c",
