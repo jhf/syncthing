@@ -258,8 +258,9 @@ func (s *baseDB) Close() error {
 			stmt.Close()
 		}
 	})
-	// The last connection's close checkpoints the WAL backlog into the
-	// database (db_close_obs.go).
+	// The last connection's close would checkpoint the WAL backlog into the
+	// database (db_close_obs.go); with cgo it does not, and the next open
+	// replays the WAL (db_noclosecheckpoint_cgo.go).
 	var err error
 	closeStep(s.baseName, "connections", func() { err = s.sql.Close() })
 	return wrap(err)
